@@ -17,12 +17,14 @@ Official references used for this guide (verify current pages if UI labels chang
 ```
 GitHub (private) main
   ├─ Cloud Build → tests → Docker → Artifact Registry
-  │                 → Cloud Run Worker Pool (1 instance)
-  │                 → /tmp Parquet → GCS (durable)
+  │                 → Cloud Run Worker Pool (Collector, 1 instance)
+  │                 → Cloud Run Job (Analyzer, */15 via Cloud Scheduler)
+  │                 → Private GCS (immutable Parquet + state)
+  │                 → Public GCS (dashboard JSON)
   └─ Vercel → Next.js dashboard reads public aggregate JSON only
 ```
 
-Collector and dashboard are **decoupled**. Vercel outages do not stop collection.
+Collector and Analyzer are **decoupled**. Collector publishes `collector_status.json`; Analyzer publishes `latest.json`, `analysis_status.json`, and related aggregates.
 
 ## 1) Create GCP project + billing
 
@@ -39,6 +41,7 @@ gcloud config set project lighter-mm-scanner
 ```bash
 gcloud services enable \
   run.googleapis.com \
+  cloudscheduler.googleapis.com \
   cloudbuild.googleapis.com \
   artifactregistry.googleapis.com \
   storage.googleapis.com \
@@ -46,6 +49,8 @@ gcloud services enable \
   iam.googleapis.com \
   cloudresourcemanager.googleapis.com
 ```
+
+Cloud Build also enables `run.googleapis.com` and `cloudscheduler.googleapis.com` on each deploy (idempotent).
 
 ## 3) Artifact Registry
 
@@ -90,13 +95,22 @@ to `GCS_PUBLIC_BUCKET` when that env is set.
 ## 5) Service accounts (least privilege)
 
 ```bash
-# Runtime collector SA
+# Runtime collector + analyzer SA (shared by default)
 gcloud iam service-accounts create lighter-mm-collector \
   --display-name="Lighter MM Collector"
 
 export COLLECTOR_SA="lighter-mm-collector@${PROJECT_ID}.iam.gserviceaccount.com"
 
-# Object admin on private + public buckets (raw + dashboard JSON)
+# Optional dedicated Scheduler invocation SA (recommended; falls back to COLLECTOR_SA)
+gcloud iam service-accounts create lighter-mm-scheduler \
+  --display-name="Lighter MM Scheduler"
+
+export SCHEDULER_SA="lighter-mm-scheduler@${PROJECT_ID}.iam.gserviceaccount.com"
+```
+
+Object admin on private + public buckets (raw + dashboard JSON):
+
+```bash
 gcloud storage buckets add-iam-policy-binding "gs://${PRIVATE_BUCKET}" \
   --member="serviceAccount:${COLLECTOR_SA}" \
   --role=roles/storage.objectAdmin
@@ -104,8 +118,11 @@ gcloud storage buckets add-iam-policy-binding "gs://${PRIVATE_BUCKET}" \
 gcloud storage buckets add-iam-policy-binding "gs://${PUBLIC_BUCKET}" \
   --member="serviceAccount:${COLLECTOR_SA}" \
   --role=roles/storage.objectAdmin
+```
 
-# Cloud Build deploy SA permissions (project-level, build only — not collector runtime)
+Cloud Build deploy SA permissions (project-level, build only — not collector runtime):
+
+```bash
 PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
 BUILD_SA="${PROJECT_NUMBER}@cloudbuild.gserviceaccount.com"
 
@@ -120,7 +137,14 @@ gcloud projects add-iam-policy-binding "$PROJECT_ID" \
 gcloud projects add-iam-policy-binding "$PROJECT_ID" \
   --member="serviceAccount:${BUILD_SA}" \
   --role=roles/artifactregistry.writer
+
+# Cloud Scheduler job create/update (deploy step)
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:${BUILD_SA}" \
+  --role=roles/cloudscheduler.admin
 ```
+
+`roles/run.invoker` on the Analyzer Job for the Scheduler SA is granted automatically by `cloudbuild.yaml` on each deploy.
 
 Do **not** grant Owner/Editor to the collector runtime SA.
 
@@ -142,6 +166,7 @@ Console path (recommended for private repos):
      - `_GCS_BUCKET=<PRIVATE_BUCKET>`
      - `_GCS_PUBLIC_BUCKET=<PUBLIC_BUCKET>`
      - `_SERVICE_ACCOUNT=<COLLECTOR_SA>`
+     - `_SCHEDULER_SERVICE_ACCOUNT=<SCHEDULER_SA>` (optional; defaults to `_SERVICE_ACCOUNT`)
      - `_CPU=1`
      - `_MEMORY=1Gi`
      - `_INSTANCES=1`
@@ -169,15 +194,34 @@ gcloud run worker-pools deploy lighter-mm-collector \
   --set-env-vars="ENVIRONMENT=cloud,GCS_BUCKET=${PRIVATE_BUCKET},GCS_PUBLIC_BUCKET=${PUBLIC_BUCKET},GCP_PROJECT_ID=${PROJECT_ID},GCP_REGION=${REGION},RUN_TARGET_HOURS=72,STRUCTURED_LOGGING=true,LIGHTER_MM_NO_DASHBOARD=1"
 ```
 
-## 8) Verify collector
+## 8) Verify collector and analyzer
 
 ```bash
-# Logs
+# Collector logs
 gcloud logging read 'resource.type="cloud_run_worker_pool" OR textPayload:"collector_started"' --limit=50
 
-# Or check state object after ~1–2 minutes
+# Manual analyzer execution
+gcloud run jobs execute lighter-mm-analyzer \
+  --region="$REGION" \
+  --wait
+
+gcloud run jobs executions list \
+  --job=lighter-mm-analyzer \
+  --region="$REGION" \
+  --limit=3
+
+# Scheduler manual trigger
+gcloud scheduler jobs run lighter-mm-analyzer-schedule \
+  --location="$REGION"
+
+gcloud run jobs executions list \
+  --job=lighter-mm-analyzer \
+  --region="$REGION" \
+  --limit=3
+
+# State / public JSON after ~1–2 minutes
 gcloud storage cat "gs://${PRIVATE_BUCKET}/lighter-mm/state/active_run.json"
-gcloud storage ls "gs://${PRIVATE_BUCKET}/lighter-mm/runs/**"
+gcloud storage cat "gs://${PUBLIC_BUCKET}/lighter-mm/public/analysis_status.json"
 ```
 
 Expected events: `collector_started`, `market_discovered`, `ws_connected`, `parquet_flushed`, `gcs_uploaded`.
@@ -242,5 +286,49 @@ Cloud Run Worker Pool @ 1 vCPU / 1Gi, always-on, is the main compute cost. Keep 
 |---------|--------|
 | No GCS objects | IAM on collector SA; `GCS_BUCKET` env |
 | Dual writers | `_INSTANCES` must be `1`; inspect `leader.lock.json` |
-| Dashboard empty | public URL + `latest.json` publish; CORS not required for simple GET from Next server |
+| Dashboard empty | public URL + analyzer publishes `latest.json`; CORS not required for simple GET from Next server |
 | Coverage gaps | expected during deploys; shown as STALE/OFFLINE + deployment_gaps |
+| **Dashboard Last Analysis stops moving** | Scheduler + Analyzer job (see below) |
+
+### Dashboard Last Analysis stops moving
+
+Check Scheduler configuration:
+
+```bash
+gcloud scheduler jobs describe lighter-mm-analyzer-schedule \
+  --location=asia-northeast1
+```
+
+Confirm the HTTP target URI uses the Cloud Run Jobs **v2** run endpoint:
+
+`https://run.googleapis.com/v2/projects/<PROJECT_ID>/locations/<REGION>/jobs/lighter-mm-analyzer:run`
+
+Trigger manually:
+
+```bash
+gcloud scheduler jobs run lighter-mm-analyzer-schedule \
+  --location=asia-northeast1
+```
+
+Check execution:
+
+```bash
+gcloud run jobs executions list \
+  --job=lighter-mm-analyzer \
+  --region=asia-northeast1 \
+  --limit=3
+```
+
+Check analyzer logs:
+
+```bash
+gcloud logging read \
+  'resource.type="cloud_run_job"' \
+  --limit=100
+```
+
+Check public status:
+
+```bash
+gcloud storage cat "gs://${PUBLIC_BUCKET}/lighter-mm/public/analysis_status.json"
+```
