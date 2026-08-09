@@ -45,8 +45,8 @@ def discover_parquet_files(root: Path) -> list[Path]:
     return sorted(files)
 
 
-def validate_parquet_file(path: Path) -> tuple[bool, str | None]:
-    """Validate Parquet metadata without scanning all rows."""
+def validate_parquet_file(path: Path, *, data_probe: bool = True) -> tuple[bool, str | None]:
+    """Validate Parquet footer/metadata and optionally probe the first row group."""
     try:
         if not path.exists():
             return False, "file does not exist"
@@ -55,9 +55,46 @@ def validate_parquet_file(path: Path) -> tuple[bool, str | None]:
         pf = pq.ParquetFile(path)
         _ = pf.metadata
         _ = pf.schema_arrow
+        if not data_probe:
+            return True, None
+        if pf.metadata.num_row_groups > 0:
+            pf.read_row_group(0)
+        elif pf.metadata.num_rows > 0:
+            pf.read(columns=[pf.schema_arrow.names[0]])
         return True, None
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)
+
+
+def parquet_max_timestamp_ms(path: Path) -> int | None:
+    """Return max timestamp_ms using row-group statistics, with a light fallback."""
+    try:
+        pf = pq.ParquetFile(path)
+        schema = pf.schema_arrow
+        if "timestamp_ms" not in schema.names:
+            return None
+        col_idx = schema.get_field_index("timestamp_ms")
+        max_ts: int | None = None
+        for rg_idx in range(pf.metadata.num_row_groups):
+            rg = pf.metadata.row_group(rg_idx)
+            if col_idx >= rg.num_columns:
+                continue
+            stats = rg.column(col_idx).statistics
+            if stats is not None and stats.has_max:
+                candidate = int(stats.max)
+                max_ts = candidate if max_ts is None else max(max_ts, candidate)
+        if max_ts is not None:
+            return max_ts
+        if pf.metadata.num_row_groups == 0:
+            return None
+        table = pf.read_row_group(0, columns=["timestamp_ms"])
+        if table.num_rows == 0:
+            return None
+        values = [int(v) for v in table.column("timestamp_ms").to_pylist() if v is not None]
+        return max(values) if values else None
+    except Exception as exc:  # noqa: BLE001
+        log.debug("parquet_max_timestamp_ms failed path=%s error=%s", path, exc)
+        return None
 
 
 def partition_parquet_files(

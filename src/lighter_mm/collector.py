@@ -516,6 +516,20 @@ class CollectorApp:
         )
         flush_at = now_iso()
         self.state.last_successful_flush = flush_at
+        if uploaded:
+            uploaded_max = max(
+                (
+                    item.max_event_timestamp_ms
+                    for item in uploaded
+                    if item.max_event_timestamp_ms is not None
+                ),
+                default=None,
+            )
+            if uploaded_max is not None:
+                prev = self.state.last_durable_event_ms
+                self.state.last_durable_event_ms = (
+                    max(prev, uploaded_max) if prev is not None else uploaded_max
+                )
         self._consecutive_sync_failures = 0
         self._last_sync_error = None
         self._write_state()

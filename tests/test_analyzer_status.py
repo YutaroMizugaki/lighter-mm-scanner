@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,13 +24,15 @@ def _base_settings(tmp_path: Path) -> Settings:
 
 def _seed_run(be: LocalStorageBackend, run_id: str = "run1") -> None:
     be.upload_json("lighter-mm/state/active_run.json", {"run_id": run_id, "status": "running"})
+    now = now_iso()
     be.upload_json(
         f"lighter-mm/runs/{run_id}/state/state.json",
         RunState(
             run_id=run_id,
-            started_at=now_iso(),
+            started_at=now,
             status="running",
-            last_successful_flush=now_iso(),
+            last_successful_flush=now,
+            last_durable_event_ms=int(datetime.now(UTC).timestamp() * 1000) - 60_000,
         ).to_public_dict(),
     )
 

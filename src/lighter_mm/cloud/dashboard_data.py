@@ -8,6 +8,7 @@ from typing import Any
 from lighter_mm.analytics.aggregation import AnalysisSources, analyze_range, analyze_window, scored_to_records
 from lighter_mm.cloud.health import (
     _ms_to_iso,
+    _ws_connected,
     build_collector_status_payload,
     build_data_diagnostics,
     collector_status_label,
@@ -110,13 +111,22 @@ def build_dashboard_payload(
         )
 
     if analysis_error:
-        status = "ERROR"
+        analysis_status = "ERROR"
     elif parquet_health.get("status") == "degraded":
-        status = "DEGRADED"
+        analysis_status = "DEGRADED"
     elif not scored:
-        status = "DEGRADED"
+        analysis_status = "DEGRADED"
     else:
-        status = "OK"
+        analysis_status = "OK"
+
+    collector_status = "UNKNOWN"
+    if state is not None:
+        collector_status = collector_status_label(
+            state,
+            ok_minutes=settings.status_ok_minutes,
+            warn_minutes=settings.status_warn_minutes,
+            startup_grace_minutes=settings.collector_startup_grace_minutes,
+        )
 
     obs_hours = None
     window_hours = result.get("hours") or hours or 72.0
@@ -145,15 +155,17 @@ def build_dashboard_payload(
     last_book_row = _ms_to_iso(last_book_row_at_ms)
     latest_parquet_event_ms = result.get("latest_book_event_ms")
     last_update = latest_data_timestamp_iso(
-        last_successful_flush=state.last_successful_flush if state else None,
         last_book_sample_at_ms=last_book_sample_at_ms,
         last_trade_at_ms=state.last_trade_timestamp_ms if state else None,
         latest_parquet_event_ms=latest_parquet_event_ms,
+        last_durable_event_ms=state.last_durable_event_ms if state else None,
     )
 
     overview = {
         "title": "Lighter MM Scanner",
-        "status": status,
+        "status": analysis_status,
+        "collector_status": collector_status,
+        "analysis_status": analysis_status,
         "run_id": state.run_id if state else None,
         "started_at": state.started_at if state else None,
         "observation_hours": obs_hours,
@@ -164,7 +176,9 @@ def build_dashboard_payload(
         "candidates": len(candidates),
         "coverage_pct": coverage,
         "last_update": last_update,
+        "last_data_at": last_update,
         "latest_market_event_at": _ms_to_iso(latest_parquet_event_ms),
+        "last_successful_sync": state.last_successful_flush if state else None,
         "last_successful_flush": state.last_successful_flush if state else None,
         "last_trade_at": last_trade_at,
         "last_book_sample_at": last_usable_book,
@@ -182,13 +196,11 @@ def build_dashboard_payload(
         "generated_at": generated_at,
         "read_only": True,
         "diagnostics": build_data_diagnostics(
-            collector_status=status,
-            last_event_at=last_usable_book or last_book_row,
+            collector_status=collector_status,
+            last_event_at=last_update,
             last_flush_at=state.last_successful_flush if state else None,
-            connected=bool(ws_runtime and int(ws_runtime.get("connected_shards") or 0) > 0)
-            if ws_runtime
-            else None,
-            analysis_status=status if analysis_error else ("DEGRADED" if status == "DEGRADED" else "OK"),
+            connected=_ws_connected(ws_runtime),
+            analysis_status=analysis_status,
             analysis_completed_at=generated_at if not analysis_error else None,
             valid_parquet_files=int(parquet_health.get("valid_parquet_files") or 0),
             invalid_parquet_files=int(parquet_health.get("corrupt_parquet_files") or 0),

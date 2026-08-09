@@ -5,9 +5,25 @@ set -euo pipefail
 
 fail() {
   echo "PREFLIGHT FAILED: $*" >&2
+  exit 1
+}
+
+fail_api_not_enabled() {
+  local api="$1"
+  local label="$2"
+  echo "PREFLIGHT FAILED:" >&2
+  echo "${label} (${api}) is not enabled." >&2
   echo "" >&2
-  echo "初回 GCP セットアップでは、管理者権限で scripts/bootstrap_gcp.sh を実行してください。" >&2
-  echo "For first-time project setup, run scripts/bootstrap_gcp.sh with admin privileges." >&2
+  echo "Run once as a project administrator:" >&2
+  echo "" >&2
+  echo "gcloud services enable ${api} \\" >&2
+  echo "  --project=\"\${PROJECT_ID}\"" >&2
+  echo "" >&2
+  echo "Or enable all required APIs:" >&2
+  echo "" >&2
+  echo "bash scripts/bootstrap_gcp.sh \"\${PROJECT_ID}\"" >&2
+  echo "" >&2
+  echo "After the API is enabled, retry the Cloud Build." >&2
   exit 1
 }
 
@@ -78,7 +94,7 @@ check_api_enabled() {
       fi
       ;;
   esac
-  fail "${label} (${api}) is not enabled — run scripts/bootstrap_gcp.sh as admin"
+  fail_api_not_enabled "${api}" "${label}"
 }
 
 echo "Checking required APIs (read-only)..."

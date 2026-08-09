@@ -38,7 +38,14 @@ def test_bootstrap_script_exists() -> None:
     assert bootstrap.exists()
     assert preflight.exists()
     assert "gcloud services enable" in bootstrap.read_text(encoding="utf-8")
-    assert "gcloud services enable" not in preflight.read_text(encoding="utf-8")
+    preflight_text = preflight.read_text(encoding="utf-8")
+    assert "fail_api_not_enabled" in preflight_text
+    # Preflight may echo enable guidance, but must not execute services enable itself.
+    assert not any(
+        line.strip().startswith("gcloud services enable")
+        for line in preflight_text.splitlines()
+        if not line.lstrip().startswith("echo")
+    )
 
 
 def test_cloudbuild_automap_substitutions_enabled() -> None:
@@ -63,3 +70,11 @@ def test_preflight_script_validates_required_env_vars() -> None:
         "_SERVICE_ACCOUNT",
     ):
         assert f': "${{{var}:?' in preflight, f"missing validation for {var}"
+
+
+def test_preflight_api_failure_shows_enable_commands() -> None:
+    preflight = (ROOT / "scripts" / "cloudbuild_preflight.sh").read_text(encoding="utf-8")
+    assert "fail_api_not_enabled" in preflight
+    assert "gcloud services enable" in preflight
+    assert "bootstrap_gcp.sh" in preflight
+    assert "After the API is enabled, retry the Cloud Build." in preflight

@@ -47,21 +47,17 @@ def test_local_backend_upload_json_is_atomic(tmp_path: Path) -> None:
 
 
 def test_latest_data_timestamp_prefers_event_over_flush() -> None:
-    flush = datetime.now(UTC) - timedelta(hours=1)
-    event_ms = int(datetime.now(UTC).timestamp() * 1000)
-    iso = latest_data_timestamp_iso(
-        last_successful_flush=flush.isoformat(),
-        latest_parquet_event_ms=event_ms,
-    )
+    event_ms = int(datetime.now(UTC).timestamp() * 1000) - 3_600_000
+    iso = latest_data_timestamp_iso(last_durable_event_ms=event_ms)
     assert iso is not None
     parsed = datetime.fromisoformat(iso)
-    assert parsed >= flush
+    assert parsed < datetime.now(UTC) - timedelta(minutes=30)
 
 
-def test_latest_data_timestamp_from_flush_only() -> None:
-    flush = datetime(2026, 8, 9, 14, 15, 0, tzinfo=UTC)
-    iso = latest_data_timestamp_iso(last_successful_flush=flush.isoformat())
-    assert iso == flush.isoformat()
+def test_latest_data_timestamp_from_event_only() -> None:
+    event = datetime(2026, 8, 9, 14, 0, 0, tzinfo=UTC)
+    iso = latest_data_timestamp_iso(last_durable_event_ms=int(event.timestamp() * 1000))
+    assert iso == event.isoformat()
 
 
 def test_upload_skips_corrupt_parquet_before_remote(tmp_path: Path) -> None:

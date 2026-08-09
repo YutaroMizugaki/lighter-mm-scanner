@@ -109,11 +109,12 @@ class _RotatingWriter:
             )
             if not finalized:
                 log.error(
-                    "parquet close lost %s un-finalized rows dataset=%s path=%s",
+                    "parquet close left %s rows in retryable tmp dataset=%s path=%s",
                     rows_in_writer,
                     self.dataset,
                     self._current_path,
                 )
+                return
         self._current_path = None
         self._tmp_path = None
         self._current_part = None
@@ -140,16 +141,12 @@ class _RotatingWriter:
             os.replace(tmp_path, final_path)
         except OSError as exc:
             log.error(
-                "parquet atomic rename failed tmp=%s final=%s error=%s rows_lost=%s",
+                "parquet atomic rename failed tmp=%s final=%s error=%s rows_pending=%s",
                 tmp_path,
                 final_path,
                 exc,
                 rows_in_writer,
             )
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
             return False
         self.rows_written += rows_in_writer
         self._closed_paths.append(final_path)

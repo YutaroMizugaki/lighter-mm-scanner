@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 from lighter_mm.analytics.parquet_source import AnalysisSources
 from lighter_mm.config import Settings
+from lighter_mm.storage.parquet_validation import discover_parquet_files, parquet_max_timestamp_ms
 from lighter_mm.storage.state import RunState
 
 
@@ -33,21 +34,46 @@ def _analysis_sources_for_run(settings: Settings, run_id: str) -> AnalysisSource
     )
 
 
-def _durable_watermark_ms(state: RunState) -> int | None:
-    return _iso_to_ms(state.last_successful_flush)
+def _infer_event_watermark_from_sources(sources: AnalysisSources) -> int | None:
+    """Infer durable event watermark from uploaded Parquet metadata (legacy runs)."""
+    max_ts: int | None = None
+    for root in (sources.books, sources.trades, sources.markouts):
+        if not root.is_dir():
+            continue
+        for path in discover_parquet_files(root):
+            ts = parquet_max_timestamp_ms(path)
+            if ts is None:
+                continue
+            max_ts = ts if max_ts is None else max(max_ts, ts)
+    return max_ts
+
+
+def _durable_watermark_ms(
+    state: RunState,
+    *,
+    sources: AnalysisSources | None = None,
+) -> int | None:
+    """Return the latest durable market-event timestamp, never sync wall-clock time."""
+    if state.last_durable_event_ms is not None:
+        return int(state.last_durable_event_ms)
+    if sources is not None:
+        return _infer_event_watermark_from_sources(sources)
+    return None
 
 
 def _analysis_window_ms(
     state: RunState,
     *,
     execution_start_ms: int,
+    sources: AnalysisSources | None = None,
 ) -> tuple[int, int, int, int]:
     """Return (start_ms, end_ms, analysis_end_ms, durable_watermark_ms)."""
     start_ms = _iso_to_ms(state.started_at) or execution_start_ms
-    durable_ms = _durable_watermark_ms(state)
+    durable_ms = _durable_watermark_ms(state, sources=sources)
     if durable_ms is None:
         raise RuntimeError(
-            "missing last_successful_flush; refusing to analyze beyond durable GCS data"
+            "missing last_durable_event_ms and unable to infer event watermark from "
+            "durable Parquet; refusing to analyze beyond known market data"
         )
 
     if state.status == "completed" and state.ended_at:

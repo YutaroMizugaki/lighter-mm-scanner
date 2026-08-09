@@ -81,17 +81,19 @@ def _ms_to_iso(ms: int | None) -> str | None:
 
 def latest_data_timestamp_iso(
     *,
-    last_successful_flush: str | None = None,
     last_book_sample_at_ms: int | None = None,
     last_trade_at_ms: int | None = None,
     latest_parquet_event_ms: int | None = None,
+    last_durable_event_ms: int | None = None,
 ) -> str | None:
-    """Latest successfully collected data timestamp (not analysis publish time)."""
+    """Latest successfully collected market-event timestamp (never sync wall-clock)."""
     candidates: list[datetime] = []
-    flush_dt = _parse_iso(last_successful_flush)
-    if flush_dt is not None:
-        candidates.append(flush_dt)
-    for ms in (last_book_sample_at_ms, last_trade_at_ms, latest_parquet_event_ms):
+    for ms in (
+        last_durable_event_ms,
+        last_book_sample_at_ms,
+        last_trade_at_ms,
+        latest_parquet_event_ms,
+    ):
         if ms is None:
             continue
         try:
@@ -140,6 +142,16 @@ def build_data_diagnostics(
     return out
 
 
+def _ws_connected(ws_runtime: dict[str, object] | None) -> bool | None:
+    if ws_runtime is None:
+        return None
+    connected = int(ws_runtime.get("connected_shards") or 0)
+    total = int(ws_runtime.get("total_shards") or 0)
+    if total <= 0:
+        return False
+    return connected > 0
+
+
 def _ws_degraded(ws_runtime: dict[str, object] | None) -> list[str]:
     warnings: list[str] = []
     if not ws_runtime:
@@ -148,9 +160,13 @@ def _ws_degraded(ws_runtime: dict[str, object] | None) -> list[str]:
     total = int(ws_runtime.get("total_shards") or 0)
     planned = int(ws_runtime.get("planned_channels") or ws_runtime.get("subscribed_channels") or 0)
     acked = int(ws_runtime.get("acked_channels") or ws_runtime.get("subscribed_channels") or 0)
-    if total > 0 and connected < total:
+    if total == 0:
+        warnings.append("No WebSocket shards planned.")
+    elif connected < total:
         warnings.append(f"WebSocket degraded: {connected}/{total} shards connected.")
-    if planned > 0 and acked < planned:
+    if planned == 0:
+        warnings.append("No WebSocket subscriptions planned.")
+    elif acked < planned:
         warnings.append(f"Subscription ACK incomplete: {acked}/{planned} channels acked.")
     return warnings
 
@@ -166,6 +182,8 @@ def _book_health_warnings(
     warnings: list[str] = []
     started_age = _age_minutes(started_at)
     in_grace = started_age is not None and started_age <= startup_grace_minutes
+    stale_threshold_s = max(settings.book_sample_interval_seconds * 3, 30)
+    now_ms = datetime.now(UTC).timestamp() * 1000
 
     if not in_grace and last_book_row_at_ms is not None and last_book_sample_at_ms is None:
         warnings.append(
@@ -173,20 +191,22 @@ def _book_health_warnings(
         )
 
     if last_book_sample_at_ms is not None:
-        age_s = (datetime.now(UTC).timestamp() * 1000 - last_book_sample_at_ms) / 1000.0
-        stale_threshold_s = max(settings.book_sample_interval_seconds * 3, 30)
+        age_s = (now_ms - last_book_sample_at_ms) / 1000.0
         if age_s > stale_threshold_s:
             warnings.append(
                 f"Usable book samples stale: last sample {age_s:.0f}s ago "
                 f"(threshold {stale_threshold_s:.0f}s)."
             )
-    elif (
-        not in_grace
-        and last_book_row_at_ms is not None
-        and (datetime.now(UTC).timestamp() * 1000 - last_book_row_at_ms) / 1000.0
-        > max(settings.book_sample_interval_seconds * 3, 30)
-    ):
-        warnings.append("Book rows are fresh but usable samples are missing or stale.")
+    elif not in_grace and last_book_row_at_ms is not None:
+        row_age_s = (now_ms - last_book_row_at_ms) / 1000.0
+        if row_age_s > stale_threshold_s:
+            warnings.append(
+                "Book rows are stale and usable samples are missing or stale."
+            )
+        elif last_book_sample_at_ms is None:
+            warnings.append(
+                "No fresh book rows or usable book samples have been observed."
+            )
 
     return warnings
 
@@ -235,12 +255,12 @@ def build_collector_status_payload(
         last_sync_attempt_at=last_sync_attempt_at,
         consecutive_sync_failures=consecutive_sync_failures,
     )
-    last_event_at = _ms_to_iso(last_book_sample_at_ms) or _ms_to_iso(last_book_row_at_ms)
-    ws_connected = None
-    if ws_runtime is not None:
-        connected = int(ws_runtime.get("connected_shards") or 0)
-        total = int(ws_runtime.get("total_shards") or 0)
-        ws_connected = connected > 0 if total > 0 else connected == 0
+    last_event_at = latest_data_timestamp_iso(
+        last_book_sample_at_ms=last_book_sample_at_ms,
+        last_trade_at_ms=state.last_trade_timestamp_ms,
+        last_durable_event_ms=state.last_durable_event_ms,
+    )
+    ws_connected = _ws_connected(ws_runtime)
     return {
         "run_id": state.run_id,
         "status": status,
@@ -248,6 +268,7 @@ def build_collector_status_payload(
         "ended_at": state.ended_at,
         "generated_at": datetime.now(UTC).isoformat(),
         "last_successful_sync": state.last_successful_flush,
+        "last_durable_event_at": _ms_to_iso(state.last_durable_event_ms),
         "last_sync_attempt_at": last_sync_attempt_at,
         "last_sync_error": last_sync_error,
         "consecutive_sync_failures": consecutive_sync_failures,
@@ -259,6 +280,11 @@ def build_collector_status_payload(
         "last_book_row_at": _ms_to_iso(last_book_row_at_ms),
         "trades_without_reference_mid": trades_without_reference_mid,
         "ws": ws_runtime,
+        "sync": {
+            "last_sync_attempt_at": last_sync_attempt_at,
+            "last_sync_error": last_sync_error,
+            "consecutive_sync_failures": consecutive_sync_failures,
+        },
         "health_warnings": warnings,
         "git_sha": state.git_sha or settings.git_sha,
         "collector_version": state.collector_version or settings.collector_version,
