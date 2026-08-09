@@ -1,0 +1,52 @@
+[project]
+name = "lighter-mm"
+version = "0.1.0"
+description = "Read-only Lighter perpetual MM opportunity research collector and analytics"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "httpx>=0.28.0",
+  "websockets>=14.0",
+  "pydantic>=2.10.0",
+  "pydantic-settings>=2.7.0",
+  "polars>=1.21.0",
+  "pyarrow>=19.0.0",
+  "duckdb>=1.2.0",
+  "typer>=0.15.0",
+  "rich>=13.9.0",
+  "google-cloud-storage>=2.19.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.25.0",
+  "ruff>=0.9.0",
+]
+
+[project.scripts]
+lighter-mm = "lighter_mm.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lighter_mm"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src/lighter_mm" = "lighter_mm"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["B008", "E501"]  # typer defaults; long report strings OK

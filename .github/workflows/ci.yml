@@ -1,0 +1,32 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.12.3"
+      - name: Sync
+        run: uv sync --all-extras
+      - name: Ruff
+        run: uv run ruff check src tests
+      - name: Pytest
+        run: uv run pytest -q
+      - name: Dashboard typecheck (optional)
+        working-directory: dashboard
+        run: |
+          if [ -f package.json ]; then
+            npm ci
+            npm run build
+          fi
+
+  # NOTE: Long-running collector is NOT executed on GitHub Actions.
+  # Production deploy of the collector is Cloud Build → Cloud Run Worker Pool on main.
