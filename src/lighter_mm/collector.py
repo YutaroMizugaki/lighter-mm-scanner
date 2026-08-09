@@ -1,4 +1,4 @@
-"""Main collect loop: discovery → WS → samples → markouts → storage."""
+"""Main collect loop: discovery → WS → samples → markouts → durable storage."""
 
 from __future__ import annotations
 
@@ -11,16 +11,21 @@ from collections import defaultdict, deque
 from datetime import UTC, datetime
 from typing import Any
 
-from lighter_mm.config import Settings, ensure_dirs
+from lighter_mm.cloud.dashboard_data import build_dashboard_payload
+from lighter_mm.cloud.sync import DurableSync
+from lighter_mm.config import Settings, build_storage_backend, ensure_dirs
 from lighter_mm.dashboard import LiveDashboard
 from lighter_mm.engine.markout import MarkoutEngine
 from lighter_mm.engine.mid_history import MidHistory
 from lighter_mm.engine.trade_activity import TradeActivityTracker
+from lighter_mm.logging_setup import log_event
 from lighter_mm.models import MarketStatsSnapshot, RuntimeCounters, TradeEvent
 from lighter_mm.orderbook.book import LocalOrderBook
 from lighter_mm.rest.markets import MarketDiscovery
+from lighter_mm.storage.lock import LeaderLock
 from lighter_mm.storage.parquet_store import ParquetStore
 from lighter_mm.storage.sqlite_meta import SqliteMeta
+from lighter_mm.storage.state import RunState, now_iso
 from lighter_mm.util import utc_ms
 from lighter_mm.ws.manager import WsManager
 
@@ -28,17 +33,31 @@ log = logging.getLogger(__name__)
 
 
 class CollectorApp:
-    def __init__(self, settings: Settings, hours: float | None = None, resume: bool = True) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        hours: float | None = None,
+        resume: bool = True,
+    ) -> None:
         self.settings = settings
-        self.hours = hours
+        # CLI --hours overrides RUN_TARGET_HOURS; None from CLI means use settings
+        if hours is None:
+            self.hours = settings.hours_or_none()
+        else:
+            self.hours = hours
         self.resume = resume
+        self.backend = build_storage_backend(settings)
+        # Point hot data at backend local dir (tmp in cloud, data/ locally)
+        settings.data_dir = self.backend.local_data_dir()
         ensure_dirs(settings)
+
         self.meta = SqliteMeta(settings.data_dir / "metadata.db")
         self.store = ParquetStore(
             settings.data_dir,
             depth_levels=settings.depth_bps_levels,
             flush_rows=settings.parquet_flush_rows,
             flush_seconds=settings.parquet_flush_seconds,
+            rotation_minutes=settings.parquet_rotation_minutes,
         )
         self.discovery = MarketDiscovery(settings)
         self.dashboard = LiveDashboard()
@@ -50,18 +69,67 @@ class CollectorApp:
         self._sample_counts: dict[int, int] = defaultdict(int)
         self._stop = asyncio.Event()
         self._ws: WsManager | None = None
-        self.run_id = self._resolve_run_id()
+        self._completed = False
+        self._deployment_gaps = 0
+        self._last_trade_ts: int | None = None
+        self.holder_id = uuid.uuid4().hex
+
+        self.run_id, self.state, resumed = self._resolve_run()
+        self.sync = DurableSync(
+            self.backend, run_id=self.run_id, gcs_prefix=settings.gcs_prefix
+        )
+        self.lock = LeaderLock(
+            self.backend, self.sync.lock_key(), holder_id=self.holder_id, lease_seconds=120
+        )
         self.markout = MarkoutEngine(
             horizons=settings.markout_horizons_seconds,
             on_markout=self._on_markout_row,
         )
+        self._resumed = resumed
+        if resumed:
+            self._deployment_gaps = int(self.state.deployment_gaps) + 1
+            self.state.deployment_gaps = self._deployment_gaps
+            log_event(log, "collector_resumed", f"resumed run {self.run_id}", run_id=self.run_id)
 
-    def _resolve_run_id(self) -> str:
+    def _resolve_run(self) -> tuple[str, RunState, bool]:
+        active = None
         if self.resume:
-            existing = self.meta.get_active_run()
-            if existing and existing.get("status") == "running":
-                return str(existing["run_id"])
-        return uuid.uuid4().hex[:12]
+            active = self.backend.download_json(
+                f"{self.settings.gcs_prefix.rstrip('/')}/state/active_run.json"
+            )
+            if active and active.get("status") == "running" and active.get("run_id"):
+                run_id = str(active["run_id"])
+                state_key = f"{self.settings.gcs_prefix.rstrip('/')}/runs/{run_id}/state/state.json"
+                saved = self.backend.download_json(state_key)
+                if saved:
+                    state = RunState.model_validate(saved)
+                    state.status = "running"
+                    state.git_sha = self.settings.git_sha or state.git_sha
+                    return run_id, state, True
+                # Fall back to local sqlite
+                existing = self.meta.get_active_run()
+                if existing and existing.get("run_id") == run_id:
+                    state = RunState(
+                        run_id=run_id,
+                        started_at=existing.get("started_at") or now_iso(),
+                        status="running",
+                        observation_target_hours=self.hours,
+                        collector_version=self.settings.collector_version,
+                        git_sha=self.settings.git_sha,
+                    )
+                    return run_id, state, True
+
+        run_id = uuid.uuid4().hex[:12]
+        state = RunState(
+            run_id=run_id,
+            started_at=now_iso(),
+            status="running",
+            observation_target_hours=self.hours,
+            collector_version=self.settings.collector_version,
+            git_sha=self.settings.git_sha,
+            holder_id=self.holder_id,
+        )
+        return run_id, state, False
 
     async def run(self) -> None:
         loop = asyncio.get_running_loop()
@@ -71,12 +139,31 @@ class CollectorApp:
             except NotImplementedError:
                 signal.signal(sig, lambda *_: asyncio.create_task(self._request_stop()))
 
+        if not self.lock.acquire(self.run_id, git_sha=self.settings.git_sha):
+            log.error("another collector holds the leader lock; exiting")
+            return
+
         self.meta.start_run(self.run_id, self.hours)
         markets = await self.discovery.fetch_perp_markets(active_only=True)
         self.discovery.markets = {m.market_id: m for m in markets}
         self.meta.upsert_markets(markets)
         self.counters.markets_total = len(markets)
-        log.info("discovered %d active perp markets", len(markets))
+        self.state.markets = [m.market_id for m in markets]
+        log_event(
+            log,
+            "market_discovered",
+            f"discovered {len(markets)} active perp markets",
+            run_id=self.run_id,
+            detail=str(len(markets)),
+        )
+        log_event(
+            log,
+            "collector_started",
+            f"collector started env={self.settings.environment}",
+            run_id=self.run_id,
+            git_sha=self.settings.git_sha,
+            collector_version=self.settings.collector_version,
+        )
 
         self._ws = WsManager(
             settings=self.settings,
@@ -86,21 +173,27 @@ class CollectorApp:
             on_stats=self._on_stats,
         )
         await self._ws.start()
+        log_event(log, "ws_connected", "websocket manager started", run_id=self.run_id)
+
         no_dash = os.environ.get("LIGHTER_MM_NO_DASHBOARD", "").lower() in {"1", "true", "yes"}
         self._dashboard_enabled = (not no_dash) and self.dashboard.console.is_terminal
         if self._dashboard_enabled:
             self.dashboard.start()
         else:
-            log.info("non-TTY detected; Rich live dashboard disabled")
+            log.info("non-TTY / NO_DASHBOARD; Rich live dashboard disabled")
 
         started = asyncio.get_running_loop().time()
         deadline = None if self.hours is None else started + self.hours * 3600.0
+        await self._persist_state(flush_upload=True)
 
         try:
             tasks = [
                 self._sample_loop(),
                 self._markout_loop(),
                 self._flush_loop(),
+                self._durable_sync_loop(),
+                self._analysis_loop(),
+                self._lock_renew_loop(),
                 self._market_refresh_loop(),
                 self._watch_deadline(deadline),
             ]
@@ -113,7 +206,7 @@ class CollectorApp:
             await self.shutdown()
 
     async def _request_stop(self) -> None:
-        log.info("shutdown signal received")
+        log_event(log, "collector_stopping", "shutdown signal received", run_id=self.run_id)
         self._stop.set()
 
     async def _watch_deadline(self, deadline: float | None) -> None:
@@ -122,7 +215,8 @@ class CollectorApp:
             return
         while not self._stop.is_set():
             if asyncio.get_running_loop().time() >= deadline:
-                log.info("collection hours reached; stopping")
+                log.info("collection hours reached; finalizing")
+                self._completed = True
                 self._stop.set()
                 return
             await asyncio.sleep(1.0)
@@ -131,22 +225,194 @@ class CollectorApp:
         self._stop.set()
         if self._ws:
             await self._ws.stop()
-        self.store.close()
-        self.meta.set_kv(
-            "counters",
-            self.counters.model_dump_json(),
+            log_event(log, "ws_disconnected", "websocket stopped", run_id=self.run_id)
+        try:
+            # Final analysis + upload (rotates/closes parts internally)
+            await asyncio.to_thread(self._sync_and_analyze, final=True)
+            self.store.close()
+            # Keep status=running on SIGTERM/deploy so the next revision can resume.
+            # Only mark completed when the observation target is reached.
+            status = "completed" if self._completed else "running"
+            self.state.status = status
+            self._write_state()
+            self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+            self.backend.upload_json(
+                self.sync.active_pointer_key(),
+                {
+                    "run_id": self.run_id,
+                    "status": status,
+                    "updated_at": now_iso(),
+                    "git_sha": self.settings.git_sha,
+                    "shutdown_reason": "completed" if self._completed else "preempted_or_signal",
+                },
+            )
+            self.meta.end_run(self.run_id, status="completed" if self._completed else "stopped")
+        except Exception as exc:  # noqa: BLE001
+            log.exception("shutdown flush failed: %s", exc)
+            self.state.status = "error"
+            try:
+                self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            self.lock.release()
+            await self.discovery.close()
+            if getattr(self, "_dashboard_enabled", False):
+                self.dashboard.stop()
+            self.meta.close()
+            log_event(
+                log,
+                "collector_stopping",
+                f"shutdown complete samples={self.store.samples_written} "
+                f"trades={self.store.trades_written} markouts={self.store.markouts_written}",
+                run_id=self.run_id,
+            )
+
+    def _write_state(self) -> None:
+        self.state.samples_written = self.store.samples_written
+        self.state.trades_written = self.store.trades_written
+        self.state.markouts_written = self.store.markouts_written
+        self.state.dropped_connections = self.counters.dropped_connections
+        self.state.book_resyncs = self.counters.book_resyncs
+        self.state.nonce_gaps = self.counters.nonce_gaps
+        self.state.deployment_gaps = self._deployment_gaps
+        self.state.last_trade_timestamp_ms = self._last_trade_ts
+        self.state.bytes_uploaded = self.sync.bytes_uploaded
+        self.state.holder_id = self.holder_id
+        self.state.git_sha = self.settings.git_sha
+        self.state.touch()
+
+    async def _persist_state(self, *, flush_upload: bool = False) -> None:
+        self._write_state()
+        if flush_upload:
+            await asyncio.to_thread(self._sync_and_analyze, final=False)
+        else:
+            self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+            self.backend.upload_json(
+                self.sync.active_pointer_key(),
+                {
+                    "run_id": self.run_id,
+                    "status": self.state.status,
+                    "updated_at": now_iso(),
+                    "git_sha": self.settings.git_sha,
+                },
+            )
+
+    def _sync_and_analyze(self, *, final: bool) -> None:
+        self.store.maybe_flush()
+        if final:
+            self.store.rotate_all()
+        else:
+            # Close current parts so durable storage gets complete files
+            self.store.rotate_all()
+        uploaded = self.sync.upload_new_parquets(self.settings.data_dir)
+        self.state.last_successful_flush = now_iso()
+        self._write_state()
+        self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+        self.backend.upload_json(
+            self.sync.active_pointer_key(),
+            {
+                "run_id": self.run_id,
+                "status": self.state.status,
+                "updated_at": now_iso(),
+                "git_sha": self.settings.git_sha,
+            },
         )
-        self.meta.end_run(self.run_id, status="stopped")
-        await self.discovery.close()
-        if getattr(self, "_dashboard_enabled", False):
-            self.dashboard.stop()
-        self.meta.close()
-        log.info(
-            "shutdown complete samples=%s trades=%s markouts=%s",
-            self.store.samples_written,
-            self.store.trades_written,
-            self.store.markouts_written,
+        log_event(
+            log,
+            "gcs_uploaded",
+            f"uploaded {len(uploaded)} parquet objects",
+            run_id=self.run_id,
+            detail=str(len(uploaded)),
         )
+        # Lightweight dashboard JSON
+        hours = self.hours or 72.0
+        # For short runs use elapsed observation window
+        try:
+            started = datetime.fromisoformat(self.state.started_at)
+            elapsed = max((datetime.now(UTC) - started).total_seconds() / 3600.0, 0.05)
+        except ValueError:
+            elapsed = 1.0
+        window = hours if final and self.hours else min(hours, max(elapsed, 0.1))
+        try:
+            from lighter_mm.cloud.estimate import estimate_storage
+
+            est = estimate_storage(
+                bytes_so_far=self.sync.bytes_uploaded
+                or _dir_size(self.settings.data_dir),
+                elapsed_hours=max(elapsed, 1 / 60),
+            )
+            payload = build_dashboard_payload(
+                self.settings, hours=window, state=self.state, storage_estimate=est
+            )
+            self.backend.upload_json(
+                self.sync.public_key("latest.json"), payload["latest"], public=True
+            )
+            self.backend.upload_json(
+                self.sync.public_key("markets.json"),
+                {"markets": payload["markets"], "generated_at": payload["latest"]["generated_at"]},
+                public=True,
+            )
+            self.backend.upload_json(
+                self.sync.public_key("candidates.json"),
+                {"candidates": payload["candidates"]},
+                public=True,
+            )
+            # Per-market details (bounded)
+            for sym, detail in list(payload["market_details"].items())[:80]:
+                self.backend.upload_json(
+                    self.sync.public_key(f"market/{sym}.json"), detail, public=True
+                )
+            # Also keep a copy under the run
+            self.backend.upload_json(
+                f"{self.sync.run_prefix()}/reports/latest.json", payload["latest"]
+            )
+            self.state.last_analysis_at = now_iso()
+            self._write_state()
+            self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+            log_event(log, "analysis_completed", "dashboard JSON refreshed", run_id=self.run_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("analysis/dashboard generation failed: %s", exc)
+
+    async def _durable_sync_loop(self) -> None:
+        interval = self.settings.gcs_upload_interval_minutes * 60
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                return
+            except TimeoutError:
+                pass
+            try:
+                await asyncio.to_thread(self._sync_and_analyze, final=False)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("durable sync failed: %s", exc)
+
+    async def _analysis_loop(self) -> None:
+        # Analysis is bundled into durable sync; keep a lighter heartbeat state write
+        interval = min(60.0, self.settings.analysis_interval_minutes * 60)
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                return
+            except TimeoutError:
+                pass
+            try:
+                self._write_state()
+                self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+            except Exception as exc:  # noqa: BLE001
+                log.warning("state heartbeat failed: %s", exc)
+
+    async def _lock_renew_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=30.0)
+                return
+            except TimeoutError:
+                pass
+            if not self.lock.renew(self.run_id, git_sha=self.settings.git_sha):
+                log.error("lost leader lock; stopping collector")
+                self._stop.set()
+                return
 
     async def _log_progress_loop(self, started: float) -> None:
         while not self._stop.is_set():
@@ -198,6 +464,7 @@ class CollectorApp:
             }
         )
         self.counters.trades_written = self.store.trades_written
+        self._last_trade_ts = trade.timestamp_ms
         self.markout.on_trade(trade, symbol, ref)
 
     async def _on_stats(self, snap: MarketStatsSnapshot) -> None:
@@ -246,7 +513,9 @@ class CollectorApp:
                     "index_price": float(stats.index_price) if stats and stats.index_price else None,
                     "mark_price": float(stats.mark_price) if stats and stats.mark_price else None,
                     "stats_mid_price": float(stats.mid_price) if stats and stats.mid_price else None,
-                    "open_interest": float(stats.open_interest) if stats and stats.open_interest else None,
+                    "open_interest": float(stats.open_interest)
+                    if stats and stats.open_interest
+                    else None,
                     "last_trade_price": float(stats.last_trade_price)
                     if stats and stats.last_trade_price
                     else None,
@@ -287,7 +556,20 @@ class CollectorApp:
             self.counters.markets_ready = ready
             self.counters.samples_written = self.store.samples_written
             if self._ws:
+                prev_drops = self.counters.dropped_connections
                 self.counters.dropped_connections = self._ws.runtime.dropped_connections
+                if self.counters.dropped_connections > prev_drops:
+                    log_event(
+                        log,
+                        "ws_disconnected",
+                        "websocket drop detected",
+                        run_id=self.run_id,
+                        detail=str(self.counters.dropped_connections),
+                    )
+                if self._ws.runtime.book_resyncs > self.counters.book_resyncs:
+                    log_event(log, "book_resync", "book resync", run_id=self.run_id)
+                if self._ws.runtime.nonce_gaps > self.counters.nonce_gaps:
+                    log_event(log, "nonce_gap", "nonce gap", run_id=self.run_id)
                 self.counters.book_resyncs = self._ws.runtime.book_resyncs
                 self.counters.nonce_gaps = self._ws.runtime.nonce_gaps
                 self.counters.client_messages_sent = self._ws.runtime.client_messages_sent
@@ -318,8 +600,8 @@ class CollectorApp:
                 if added or removed:
                     self.meta.upsert_markets(list(self.discovery.markets.values()))
                     self.counters.markets_total = len(self.discovery.markets)
+                    self.state.markets = list(self.discovery.markets.keys())
                     if self._ws:
-                        # Rebuild shard plan once for the full market set
                         self._ws.markets = dict(self.discovery.markets)
                         for m in added:
                             self._ws.books[m.market_id] = LocalOrderBook(
@@ -360,7 +642,6 @@ class CollectorApp:
             depth = m.get("depth_10bps") or 0.0
             tpm = m.get("tpm") or 0.0
             mk = m.get("markout_5s")
-            # Crude live score — NOT the historical MM Opportunity Score
             score = (
                 min(spread, 50.0) * 0.4
                 + min(depth / 1000.0, 30.0)
@@ -370,6 +651,17 @@ class CollectorApp:
             rows.append({**m, "market_id": mid, "live_score": score})
         rows.sort(key=lambda r: r["live_score"], reverse=True)
         return rows[:n]
+
+
+def _dir_size(path) -> int:
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
 
 
 async def run_collector(settings: Settings, hours: float | None = None) -> None:

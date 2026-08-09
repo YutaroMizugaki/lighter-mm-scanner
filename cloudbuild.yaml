@@ -1,0 +1,98 @@
+# Cloud Build pipeline: test → build → Artifact Registry → Cloud Run Worker Pool
+# Official Worker Pool deploy:
+#   https://docs.cloud.google.com/run/docs/deploy-worker-pools
+#   gcloud run worker-pools deploy
+#
+# Substitutions (set on trigger / CLI):
+#   _REGION, _AR_REPO, _WORKER_POOL, _GCS_BUCKET, _SERVICE_ACCOUNT
+
+substitutions:
+  _REGION: asia-northeast1
+  _AR_REPO: lighter-mm
+  _WORKER_POOL: lighter-mm-collector
+  _GCS_BUCKET: ""
+  _SERVICE_ACCOUNT: ""
+  _CPU: "1"
+  _MEMORY: 1Gi
+  _INSTANCES: "1"
+  _RUN_TARGET_HOURS: "72"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+steps:
+  # STEP 1 — install
+  - name: ghcr.io/astral-sh/uv:0.12.3
+    id: install
+    entrypoint: uv
+    args: ["sync", "--frozen", "--all-extras"]
+
+  # STEP 2 — ruff
+  - name: ghcr.io/astral-sh/uv:0.12.3
+    id: ruff
+    entrypoint: uv
+    args: ["run", "ruff", "check", "src", "tests"]
+    waitFor: ["install"]
+
+  # STEP 3 — pytest (must pass before deploy)
+  - name: ghcr.io/astral-sh/uv:0.12.3
+    id: pytest
+    entrypoint: uv
+    args: ["run", "pytest", "-q"]
+    waitFor: ["install"]
+
+  # STEP 4 — Docker build with GIT_SHA
+  - name: gcr.io/cloud-builders/docker
+    id: build
+    args:
+      - build
+      - --build-arg
+      - GIT_SHA=$COMMIT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/collector:$COMMIT_SHA
+      - -t
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/collector:latest
+      - .
+    waitFor: ["ruff", "pytest"]
+
+  # STEP 5 — push Artifact Registry
+  - name: gcr.io/cloud-builders/docker
+    id: push
+    args:
+      - push
+      - --all-tags
+      - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/collector
+    waitFor: ["build"]
+
+  # STEP 6 — deploy Cloud Run Worker Pool (manual scaling = 1)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: deploy
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        if [[ -z "${_GCS_BUCKET}" ]]; then
+          echo "ERROR: _GCS_BUCKET substitution is required" >&2
+          exit 1
+        fi
+        SA_FLAGS=()
+        if [[ -n "${_SERVICE_ACCOUNT}" ]]; then
+          SA_FLAGS+=(--service-account="${_SERVICE_ACCOUNT}")
+        fi
+        gcloud run worker-pools deploy "${_WORKER_POOL}" \
+          --project="$PROJECT_ID" \
+          --region="${_REGION}" \
+          --image="${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/collector:$COMMIT_SHA" \
+          --cpu="${_CPU}" \
+          --memory="${_MEMORY}" \
+          --instances="${_INSTANCES}" \
+          --set-env-vars="ENVIRONMENT=cloud,STRUCTURED_LOGGING=true,LIGHTER_MM_NO_DASHBOARD=1,GCP_PROJECT_ID=$PROJECT_ID,GCP_REGION=${_REGION},GCS_BUCKET=${_GCS_BUCKET},RUN_TARGET_HOURS=${_RUN_TARGET_HOURS},GIT_SHA=$COMMIT_SHA,BOOK_SAMPLE_INTERVAL_SECONDS=5,PARQUET_ROTATION_MINUTES=15,GCS_UPLOAD_INTERVAL_MINUTES=15" \
+          "${SA_FLAGS[@]}"
+    waitFor: ["push"]
+
+images:
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/collector:$COMMIT_SHA
+  - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/collector:latest
+
+timeout: 1800s

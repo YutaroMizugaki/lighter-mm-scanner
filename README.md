@@ -23,6 +23,7 @@ Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv).
 
 ```bash
 uv sync --all-extras
+cp .env.example .env
 ```
 
 ## Commands
@@ -35,8 +36,14 @@ uv run lighter-mm collect
 uv run lighter-mm collect --hours 24
 uv run lighter-mm collect --hours 72
 
-# Runtime / DQ status
+# Runtime / DQ / durable status
 uv run lighter-mm status
+uv run lighter-mm run-status
+uv run lighter-mm cloud-status
+
+# Dashboard JSON + storage estimate
+uv run lighter-mm generate-dashboard-data --hours 72
+uv run lighter-mm estimate-storage --hours 0.1
 
 # Analyze / rank / report / export
 uv run lighter-mm analyze --hours 24
@@ -45,16 +52,37 @@ uv run lighter-mm report --hours 72
 uv run lighter-mm export --hours 72 --format csv
 ```
 
-Environment overrides use prefix `LIGHTER_MM_` (see `src/lighter_mm/config.py`), e.g.:
+Env vars: see `.env.example` (`ENVIRONMENT`, `GCS_BUCKET`, `RUN_TARGET_HOURS`, `LIGHTER_WS_URL`, …).
 
-```bash
-export LIGHTER_MM_BOOK_SAMPLE_INTERVAL_SECONDS=5
-export LIGHTER_MM_WS_URL='wss://mainnet.zklighter.elliot.ai/stream?readonly=true'
+## Cloud operations (GitHub → GCP → Vercel)
+
+**Do not run the 72h collector on a laptop or GitHub Actions.**
+
+| Piece | Role |
+|-------|------|
+| GitHub `main` | Source of truth |
+| Cloud Build | ruff → pytest → Docker → Artifact Registry → **Cloud Run Worker Pool** |
+| GCS | Durable Parquet + `state.json` + public dashboard JSON |
+| Vercel (`dashboard/`) | Read-only UI over aggregate JSON only |
+
+- Deploy guide: **[docs/DEPLOY_GCP.md](./docs/DEPLOY_GCP.md)**
+- Cloud architecture: **[docs/ARCHITECTURE_CLOUD.md](./docs/ARCHITECTURE_CLOUD.md)**
+
+```text
+main push → Cloud Build tests → Worker Pool deploy (1 vCPU / 1Gi / instances=1)
+         → resume active run via GCS state + leader lock
+         → Vercel rebuilds dashboard (independent of collector)
 ```
+
+### Cost safety
+
+1. Create a **Billing Budget / Alert** before leaving a worker running.
+2. Keep `_INSTANCES=1`. Start at **1 vCPU / 1Gi**.
+3. Local smoke disk growth ≈ **105 MB/h** → ~2.5 GB/day, ~7.5 GB/72h (order of magnitude).
 
 ## Architecture
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md).
+See [ARCHITECTURE.md](./ARCHITECTURE.md) and [docs/ARCHITECTURE_CLOUD.md](./docs/ARCHITECTURE_CLOUD.md).
 
 Phases:
 
@@ -63,21 +91,34 @@ Phases:
 3. Paper market maker *(not implemented)*
 4. Small live MM *(not implemented)*
 
+Collector runs without the dashboard. Dashboard shows the last published aggregates even if the collector is stopped.
+
 ## Data layout
+
+Local (`ENVIRONMENT=local`):
 
 ```
 data/
-  metadata.db                 # SQLite: markets, runs, DQ counters
-  book_samples/date=YYYY-MM-DD/*.parquet
-  trades/date=YYYY-MM-DD/*.parquet
-  markouts/date=YYYY-MM-DD/*.parquet
-  aggregates/
+  metadata.db
+  book_samples/date=YYYY-MM-DD/hour=HH/*.parquet
+  trades/...
+  markouts/...
+  remote/                 # durable mirror (LocalStorageBackend)
 reports/
-  latest.html
-  ranking.csv
 ```
 
-Hot order books stay in memory. Only 5-second derived book metrics (plus trades / resolved markouts) are persisted — not every 50ms raw book update.
+Cloud (`ENVIRONMENT=cloud`):
+
+```
+/tmp/lighter-mm/          # hot path only (not durable)
+gs://<BUCKET>/lighter-mm/
+  runs/<run_id>/books|trades|markouts|state|reports/
+  state/active_run.json
+  state/leader.lock.json
+  public/latest.json      # dashboard (never raw books/trades)
+```
+
+Hot order books stay in memory. Only 5-second derived book metrics (plus trades / resolved markouts) are persisted — not every 50ms raw book update. Durable sync rotates/uploads at least every **15 minutes**.
 
 ## Metric definitions
 
@@ -140,28 +181,35 @@ Primary sources:
 
 Order book continuity: `begin_nonce` must equal previous `nonce`; on gap the market book is discarded and resubscribed. `size == 0` deletes a level.
 
-## Failure behavior
+## Failure / deploy behavior
 
-- WS drops are expected → reconnect with backoff, rebuild books from snapshot
+- WS drops → reconnect with backoff, rebuild books from snapshot
 - Nonce gaps → per-market resync
-- SIGINT/SIGTERM → flush Parquet buffers, close writers, update SQLite run status
-- Restart → resume run id when previous status is `running`; trade_id dedupe cache is process-local (Parquet may contain duplicates across process lifetimes only if IDs wrap outside cache — analysis can dedupe by `trade_id`)
+- SIGINT/SIGTERM / Worker revision → final flush → GCS upload → state update
+- main redeploy → resume same `run_id` when `active_run.status=running`
+- Leader lock prevents dual collectors (`instances=1` + lease)
+- Coverage gaps during deploys are recorded (`deployment_gaps`) and surface as STALE/OFFLINE in the dashboard
 
 ## After 72 hours
+
+Cloud: worker finalizes when `RUN_TARGET_HOURS=72`, writes full dashboard JSON, sets `status=completed`.
+
+Local:
 
 ```bash
 uv run lighter-mm report --hours 72
 uv run lighter-mm rank --hours 72
 uv run lighter-mm export --hours 72 --format csv
+uv run lighter-mm generate-dashboard-data --hours 72
 ```
-
-Open `reports/latest.html` for the executive answers at the top.
 
 ## Security
 
 - No API keys, private keys, seed phrases, or wallet connections
 - No order placement
 - Public/read-only market data only
+- No GCP JSON keys in the repo — use ADC / attached Service Account
+- Dashboard JSON is public-aggregate only; raw Parquet stays private
 
 ## Dev
 
@@ -169,12 +217,18 @@ Open `reports/latest.html` for the executive answers at the top.
 uv sync --all-extras
 uv run pytest
 uv run ruff check src tests
+cd dashboard && npm ci && npm run build
 ```
 
 ## Smoke test
 
 ```bash
-uv run lighter-mm collect --hours 0.085   # ~5 minutes
+# Local / Lighter mainnet (~5–6 min)
+LIGHTER_MM_NO_DASHBOARD=1 uv run lighter-mm collect --hours 0.1
 uv run lighter-mm status
-uv run lighter-mm analyze --hours 1
+uv run lighter-mm run-status
+uv run lighter-mm generate-dashboard-data --hours 1
+uv run lighter-mm estimate-storage --hours 0.1
+
+# Cloud: see docs/DEPLOY_GCP.md (Worker start, GCS upload, forced redeploy resume)
 ```

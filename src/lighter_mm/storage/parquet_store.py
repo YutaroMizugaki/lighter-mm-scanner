@@ -1,4 +1,4 @@
-"""Buffered Parquet writers with hourly rotation and flush-on-stop."""
+"""Buffered Parquet writers with configurable rotation and flush-on-stop."""
 
 from __future__ import annotations
 
@@ -23,19 +23,23 @@ class _RotatingWriter:
         schema: pa.Schema,
         flush_rows: int,
         flush_seconds: float,
+        rotation_minutes: int = 60,
     ) -> None:
         self.root = root
         self.dataset = dataset
         self.schema = schema
         self.flush_rows = flush_rows
         self.flush_seconds = flush_seconds
+        self.rotation_minutes = max(1, rotation_minutes)
         self._buffer: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._last_flush = time.monotonic()
         self._writer: pq.ParquetWriter | None = None
-        self._current_hour: str | None = None
+        self._current_part: str | None = None
         self._current_date: str | None = None
+        self._current_hour: str | None = None
         self.rows_written = 0
+        self.closed_paths: list[Path] = []
 
     def append(self, row: dict[str, Any]) -> None:
         with self._lock:
@@ -51,6 +55,15 @@ class _RotatingWriter:
             if self._buffer and (time.monotonic() - self._last_flush) >= self.flush_seconds:
                 self._flush_unlocked()
 
+    def rotate_now(self) -> None:
+        """Force close current part file so durable sync can upload it."""
+        with self._lock:
+            self._flush_unlocked()
+            if self._writer is not None:
+                self._writer.close()
+                self._writer = None
+                self._current_part = None
+
     def close(self) -> None:
         with self._lock:
             self._flush_unlocked()
@@ -58,43 +71,50 @@ class _RotatingWriter:
                 self._writer.close()
                 self._writer = None
 
-    def _hour_key(self, ts_ms: int | None) -> tuple[str, str]:
+    def _part_key(self, ts_ms: int | None) -> tuple[str, str, str]:
         if ts_ms is None:
             dt = datetime.now(UTC)
         else:
             dt = datetime.fromtimestamp(ts_ms / 1000.0, tz=UTC)
-        return dt.strftime("%Y-%m-%d"), dt.strftime("%Y%m%d_%H")
+        bucket = (dt.minute // self.rotation_minutes) * self.rotation_minutes
+        date = dt.strftime("%Y-%m-%d")
+        hour = dt.strftime("%H")
+        part = f"{dt.strftime('%Y%m%d_%H')}{bucket:02d}"
+        return date, hour, part
 
-    def _ensure_writer(self, date: str, hour: str) -> None:
-        if self._writer is not None and self._current_hour == hour and self._current_date == date:
+    def _ensure_writer(self, date: str, hour: str, part: str) -> None:
+        if (
+            self._writer is not None
+            and self._current_part == part
+            and self._current_date == date
+            and self._current_hour == hour
+        ):
             return
         if self._writer is not None:
             self._writer.close()
-        out_dir = self.root / self.dataset / f"date={date}"
+            self._writer = None
+        out_dir = self.root / self.dataset / f"date={date}" / f"hour={hour}"
         out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / f"part-{hour}.parquet"
-        # Append-compatible: open new file per hour with unique suffix if exists and open
-        if path.exists() and self._current_hour != hour:
-            # Continuing same hour after restart — use new part file
-            path = out_dir / f"part-{hour}-{int(time.time())}.parquet"
-        elif path.exists() and self._writer is None:
-            path = out_dir / f"part-{hour}-{int(time.time())}.parquet"
+        path = out_dir / f"part-{part}.parquet"
+        if path.exists():
+            path = out_dir / f"part-{part}-{int(time.time())}.parquet"
         self._writer = pq.ParquetWriter(path, self.schema, compression="zstd")
-        self._current_hour = hour
+        self._current_part = part
         self._current_date = date
+        self._current_hour = hour
+        self.closed_paths.append(path)
         log.debug("opened parquet %s", path)
 
     def _flush_unlocked(self) -> None:
         if not self._buffer:
             return
-        # Group by hour for correct partition
-        by_hour: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        by_part: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         for row in self._buffer:
-            key = self._hour_key(row.get("timestamp_ms"))
-            by_hour.setdefault(key, []).append(row)
+            key = self._part_key(row.get("timestamp_ms"))
+            by_part.setdefault(key, []).append(row)
         self._buffer.clear()
-        for (date, hour), rows in by_hour.items():
-            self._ensure_writer(date, hour)
+        for (date, hour, part), rows in by_part.items():
+            self._ensure_writer(date, hour, part)
             assert self._writer is not None
             table = pa.Table.from_pylist(rows, schema=self.schema)
             self._writer.write_table(table)
@@ -177,16 +197,22 @@ class ParquetStore:
         depth_levels: list[int],
         flush_rows: int = 500,
         flush_seconds: float = 5.0,
+        rotation_minutes: int = 15,
     ) -> None:
         self.data_dir = data_dir
         self.book = _RotatingWriter(
-            data_dir, "book_samples", _book_schema(depth_levels), flush_rows, flush_seconds
+            data_dir,
+            "book_samples",
+            _book_schema(depth_levels),
+            flush_rows,
+            flush_seconds,
+            rotation_minutes,
         )
         self.trades = _RotatingWriter(
-            data_dir, "trades", TRADE_SCHEMA, flush_rows, flush_seconds
+            data_dir, "trades", TRADE_SCHEMA, flush_rows, flush_seconds, rotation_minutes
         )
         self.markouts = _RotatingWriter(
-            data_dir, "markouts", MARKOUT_SCHEMA, flush_rows, flush_seconds
+            data_dir, "markouts", MARKOUT_SCHEMA, flush_rows, flush_seconds, rotation_minutes
         )
 
     def write_book(self, row: dict[str, Any]) -> None:
@@ -202,6 +228,11 @@ class ParquetStore:
         self.book.maybe_flush()
         self.trades.maybe_flush()
         self.markouts.maybe_flush()
+
+    def rotate_all(self) -> None:
+        self.book.rotate_now()
+        self.trades.rotate_now()
+        self.markouts.rotate_now()
 
     def close(self) -> None:
         self.book.close()

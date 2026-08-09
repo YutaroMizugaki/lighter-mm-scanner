@@ -57,6 +57,6 @@ def test_parquet_rotation_and_flush(tmp_path: Path) -> None:
         }
         store.write_book(row)
     store.close()
-    parts = list((tmp_path / "book_samples").glob("date=*/*.parquet"))
-    assert parts, "expected parquet part files"
+    parts = list((tmp_path / "book_samples").glob("date=*/hour=*/*.parquet"))
+    assert parts, "expected parquet part files under date=/hour="
     assert store.samples_written == 3

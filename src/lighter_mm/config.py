@@ -1,33 +1,44 @@
-"""Runtime configuration with safe rate-limit defaults."""
+"""Runtime configuration — local and cloud (env-overridable, no secrets)."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
+from typing import Any
 
-from pydantic import Field
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _env_first(*names: str, default: str | None = None) -> str | None:
+    for n in names:
+        v = os.environ.get(n)
+        if v is not None and v != "":
+            return v
+    return default
+
+
 class Settings(BaseSettings):
+    """Supports both LIGHTER_MM_* and unprefixed cloud env names."""
+
     model_config = SettingsConfigDict(
         env_prefix="LIGHTER_MM_",
         env_file=".env",
         extra="ignore",
     )
 
-    # Official mainnet endpoints (https://apidocs.lighter.xyz/)
+    environment: str = "local"  # local | cloud
     rest_base_url: str = "https://mainnet.zklighter.elliot.ai"
     ws_url: str = "wss://mainnet.zklighter.elliot.ai/stream?readonly=true"
 
     data_dir: Path = Path("data")
     reports_dir: Path = Path("reports")
+    tmp_dir: Path = Path("/tmp/lighter-mm")
 
     book_sample_interval_seconds: float = Field(default=5.0, ge=1.0)
     market_refresh_seconds: int = Field(default=3600, ge=60)
-    # Quiet books may not emit diffs; keep this loose (connection loss → unsynced).
     stale_book_seconds: float = Field(default=180.0, ge=5.0)
 
-    # Official WS: 500 subs/conn, 200 client msgs/min — use margin
     max_subscriptions_per_connection: int = Field(default=450, ge=1, le=500)
     max_client_messages_per_minute: int = Field(default=150, ge=1, le=200)
     max_inflight_messages: int = Field(default=40, ge=1, le=50)
@@ -38,9 +49,27 @@ class Settings(BaseSettings):
 
     parquet_flush_rows: int = 500
     parquet_flush_seconds: float = 5.0
+    parquet_rotation_minutes: int = Field(default=15, ge=1)
+    gcs_upload_interval_minutes: int = Field(default=15, ge=1)
+    analysis_interval_minutes: int = Field(default=15, ge=1)
     trade_id_cache_size: int = 50_000
 
-    # Analysis / scoring defaults
+    # 0 => continuous; >0 => stop after N hours (cloud deploy sets 72)
+    run_target_hours: float = Field(default=0.0)
+
+    gcp_project_id: str | None = None
+    gcp_region: str = "asia-northeast1"
+    gcs_bucket: str | None = None
+    gcs_prefix: str = "lighter-mm"
+    gcs_public_prefix: str = "lighter-mm/public"
+
+    git_sha: str | None = None
+    collector_version: str = "0.1.0"
+
+    # Dashboard staleness thresholds (minutes)
+    status_ok_minutes: float = 20.0
+    status_warn_minutes: float = 40.0
+
     order_notionals_usd: list[float] = Field(
         default_factory=lambda: [25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]
     )
@@ -50,7 +79,6 @@ class Settings(BaseSettings):
     )
     markout_horizons_seconds: list[int] = Field(default_factory=lambda: [1, 5, 30, 60])
 
-    # Candidate filter soft floors (also use percentiles in scoring)
     min_coverage_pct: float = 90.0
     min_trades_per_hour: float = 30.0
     min_two_sided_depth_10bps_usd: float = 200.0
@@ -58,10 +86,91 @@ class Settings(BaseSettings):
 
     dashboard_refresh_seconds: float = 2.0
     dashboard_top_n: int = 10
+    structured_logging: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _merge_unprefixed_env(cls, data: Any) -> Any:  # noqa: ANN401
+        if not isinstance(data, dict):
+            data = {}
+        mapping = {
+            "environment": ("ENVIRONMENT", "LIGHTER_MM_ENVIRONMENT"),
+            "rest_base_url": ("LIGHTER_REST_URL", "LIGHTER_MM_REST_BASE_URL"),
+            "ws_url": ("LIGHTER_WS_URL", "LIGHTER_MM_WS_URL"),
+            "book_sample_interval_seconds": (
+                "BOOK_SAMPLE_INTERVAL_SECONDS",
+                "LIGHTER_MM_BOOK_SAMPLE_INTERVAL_SECONDS",
+            ),
+            "parquet_rotation_minutes": (
+                "PARQUET_ROTATION_MINUTES",
+                "LIGHTER_MM_PARQUET_ROTATION_MINUTES",
+            ),
+            "gcs_upload_interval_minutes": (
+                "GCS_UPLOAD_INTERVAL_MINUTES",
+                "LIGHTER_MM_GCS_UPLOAD_INTERVAL_MINUTES",
+            ),
+            "run_target_hours": ("RUN_TARGET_HOURS", "LIGHTER_MM_RUN_TARGET_HOURS"),
+            "gcp_project_id": ("GCP_PROJECT_ID", "LIGHTER_MM_GCP_PROJECT_ID"),
+            "gcp_region": ("GCP_REGION", "LIGHTER_MM_GCP_REGION"),
+            "gcs_bucket": ("GCS_BUCKET", "LIGHTER_MM_GCS_BUCKET"),
+            "git_sha": ("GIT_SHA", "LIGHTER_MM_GIT_SHA", "COMMIT_SHA"),
+            "structured_logging": ("STRUCTURED_LOGGING", "LIGHTER_MM_STRUCTURED_LOGGING"),
+            "data_dir": ("DATA_DIR", "LIGHTER_MM_DATA_DIR"),
+            "tmp_dir": ("TMP_DIR", "LIGHTER_MM_TMP_DIR"),
+        }
+        for field, names in mapping.items():
+            if field not in data or data.get(field) in (None, ""):
+                val = _env_first(*names)
+                if val is not None:
+                    data[field] = val
+        return data
+
+    @field_validator("structured_logging", mode="before")
+    @classmethod
+    def _boolish(cls, v: object) -> object:
+        if isinstance(v, str):
+            return v.lower() in {"1", "true", "yes", "on"}
+        return v
+
+    @property
+    def is_cloud(self) -> bool:
+        return self.environment.lower() in {"cloud", "gcp", "production", "prod"}
+
+    @property
+    def effective_data_dir(self) -> Path:
+        if self.is_cloud:
+            return self.tmp_dir
+        return self.data_dir
+
+    def hours_or_none(self) -> float | None:
+        """None means run forever."""
+        if self.run_target_hours <= 0:
+            return None
+        return float(self.run_target_hours)
 
 
 def ensure_dirs(settings: Settings) -> None:
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    root = settings.effective_data_dir
+    root.mkdir(parents=True, exist_ok=True)
     settings.reports_dir.mkdir(parents=True, exist_ok=True)
     for name in ("book_samples", "trades", "markouts", "aggregates"):
-        (settings.data_dir / name).mkdir(parents=True, exist_ok=True)
+        (root / name).mkdir(parents=True, exist_ok=True)
+
+
+def build_storage_backend(settings: Settings):
+    from lighter_mm.storage.local_backend import LocalStorageBackend
+
+    if settings.is_cloud:
+        if not settings.gcs_bucket:
+            raise RuntimeError("GCS_BUCKET is required when ENVIRONMENT=cloud")
+        from lighter_mm.storage.gcs_backend import GCSStorageBackend
+
+        local_root = settings.tmp_dir
+        local_root.mkdir(parents=True, exist_ok=True)
+        return GCSStorageBackend(
+            settings.gcs_bucket,
+            local_root=local_root,
+            project_id=settings.gcp_project_id,
+            make_public_prefix=settings.gcs_public_prefix.rstrip("/") + "/",
+        )
+    return LocalStorageBackend(settings.data_dir)
