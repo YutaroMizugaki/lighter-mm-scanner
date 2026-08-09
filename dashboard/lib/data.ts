@@ -101,3 +101,24 @@ export function fmt(n: number | null | undefined, digits = 2, signed = false): s
   if (!signed) return body;
   return n > 0 ? `+${body}` : body;
 }
+
+/** Recompute status from JSON age — baked COLLECTING lies when publish stalls. */
+export function effectiveStatus(
+  overview: Overview,
+  okMinutes = 20,
+  warnMinutes = 40,
+): string {
+  const baked = overview.status || "ERROR";
+  if (baked === "COMPLETED" || baked === "ERROR") return baked;
+  const stamp = overview.last_update || overview.generated_at;
+  if (!stamp) return "ERROR";
+  const ageMin = (Date.now() - new Date(stamp).getTime()) / 60_000;
+  if (Number.isNaN(ageMin)) return "ERROR";
+  const analyzed = overview.markets_analyzed ?? overview.markets ?? 0;
+  const samples = overview.samples_written ?? 0;
+  if (ageMin > warnMinutes) return "OFFLINE";
+  if (ageMin > okMinutes) return "STALE";
+  if (baked === "DEGRADED") return "DEGRADED";
+  if (analyzed === 0 && samples > 0) return "DEGRADED";
+  return baked;
+}

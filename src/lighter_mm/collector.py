@@ -478,6 +478,12 @@ class CollectorApp:
             log.warning("analysis/dashboard generation failed: %s", exc)
             # Surface public-mirror failure in durable state (do not pretend flush is green).
             self.state.last_analysis_at = None
+            # Best-effort: still move the public latest.json clock so the UI does
+            # not stay forever COLLECTING on a frozen object from a prior revision.
+            try:
+                self._publish_public_failure_status(str(exc))
+            except Exception as pub_exc:  # noqa: BLE001
+                log.warning("public failure-status publish failed: %s", pub_exc)
 
         if public_ok:
             self.state.last_successful_flush = now_iso()
@@ -493,11 +499,51 @@ class CollectorApp:
             },
         )
 
+    def _publish_public_failure_status(self, error: str) -> None:
+        """Overwrite public latest.json with an explicit ERROR/DEGRADED payload."""
+        self._write_state()
+        now = now_iso()
+        payload = {
+            "title": "Lighter MM Scanner",
+            "status": "ERROR",
+            "run_id": self.run_id,
+            "started_at": self.state.started_at,
+            "observation_hours": None,
+            "observation_target_hours": self.state.observation_target_hours,
+            "markets": 0,
+            "markets_analyzed": 0,
+            "markets_discovered": len(self.state.markets or []),
+            "candidates": 0,
+            "coverage_pct": None,
+            "last_update": now,
+            "git_sha": self.settings.git_sha,
+            "collector_version": self.settings.collector_version,
+            "top_candidate": None,
+            "analysis_error": error,
+            "health_warnings": [error],
+            "samples_written": self.state.samples_written,
+            "generated_at": now,
+            "read_only": True,
+            "disclaimer": (
+                "READ-ONLY research. Displayed spread × trade count ≠ profit. "
+                "No trading / no wallet / no API keys."
+            ),
+        }
+        self.backend.upload_json(self.sync.public_key("latest.json"), payload, public=True)
+
     async def _durable_sync_loop(self) -> None:
-        interval = self.settings.gcs_upload_interval_minutes * 60
+        # Startup already did one flush. Then sync quickly so MARKETS/samples
+        # appear on the public dashboard within ~1–5 minutes — not only after
+        # the full GCS_UPLOAD_INTERVAL (15m), which looks "stuck" across redeploys.
+        regular = float(self.settings.gcs_upload_interval_minutes * 60)
+        delays = [60.0, 120.0, 180.0, 300.0, regular]
+        step = 0
         while not self._stop.is_set():
+            timeout = delays[step] if step < len(delays) else regular
+            if step < len(delays):
+                step += 1
             try:
-                await asyncio.wait_for(self._stop.wait(), timeout=interval)
+                await asyncio.wait_for(self._stop.wait(), timeout=timeout)
                 return
             except TimeoutError:
                 pass
