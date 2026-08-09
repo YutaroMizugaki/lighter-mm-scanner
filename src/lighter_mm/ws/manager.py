@@ -177,6 +177,15 @@ class WsManager:
 
     async def _run_shard(self, shard: ShardPlan) -> None:
         attempt = 0
+        # Stagger initial connects so 5 shards do not pull full order-book
+        # snapshots at the same instant (1Gi Worker Pool OOM risk on resume).
+        if shard.shard_id > 0:
+            delay = min(float(shard.shard_id) * 3.0, 15.0)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=delay)
+                return
+            except TimeoutError:
+                pass
         while not self._stop.is_set():
             try:
                 async with websockets.connect(

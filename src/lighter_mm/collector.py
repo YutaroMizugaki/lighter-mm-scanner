@@ -193,82 +193,111 @@ class CollectorApp:
             log.error("another collector holds the leader lock; exiting")
             raise SystemExit(1)
 
-        if self._resumed:
-            restored = await asyncio.to_thread(
-                self.sync.hydrate_run_parquets, self.settings.data_dir
+        # Renew the lease BEFORE hydrate / DuckDB analysis. The previous order
+        # ran a full dashboard analyze while the renew loop was not yet started;
+        # on 1Gi Worker Pools that OOMs or stalls past the 120s lease and the
+        # process is hard-killed before state/latest.json can advance.
+        lock_task = asyncio.create_task(self._lock_renew_loop(), name="leader-lock-renew")
+        try:
+            await asyncio.to_thread(
+                self._heartbeat_running, "leader elected; starting collector"
+            )
+
+            if self._resumed:
+                def _renew_during_hydrate(scanned: int, restored: int) -> None:
+                    self.lock.renew(self.run_id, git_sha=self.settings.git_sha)
+                    log.info(
+                        "hydrate progress scanned=%s restored=%s",
+                        scanned,
+                        restored,
+                        extra={"event": "parquet_hydrate_progress"},
+                    )
+
+                restored = await asyncio.to_thread(
+                    self.sync.hydrate_run_parquets,
+                    self.settings.data_dir,
+                    on_progress=_renew_during_hydrate,
+                    progress_every=20,
+                )
+                log_event(
+                    log,
+                    "parquet_hydrated",
+                    f"hydrated {len(restored)} parquet objects from durable storage",
+                    run_id=self.run_id,
+                    detail=str(len(restored)),
+                )
+                await asyncio.to_thread(
+                    self._heartbeat_running, f"hydrated {len(restored)} parquet objects"
+                )
+
+            self.meta.start_run(self.run_id, self.hours)
+            markets = await self.discovery.fetch_perp_markets(active_only=True)
+            self.discovery.markets = {m.market_id: m for m in markets}
+            self.meta.upsert_markets(markets)
+            self.counters.markets_total = len(markets)
+            self.state.markets = [m.market_id for m in markets]
+            log_event(
+                log,
+                "market_discovered",
+                f"discovered {len(markets)} active perp markets",
+                run_id=self.run_id,
+                detail=str(len(markets)),
             )
             log_event(
                 log,
-                "parquet_hydrated",
-                f"hydrated {len(restored)} parquet objects from durable storage",
+                "collector_started",
+                f"collector started env={self.settings.environment}",
                 run_id=self.run_id,
-                detail=str(len(restored)),
+                git_sha=self.settings.git_sha,
+                collector_version=self.settings.collector_version,
             )
 
-        self.meta.start_run(self.run_id, self.hours)
-        markets = await self.discovery.fetch_perp_markets(active_only=True)
-        self.discovery.markets = {m.market_id: m for m in markets}
-        self.meta.upsert_markets(markets)
-        self.counters.markets_total = len(markets)
-        self.state.markets = [m.market_id for m in markets]
-        log_event(
-            log,
-            "market_discovered",
-            f"discovered {len(markets)} active perp markets",
-            run_id=self.run_id,
-            detail=str(len(markets)),
-        )
-        log_event(
-            log,
-            "collector_started",
-            f"collector started env={self.settings.environment}",
-            run_id=self.run_id,
-            git_sha=self.settings.git_sha,
-            collector_version=self.settings.collector_version,
-        )
+            # Deadline is wall-clock from the original run started_at (not process uptime),
+            # so Cloud Run redeploys cannot reset a 72h observation window.
+            remaining_s = self._remaining_observation_seconds()
+            if self.hours is not None and remaining_s is not None and remaining_s <= 0:
+                log.info("observation target already reached; writing final dashboard")
+                self._completed = True
+                return  # finally → shutdown
 
-        # Deadline is wall-clock from the original run started_at (not process uptime),
-        # so Cloud Run redeploys cannot reset a 72h observation window.
-        remaining_s = self._remaining_observation_seconds()
-        if self.hours is not None and remaining_s is not None and remaining_s <= 0:
-            log.info("observation target already reached; writing final dashboard")
-            self._completed = True
-            await self.shutdown()
-            return
+            self._ws = WsManager(
+                settings=self.settings,
+                markets=dict(self.discovery.markets),
+                on_book_update=self._on_book,
+                on_trade=self._on_trade,
+                on_stats=self._on_stats,
+            )
+            await self._ws.start()
+            log_event(log, "ws_connected", "websocket manager started", run_id=self.run_id)
+            await asyncio.to_thread(
+                self._heartbeat_running, "websocket manager started; collecting"
+            )
 
-        self._ws = WsManager(
-            settings=self.settings,
-            markets=dict(self.discovery.markets),
-            on_book_update=self._on_book,
-            on_trade=self._on_trade,
-            on_stats=self._on_stats,
-        )
-        await self._ws.start()
-        log_event(log, "ws_connected", "websocket manager started", run_id=self.run_id)
+            no_dash = os.environ.get("LIGHTER_MM_NO_DASHBOARD", "").lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            self._dashboard_enabled = (not no_dash) and self.dashboard.console.is_terminal
+            if self._dashboard_enabled:
+                self.dashboard.start()
+            else:
+                log.info("non-TTY / NO_DASHBOARD; Rich live dashboard disabled")
 
-        no_dash = os.environ.get("LIGHTER_MM_NO_DASHBOARD", "").lower() in {"1", "true", "yes"}
-        self._dashboard_enabled = (not no_dash) and self.dashboard.console.is_terminal
-        if self._dashboard_enabled:
-            self.dashboard.start()
-        else:
-            log.info("non-TTY / NO_DASHBOARD; Rich live dashboard disabled")
+            started = asyncio.get_running_loop().time()
+            deadline = (
+                None if remaining_s is None else started + max(remaining_s, 0.0)
+            )
+            # Lightweight pointer/state only — full DuckDB analyze runs in
+            # _durable_sync_loop so a resume OOM cannot block lease renewals.
+            await self._persist_state(flush_upload=False)
 
-        started = asyncio.get_running_loop().time()
-        deadline = (
-            None
-            if remaining_s is None
-            else started + max(remaining_s, 0.0)
-        )
-        await self._persist_state(flush_upload=True)
-
-        try:
             tasks = [
                 self._sample_loop(),
                 self._markout_loop(),
                 self._flush_loop(),
                 self._durable_sync_loop(),
                 self._analysis_loop(),
-                self._lock_renew_loop(),
                 self._market_refresh_loop(),
                 self._watch_deadline(deadline),
             ]
@@ -278,6 +307,9 @@ class CollectorApp:
                 tasks.append(self._log_progress_loop(started))
             await asyncio.gather(*tasks)
         finally:
+            self._stop.set()
+            lock_task.cancel()
+            await asyncio.gather(lock_task, return_exceptions=True)
             await self.shutdown()
 
     async def _request_stop(self) -> None:
@@ -540,6 +572,83 @@ class CollectorApp:
             },
         )
 
+    def _heartbeat_running(self, note: str) -> None:
+        """Advance active_run/state (+ lightweight public latest) without DuckDB.
+
+        Used during resume so the dashboard git_sha / generated_at move even when
+        full analysis is still pending or OOMs on a small Worker Pool.
+        """
+        self._write_state()
+        now = now_iso()
+        self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+        self.backend.upload_json(
+            self.sync.active_pointer_key(),
+            {
+                "run_id": self.run_id,
+                "status": "running",
+                "updated_at": now,
+                "git_sha": self.settings.git_sha,
+                "note": note,
+            },
+        )
+        # Do not claim a successful flush — keep last_successful_flush truthful.
+        # Still move generated_at/git_sha so ops can see the new revision is alive.
+        try:
+            obs_hours = None
+            try:
+                started = datetime.fromisoformat(self.state.started_at)
+                if started.tzinfo is None:
+                    started = started.replace(tzinfo=UTC)
+                obs_hours = (datetime.now(UTC) - started).total_seconds() / 3600.0
+            except ValueError:
+                obs_hours = None
+            payload = {
+                "title": "Lighter MM Scanner",
+                "status": "COLLECTING",
+                "run_id": self.run_id,
+                "started_at": self.state.started_at,
+                "observation_hours": obs_hours,
+                "observation_target_hours": self.state.observation_target_hours,
+                "markets": 0,
+                "markets_analyzed": 0,
+                "markets_discovered": len(self.state.markets or []),
+                "candidates": 0,
+                "coverage_pct": None,
+                "last_update": self.state.last_successful_flush,
+                "last_successful_flush": self.state.last_successful_flush,
+                "last_trade_at": None,
+                "last_book_sample_at": None,
+                "git_sha": self.settings.git_sha,
+                "collector_version": self.settings.collector_version,
+                "top_candidate": None,
+                "analysis_error": None,
+                "health_warnings": [note],
+                "samples_written": self.state.samples_written,
+                "ws": (
+                    self._ws.runtime.public_dict()
+                    if getattr(self, "_ws", None) is not None
+                    else None
+                ),
+                "generated_at": now,
+                "read_only": True,
+                "disclaimer": (
+                    "READ-ONLY research. Displayed spread × trade count ≠ profit. "
+                    "No trading / no wallet / no API keys."
+                ),
+            }
+            self.backend.upload_json(
+                self.sync.public_key("latest.json"), payload, public=True
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("heartbeat public latest.json failed: %s", exc)
+        log_event(
+            log,
+            "collector_heartbeat",
+            note,
+            run_id=self.run_id,
+            git_sha=self.settings.git_sha,
+        )
+
     def _publish_public_failure_status(self, error: str) -> None:
         """Overwrite public latest.json with an explicit ERROR/DEGRADED payload."""
         self._write_state()
@@ -581,11 +690,10 @@ class CollectorApp:
         self.backend.upload_json(self.sync.public_key("latest.json"), payload, public=True)
 
     async def _durable_sync_loop(self) -> None:
-        # Startup already did one flush. Then sync quickly so MARKETS/samples
-        # appear on the public dashboard within ~1–5 minutes — not only after
-        # the full GCS_UPLOAD_INTERVAL (15m), which looks "stuck" across redeploys.
+        # First full analyze shortly after WS is up. Startup only heartbeats —
+        # blocking DuckDB before the main loops caused resume crash-loops.
         regular = float(self.settings.gcs_upload_interval_minutes * 60)
-        delays = [60.0, 120.0, 180.0, 300.0, regular]
+        delays = [15.0, 60.0, 120.0, 180.0, 300.0, regular]
         step = 0
         while not self._stop.is_set():
             timeout = delays[step] if step < len(delays) else regular
@@ -597,9 +705,18 @@ class CollectorApp:
             except TimeoutError:
                 pass
             try:
+                # Renew immediately before heavy analyze; lease is also kept by
+                # _lock_renew_loop, but analyze can exceed one lease interval.
+                self.lock.renew(self.run_id, git_sha=self.settings.git_sha)
                 await asyncio.to_thread(self._sync_and_analyze, final=False)
             except Exception as exc:  # noqa: BLE001
                 log.warning("durable sync failed: %s", exc)
+                try:
+                    await asyncio.to_thread(
+                        self._heartbeat_running, f"durable sync failed: {exc}"
+                    )
+                except Exception as hb_exc:  # noqa: BLE001
+                    log.warning("sync-failure heartbeat failed: %s", hb_exc)
 
     async def _analysis_loop(self) -> None:
         # Analysis is bundled into durable sync; keep a lighter heartbeat state write

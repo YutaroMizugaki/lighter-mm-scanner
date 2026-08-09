@@ -59,6 +59,8 @@ class GCSStorageBackend(StorageBackend):
     # otherwise Vercel keeps serving a frozen latest.json while the live object
     # on the public bucket has already advanced (observed: markets=0 for ~1h).
     _PUBLIC_CACHE_CONTROL = "public, max-age=60, must-revalidate"
+    # State / leader lock are also fetched via HTTPS for ops; avoid 1h defaults.
+    _PRIVATE_JSON_CACHE_CONTROL = "private, max-age=0, must-revalidate"
 
     def upload_json(self, remote_key: str, payload: dict[str, Any], *, public: bool = False) -> str:
         data = json.dumps(payload, indent=2, default=str)
@@ -66,8 +68,9 @@ class GCSStorageBackend(StorageBackend):
         want_public = public or (
             self.make_public_prefix is not None and remote_key.startswith(self.make_public_prefix)
         )
-        if want_public:
-            blob.cache_control = self._PUBLIC_CACHE_CONTROL
+        blob.cache_control = (
+            self._PUBLIC_CACHE_CONTROL if want_public else self._PRIVATE_JSON_CACHE_CONTROL
+        )
         blob.upload_from_string(data, content_type="application/json")
 
         if want_public:

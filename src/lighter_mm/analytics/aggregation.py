@@ -21,7 +21,10 @@ from lighter_mm.util import percentile
 
 def _connect(data_dir: Path) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(database=":memory:")
-    con.execute("SET threads TO 4")
+    # Cloud Run Worker Pool defaults to 1Gi — keep DuckDB modest so resume-time
+    # analysis does not OOM alongside 205 in-memory books + WS buffers.
+    con.execute("SET threads TO 2")
+    con.execute("SET memory_limit='512MB'")
     return con
 
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from lighter_mm.storage.backend import StorageBackend
@@ -100,35 +100,50 @@ class DurableSync:
             )
         return uploaded
 
-    def hydrate_run_parquets(self, data_root: Path) -> list[str]:
+    def hydrate_run_parquets(
+        self,
+        data_root: Path,
+        *,
+        on_progress: Callable[[int, int], None] | None = None,
+        progress_every: int = 25,
+    ) -> list[str]:
         """Download durable Parquet for this run into the local hot path.
 
         Required after Cloud Run restarts because ``/tmp`` is ephemeral while
         analysis still reads local ``book_samples/`` (mapped from remote ``books/``).
+
+        ``on_progress`` is invoked periodically (and once at the end) so the
+        caller can renew the leader lock during long resumes.
         """
         restored: list[str] = []
+        scanned = 0
         prefix = f"{self.run_prefix()}/"
         for remote_key in self.backend.list_keys(prefix):
             if not remote_key.endswith(".parquet"):
                 continue
+            scanned += 1
             local_path = self.local_for_remote(remote_key, data_root)
             if local_path is None:
                 continue
             local_key = str(local_path)
             if local_path.exists():
                 self._uploaded.add(local_key)
-                continue
-            raw = self.backend.download_bytes(remote_key)
-            if raw is None:
-                continue
-            local_path.parent.mkdir(parents=True, exist_ok=True)
-            local_path.write_bytes(raw)
-            self._uploaded.add(local_key)
-            restored.append(remote_key)
-            log.info(
-                "parquet_hydrated_local",
-                extra={"event": "parquet_hydrated", "path": remote_key, "bytes": len(raw)},
-            )
+            else:
+                raw = self.backend.download_bytes(remote_key)
+                if raw is None:
+                    continue
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                local_path.write_bytes(raw)
+                self._uploaded.add(local_key)
+                restored.append(remote_key)
+                log.info(
+                    "parquet_hydrated_local",
+                    extra={"event": "parquet_hydrated", "path": remote_key, "bytes": len(raw)},
+                )
+            if on_progress is not None and progress_every > 0 and scanned % progress_every == 0:
+                on_progress(scanned, len(restored))
+        if on_progress is not None:
+            on_progress(scanned, len(restored))
         return restored
 
     @staticmethod
