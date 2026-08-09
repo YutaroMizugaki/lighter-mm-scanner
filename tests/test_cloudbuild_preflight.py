@@ -79,6 +79,23 @@ def test_gcp_audit_lib_covers_deploy_prerequisites() -> None:
     assert "audit_check_cloud_build_iam" in lib
 
 
+def test_cloudbuild_has_post_deploy_smoke() -> None:
+    text = CLOUDBUILD.read_text(encoding="utf-8")
+    assert "id: post-deploy-smoke" in text
+    assert "cloudbuild_post_deploy_smoke.sh" in text
+    smoke = (ROOT / "scripts" / "cloudbuild_post_deploy_smoke.sh").read_text(encoding="utf-8")
+    assert "audit_check_worker_pool_deployed" in smoke
+    assert "audit_check_analyzer_job_deployed" in smoke
+    assert "COMMIT_SHA" in smoke
+
+
+def test_gcp_audit_lib_has_post_deploy_checks() -> None:
+    lib = AUDIT_LIB.read_text(encoding="utf-8")
+    assert "audit_check_worker_pool_deployed" in lib
+    assert "audit_check_analyzer_job_deployed" in lib
+    assert "audit_check_public_collector_status" in lib
+
+
 def test_cloudbuild_automap_substitutions_enabled() -> None:
     text = CLOUDBUILD.read_text(encoding="utf-8")
     assert "automapSubstitutions: true" in text

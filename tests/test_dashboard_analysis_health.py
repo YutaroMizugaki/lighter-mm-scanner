@@ -16,21 +16,27 @@ def _iso(dt: datetime) -> str:
 
 def _effective_collector_status(
     last_sync: str | None,
+    last_event: str | None = None,
     baked: str = "COLLECTING",
     ok_minutes: float = 20,
     warn_minutes: float = 40,
+    sync_failures: int = 0,
 ) -> str:
     """Mirror dashboard/lib/data.ts effectiveCollectorStatus."""
     if baked in ("COMPLETED", "ERROR"):
         return baked
-    if not last_sync:
-        return "ERROR"
-    age_min = (datetime.now(UTC) - datetime.fromisoformat(last_sync.replace("Z", "+00:00"))).total_seconds() / 60
+    if not last_event:
+        if sync_failures > 0:
+            return "DEGRADED"
+        return "STALE"
+    age_min = (
+        datetime.now(UTC) - datetime.fromisoformat(last_event.replace("Z", "+00:00"))
+    ).total_seconds() / 60
     if age_min > warn_minutes:
         return "OFFLINE"
     if age_min > ok_minutes:
         return "STALE"
-    if baked == "DEGRADED":
+    if sync_failures > 0 or baked == "DEGRADED":
         return "DEGRADED"
     return baked
 
@@ -45,7 +51,11 @@ def _effective_analysis_status(
 ) -> str:
     """Mirror dashboard/lib/data.ts effectiveAnalysisStatus."""
     if status is None:
-        return "UNKNOWN"
+        return "NOT_STARTED"
+    if status == "NOT_STARTED":
+        return "NOT_STARTED"
+    if status == "NO_ACTIVE_RUN":
+        return "NO_ACTIVE_RUN"
     if status == "ERROR":
         return "ERROR"
     if status == "RUNNING":
@@ -76,35 +86,35 @@ def _effective_analysis_status(
 # Test A — Collector fresh / Analyzer fresh → COLLECTING + OK
 def test_collector_fresh_analyzer_fresh() -> None:
     now = datetime.now(UTC)
-    sync = _iso(now - timedelta(minutes=5))
+    event = _iso(now - timedelta(minutes=5))
     analysis_ts = _iso(now - timedelta(minutes=10))
-    assert _effective_collector_status(sync) == "COLLECTING"
+    assert _effective_collector_status(_iso(now - timedelta(minutes=5)), event) == "COLLECTING"
     assert _effective_analysis_status("OK", analysis_ts, analysis_ts) == "OK"
 
 
 # Test B — Collector fresh / Analyzer >30m stale → COLLECTING + STALE
 def test_collector_fresh_analyzer_stale() -> None:
     now = datetime.now(UTC)
-    sync = _iso(now - timedelta(minutes=5))
+    event = _iso(now - timedelta(minutes=5))
     analysis_ts = _iso(now - timedelta(minutes=45))
-    assert _effective_collector_status(sync) == "COLLECTING"
+    assert _effective_collector_status(_iso(now - timedelta(minutes=5)), event) == "COLLECTING"
     assert _effective_analysis_status("OK", analysis_ts, analysis_ts) == "STALE"
 
 
 # Test C — Collector fresh / Analyzer ERROR
 def test_collector_fresh_analyzer_error() -> None:
     now = datetime.now(UTC)
-    sync = _iso(now - timedelta(minutes=5))
-    assert _effective_collector_status(sync) == "COLLECTING"
+    event = _iso(now - timedelta(minutes=5))
+    assert _effective_collector_status(_iso(now - timedelta(minutes=5)), event) == "COLLECTING"
     assert _effective_analysis_status("ERROR", _iso(now), None) == "ERROR"
 
 
 # Test D — Analyzer stale does not make Collector OFFLINE
 def test_analyzer_stale_does_not_offline_collector() -> None:
     now = datetime.now(UTC)
-    sync = _iso(now - timedelta(minutes=5))
+    event = _iso(now - timedelta(minutes=5))
     analysis_ts = _iso(now - timedelta(hours=2))
-    assert _effective_collector_status(sync) == "COLLECTING"
+    assert _effective_collector_status(_iso(now - timedelta(minutes=5)), event) == "COLLECTING"
     assert _effective_analysis_status("OK", analysis_ts, analysis_ts) == "STALE"
 
 
@@ -126,8 +136,12 @@ def test_dashboard_no_last_update_label() -> None:
     assert "Last Update" not in home
 
 
-def test_analysis_unknown_when_status_missing() -> None:
-    assert _effective_analysis_status(None, None) == "UNKNOWN"
+def test_analysis_not_started_when_status_missing() -> None:
+    assert _effective_analysis_status(None, None) == "NOT_STARTED"
+
+
+def test_analysis_no_active_run_status() -> None:
+    assert _effective_analysis_status("NO_ACTIVE_RUN", _iso(datetime.now(UTC)), None) == "NO_ACTIVE_RUN"
 
 
 def test_running_over_30m_becomes_stale() -> None:

@@ -33,7 +33,7 @@ def _publish_analysis_status(
     sync: DurableSync,
     *,
     status: str,
-    run_id: str,
+    run_id: str | None,
     generated_at: str,
     error: str | None = None,
     last_successful_analysis_at: str | None = None,
@@ -52,12 +52,18 @@ def _publish_analysis_status(
     corrupt_parquet_files: int | None = None,
     skipped_files: list[dict[str, str]] | None = None,
     parquet_health_status: str | None = None,
+    git_sha: str | None = None,
+    analyzer_version: str | None = None,
 ) -> None:
     payload: dict[str, Any] = {
         "status": status,
         "run_id": run_id,
         "generated_at": generated_at,
     }
+    if git_sha:
+        payload["git_sha"] = git_sha
+    if analyzer_version:
+        payload["analyzer_version"] = analyzer_version
     if started_at:
         payload["started_at"] = started_at
     if status in ("OK", "DEGRADED"):

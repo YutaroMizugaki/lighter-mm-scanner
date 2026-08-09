@@ -235,14 +235,15 @@ def test_legacy_stale_with_mid_in_coverage(tmp_path: Path) -> None:
     assert result["markets"][0]["data_coverage_pct"] >= 80.0
 
 
-# TEST G — legacy disconnected rows excluded
+# TEST G — disconnected rows still observed but not usable
 def test_legacy_stale_without_mid_excluded(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path, reports_dir=tmp_path / "reports")
     ts = int(time.time() * 1000)
     _write_legacy_parquet(tmp_path, [_legacy_book_row(ts, stale=True, mid=None)])
     result = analyze_range(settings, start_ms=ts - 1000, end_ms=ts + 1000)
-    assert result["markets"][0]["observed_samples"] == 0
-    assert result["markets"][0]["data_coverage_pct"] == 0.0
+    assert result["markets"][0]["observed_samples"] == 1
+    assert result["markets"][0]["usable_quote_coverage_pct"] == 0.0
+    assert result["markets"][0]["data_coverage_pct"] >= 80.0
 
 
 # TEST H — volatility quiet period (zero moves valid)

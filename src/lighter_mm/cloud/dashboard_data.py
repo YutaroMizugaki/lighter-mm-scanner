@@ -79,9 +79,9 @@ def build_dashboard_payload(
         )
 
     coverage_vals = [
-        s.row.get("data_coverage_pct")
+        s.row.get("observation_coverage_pct") or s.row.get("data_coverage_pct")
         for s in scored
-        if s.row.get("data_coverage_pct") is not None
+        if (s.row.get("observation_coverage_pct") or s.row.get("data_coverage_pct")) is not None
     ]
     coverage = sum(coverage_vals) / len(coverage_vals) if coverage_vals else None
 
@@ -126,6 +126,7 @@ def build_dashboard_payload(
             ok_minutes=settings.status_ok_minutes,
             warn_minutes=settings.status_warn_minutes,
             startup_grace_minutes=settings.collector_startup_grace_minutes,
+            consecutive_sync_failures=0,
         )
 
     obs_hours = None
@@ -270,6 +271,9 @@ def _market_row(s: ScoredMarket) -> dict[str, Any]:
         "maker_markout_30s_median_bps": r.get("maker_markout_30s_median_bps"),
         "current_funding_rate": r.get("current_funding_rate"),
         "data_coverage_pct": r.get("data_coverage_pct"),
+        "observation_coverage_pct": r.get("observation_coverage_pct"),
+        "usable_quote_coverage_pct": r.get("usable_quote_coverage_pct"),
+        "spread_coverage_pct": r.get("spread_coverage_pct"),
         "observed_samples": r.get("observed_samples"),
         "expected_samples": r.get("expected_samples"),
         "observation_hours": r.get("observation_hours"),
@@ -304,6 +308,9 @@ def _market_detail(s: ScoredMarket) -> dict[str, Any]:
             "daily_quote_volume_usd": r.get("daily_quote_volume_usd"),
             "funding_rate": r.get("funding_rate"),
             "data_coverage_pct": r.get("data_coverage_pct"),
+            "observation_coverage_pct": r.get("observation_coverage_pct"),
+            "usable_quote_coverage_pct": r.get("usable_quote_coverage_pct"),
+            "spread_coverage_pct": r.get("spread_coverage_pct"),
             "observed_samples": r.get("observed_samples"),
             "expected_samples": r.get("expected_samples"),
             "observation_hours": r.get("observation_hours"),

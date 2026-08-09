@@ -262,10 +262,12 @@ def analyze_range(
             market_id,
             MAX(symbol) AS symbol,
             MIN(timestamp_ms) AS first_observed_ms,
+            MAX(timestamp_ms) AS last_observed_ms,
             GREATEST(CAST({start_ms} AS BIGINT), MIN(timestamp_ms)) AS effective_start_ms,
-            CAST({end_ms} AS BIGINT) AS effective_end_ms,
+            LEAST(CAST({end_ms} AS BIGINT), MAX(timestamp_ms)) AS effective_end_ms,
             CAST(
-                CAST({end_ms} AS BIGINT) - GREATEST(CAST({start_ms} AS BIGINT), MIN(timestamp_ms))
+                LEAST(CAST({end_ms} AS BIGINT), MAX(timestamp_ms))
+                - GREATEST(CAST({start_ms} AS BIGINT), MIN(timestamp_ms))
                 AS DOUBLE
             ) / 1000.0 AS market_observation_seconds
         FROM book_deduped

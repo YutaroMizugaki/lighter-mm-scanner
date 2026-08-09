@@ -408,6 +408,119 @@ audit_check_worker_pool_prereqs() {
   fi
 }
 
+audit_image_contains_sha() {
+  local image="$1"
+  local commit_sha="$2"
+  if [[ -z "${image}" ]]; then
+    audit_fail "deployment image is empty"
+    return 1
+  fi
+  if [[ "${image}" == *":${commit_sha}"* ]] || [[ "${image}" == *"/collector:${commit_sha}"* ]]; then
+    audit_pass "image references commit ${commit_sha}: ${image}"
+    return 0
+  fi
+  audit_fail "image does not reference commit ${commit_sha}: ${image}"
+  return 1
+}
+
+audit_check_worker_pool_deployed() {
+  local project_id="$1"
+  local commit_sha="$2"
+  local worker_pool="${WORKER_POOL:-lighter-mm-collector}"
+  local region="${REGION:-asia-northeast1}"
+  audit_section "Worker pool deployment"
+  local json
+  if ! json="$(gcloud run worker-pools describe "${worker_pool}" \
+      --project="${project_id}" --region="${region}" --format=json 2>/dev/null)"; then
+    audit_fail "worker pool ${worker_pool} not found after deploy"
+    return 1
+  fi
+  audit_pass "worker pool ${worker_pool} exists"
+  local image
+  image="$(printf '%s' "${json}" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(data.get('template', {}).get('containers', [{}])[0].get('image', ''), end='')
+" 2>/dev/null || true)"
+  audit_image_contains_sha "${image}" "${commit_sha}" || true
+}
+
+audit_check_analyzer_job_deployed() {
+  local project_id="$1"
+  local commit_sha="$2"
+  local analyzer_job="${ANALYZER_JOB:-lighter-mm-analyzer}"
+  local region="${REGION:-asia-northeast1}"
+  audit_section "Analyzer job deployment"
+  local json
+  if ! json="$(gcloud run jobs describe "${analyzer_job}" \
+      --project="${project_id}" --region="${region}" --format=json 2>/dev/null)"; then
+    audit_fail "analyzer job ${analyzer_job} not found after deploy"
+    return 1
+  fi
+  audit_pass "analyzer job ${analyzer_job} exists"
+  local image
+  image="$(printf '%s' "${json}" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+containers = data.get('template', {}).get('template', {}).get('containers', [])
+if not containers:
+    containers = data.get('template', {}).get('containers', [])
+print((containers[0] if containers else {}).get('image', ''), end='')
+" 2>/dev/null || true)"
+  audit_image_contains_sha "${image}" "${commit_sha}" || true
+}
+
+audit_check_scheduler_target() {
+  local project_id="$1"
+  local analyzer_job="${ANALYZER_JOB:-lighter-mm-analyzer}"
+  local region="${REGION:-asia-northeast1}"
+  audit_section "Cloud Scheduler target"
+  local json
+  if ! json="$(gcloud scheduler jobs describe "lighter-mm-analyzer-schedule" \
+      --project="${project_id}" --location="${region}" --format=json 2>/dev/null)"; then
+    audit_fail "scheduler job lighter-mm-analyzer-schedule not found"
+    return 1
+  fi
+  audit_pass "scheduler job lighter-mm-analyzer-schedule exists"
+  local uri
+  uri="$(printf '%s' "${json}" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+print(data.get('httpTarget', {}).get('uri', ''), end='')
+" 2>/dev/null || true)"
+  if [[ "${uri}" == *"/jobs/${analyzer_job}:run" ]]; then
+    audit_pass "scheduler targets analyzer job ${analyzer_job}"
+  else
+    audit_fail "scheduler URI does not target ${analyzer_job}: ${uri}"
+  fi
+}
+
+audit_check_public_json_object() {
+  local bucket="$1"
+  local object_path="$2"
+  local label="$3"
+  if gcloud storage cat "gs://${bucket}/${object_path}" >/dev/null 2>&1; then
+    audit_pass "${label} is fetchable (gs://${bucket}/${object_path})"
+    return 0
+  fi
+  audit_warn "${label} not yet available (gs://${bucket}/${object_path})"
+  return 1
+}
+
+audit_check_public_collector_status() {
+  local bucket="$1"
+  local prefix="${2:-lighter-mm/public}"
+  audit_section "Public collector status"
+  audit_check_public_json_object "${bucket}" "${prefix}/collector_status.json" "collector_status.json"
+}
+
+audit_check_public_analysis_status() {
+  local bucket="$1"
+  local prefix="${2:-lighter-mm/public}"
+  audit_section "Public analysis status"
+  audit_check_public_json_object "${bucket}" "${prefix}/analysis_status.json" "analysis_status.json"
+}
+
 audit_print_summary() {
   audit_section "Doctor result"
   if [[ "${AUDIT_FAIL_COUNT}" -eq 0 ]]; then

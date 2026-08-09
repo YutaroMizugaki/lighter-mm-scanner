@@ -208,6 +208,22 @@ steps:
         fi
     waitFor: ["grant-scheduler-invoker"]
 
+  # STEP 11 — fast post-deploy smoke (revision + public status JSON)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: post-deploy-smoke
+    entrypoint: bash
+    args:
+      - scripts/cloudbuild_post_deploy_smoke.sh
+    env:
+      - PROJECT_ID=$PROJECT_ID
+      - COMMIT_SHA=$COMMIT_SHA
+      - _REGION=${_REGION}
+      - _AR_REPO=${_AR_REPO}
+      - _GCS_PUBLIC_BUCKET=${_GCS_PUBLIC_BUCKET}
+      - _WORKER_POOL=${_WORKER_POOL}
+      - _ANALYZER_JOB=${_ANALYZER_JOB}
+    waitFor: ["deploy-analyzer-scheduler"]
+
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/collector:$COMMIT_SHA
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/collector:latest
