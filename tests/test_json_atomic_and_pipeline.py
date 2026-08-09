@@ -121,5 +121,5 @@ def test_upload_skips_corrupt_parquet_before_remote(tmp_path: Path) -> None:
     assert len(uploaded) == 1
     assert bad.exists()
     assert not be.exists(
-        f"lighter-mm/runs/run1/books/date=2026-08-09/hour=14/part-bad.parquet"
+        "lighter-mm/runs/run1/books/date=2026-08-09/hour=14/part-bad.parquet"
     )
