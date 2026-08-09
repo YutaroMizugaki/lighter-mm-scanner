@@ -7,12 +7,16 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from lighter_mm.storage.backend import StorageBackend
+from lighter_mm.storage.backend import StorageBackend, VersionedJson
 
 log = logging.getLogger(__name__)
 
 
 class GCSStorageBackend(StorageBackend):
+    @property
+    def supports_atomic_cas(self) -> bool:
+        return True
+
     def __init__(
         self,
         bucket_name: str,
@@ -110,47 +114,31 @@ class GCSStorageBackend(StorageBackend):
         return uri
 
     def download_json(self, remote_key: str) -> dict[str, Any] | None:
+        v = self.download_json_with_generation(remote_key)
+        return v.payload
+
+    def download_json_with_generation(self, remote_key: str) -> VersionedJson:
         blob = self._bucket.blob(remote_key)
         if not blob.exists():
-            return None
-        return json.loads(blob.download_as_text())
+            return VersionedJson(None, None)
+        blob.reload()
+        return VersionedJson(json.loads(blob.download_as_text()), int(blob.generation))
 
     def compare_and_swap_json(
         self,
         remote_key: str,
         payload: dict[str, Any],
         *,
-        if_generation_match: int | None = None,
+        if_generation_match: int,
     ) -> bool:
         data = json.dumps(payload, indent=2, default=str)
         blob = self._bucket.blob(remote_key)
         try:
-            if if_generation_match is None:
-                if blob.exists():
-                    gen = blob.generation
-                    blob.upload_from_string(
-                        data,
-                        content_type="application/json",
-                        if_generation_match=gen,
-                    )
-                else:
-                    blob.upload_from_string(
-                        data,
-                        content_type="application/json",
-                        if_generation_match=0,
-                    )
-            elif if_generation_match == 0:
-                blob.upload_from_string(
-                    data,
-                    content_type="application/json",
-                    if_generation_match=0,
-                )
-            else:
-                blob.upload_from_string(
-                    data,
-                    content_type="application/json",
-                    if_generation_match=if_generation_match,
-                )
+            blob.upload_from_string(
+                data,
+                content_type="application/json",
+                if_generation_match=if_generation_match,
+            )
             return True
         except Exception as exc:  # noqa: BLE001
             log.debug("compare_and_swap_json failed for %s: %s", remote_key, exc)

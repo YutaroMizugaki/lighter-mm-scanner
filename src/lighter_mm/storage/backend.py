@@ -3,11 +3,25 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 
+@dataclass
+class VersionedJson:
+    """JSON payload paired with the object generation read at download time."""
+
+    payload: dict[str, Any] | None
+    generation: int | None
+
+
 class StorageBackend(ABC):
+    @property
+    def supports_atomic_cas(self) -> bool:
+        """True when compare_and_swap_json is a real distributed CAS (GCS)."""
+        return False
+
     @abstractmethod
     def local_data_dir(self) -> Path:
         """Writable local directory for hot Parquet / sqlite."""
@@ -23,6 +37,13 @@ class StorageBackend(ABC):
     @abstractmethod
     def download_json(self, remote_key: str) -> dict[str, Any] | None:
         """Download JSON if present."""
+
+    def download_json_with_generation(self, remote_key: str) -> VersionedJson:
+        """Download JSON and the generation observed at read time."""
+        payload = self.download_json(remote_key)
+        if payload is None:
+            return VersionedJson(None, None)
+        return VersionedJson(payload, 1)
 
     @abstractmethod
     def download_bytes(self, remote_key: str) -> bytes | None:
@@ -45,9 +66,9 @@ class StorageBackend(ABC):
         remote_key: str,
         payload: dict[str, Any],
         *,
-        if_generation_match: int | None = None,
+        if_generation_match: int,
     ) -> bool:
-        """Atomic JSON upload when supported; default falls back to upload + verify."""
+        """Best-effort CAS for local dev backends (upload + verify)."""
         self.upload_json(remote_key, payload)
         verify = self.download_json(remote_key)
         return bool(verify == payload)

@@ -786,10 +786,11 @@ class CollectorApp:
         ref = None
         if hist is not None:
             pt = hist.nearest_at_or_before(trade.timestamp_ms)
-            if pt is not None and trade.timestamp_ms - pt.ts_ms <= 3000:
+            if (
+                pt is not None
+                and 0 <= trade.timestamp_ms - pt.ts_ms <= 3000
+            ):
                 ref = pt.mid
-            elif pt is None:
-                ref = hist.mid_at(trade.timestamp_ms, tolerance_ms=2000)
         if ref is None:
             self._trades_without_reference_mid += 1
         self.activity.on_trade(trade)
