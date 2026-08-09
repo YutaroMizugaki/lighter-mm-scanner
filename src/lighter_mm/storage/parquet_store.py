@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -125,9 +126,8 @@ class _RotatingWriter:
             self._close_writer_unlocked()
         out_dir = self.root / self.dataset / f"date={date}" / f"hour={hour}"
         out_dir.mkdir(parents=True, exist_ok=True)
-        path = out_dir / f"part-{part}.parquet"
-        if path.exists():
-            path = out_dir / f"part-{part}-{int(time.time())}.parquet"
+        suffix = uuid.uuid4().hex[:12]
+        path = out_dir / f"part-{part}-{suffix}.parquet"
         self._writer = pq.ParquetWriter(path, self.schema, compression="zstd")
         self._current_path = path
         self._current_part = part

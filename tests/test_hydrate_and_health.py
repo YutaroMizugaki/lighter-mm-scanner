@@ -87,21 +87,26 @@ def test_public_key_uses_configured_public_prefix(tmp_path: Path) -> None:
     assert sync.public_key("latest.json") == "custom/public/latest.json"
 
 
-def test_degraded_when_samples_exist_but_analysis_empty() -> None:
+def test_degraded_when_ws_degraded() -> None:
+    from datetime import UTC, datetime
+
+    from lighter_mm.cloud.dashboard_data import build_collector_status_payload
+
+    recent = datetime.now(UTC).isoformat()
     state = RunState(
         run_id="r1",
-        started_at=now_iso(),
+        started_at=recent,
         status="running",
-        last_successful_flush=now_iso(),
+        last_successful_flush=recent,
         samples_written=100,
         markets=[1, 2, 3],
     )
-    assert (
-        collector_status_label(
-            state, ok_minutes=20, warn_minutes=40, markets_analyzed=0
-        )
-        == "DEGRADED"
+    payload = build_collector_status_payload(
+        state,
+        settings=Settings(),
+        ws_runtime={"connected_shards": 0, "total_shards": 5, "planned_channels": 10, "acked_channels": 5},
     )
+    assert payload["status"] == "DEGRADED"
 
 
 def test_collecting_on_cold_start_without_samples() -> None:
@@ -118,8 +123,6 @@ def test_collecting_on_cold_start_without_samples() -> None:
             state,
             ok_minutes=20,
             warn_minutes=40,
-            analysis_error="no book_samples yet",
-            markets_analyzed=0,
         )
         == "COLLECTING"
     )
@@ -137,7 +140,7 @@ def test_dashboard_payload_surfaces_analysis_error(tmp_path: Path) -> None:
         markets=[1],
     )
     payload = build_dashboard_payload(settings, hours=1, state=state)
-    assert payload["latest"]["status"] == "DEGRADED"
+    assert payload["latest"]["status"] == "ERROR"
     assert payload["latest"]["analysis_error"]
     assert payload["latest"]["markets_discovered"] == 1
     assert payload["latest"]["markets_analyzed"] == 0

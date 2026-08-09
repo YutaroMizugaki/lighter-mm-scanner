@@ -11,7 +11,7 @@ import pyarrow.parquet as pq
 
 from lighter_mm.analytics import aggregation as agg_mod
 from lighter_mm.analytics.aggregation import analyze_window
-from lighter_mm.cloud.dashboard_data import build_dashboard_payload
+from lighter_mm.cloud.dashboard_data import build_collector_status_payload
 from lighter_mm.config import Settings
 from lighter_mm.engine.markout import MarkoutEngine
 from lighter_mm.engine.mid_history import MidHistory
@@ -267,10 +267,10 @@ def test_health_degraded_on_shard_shortage(tmp_path: Path) -> None:
         markets=[1],
     )
     ws = WsRuntimeStats(connected_shards=4, total_shards=5, planned_channels=10, acked_channels=10)
-    payload = build_dashboard_payload(
-        settings, hours=1, state=state, ws_runtime=ws.public_dict()
+    payload = build_collector_status_payload(
+        state, settings=settings, ws_runtime=ws.public_dict()
     )
-    warnings = payload["latest"]["health_warnings"]
+    warnings = payload["health_warnings"]
     assert any("4/5 shards" in w for w in warnings)
 
 

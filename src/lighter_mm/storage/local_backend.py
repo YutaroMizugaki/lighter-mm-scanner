@@ -27,8 +27,17 @@ class LocalStorageBackend(StorageBackend):
     def _gen_path(self, remote_key: str) -> Path:
         return Path(str(self._path(remote_key)) + ".gen")
 
-    def upload_file(self, local_path: Path, remote_key: str, *, content_type: str | None = None) -> str:
+    def upload_file(
+        self,
+        local_path: Path,
+        remote_key: str,
+        *,
+        content_type: str | None = None,
+        if_generation_match: int | None = None,
+    ) -> str:
         dest = self._path(remote_key)
+        if if_generation_match == 0 and dest.exists():
+            raise FileExistsError(f"remote object already exists: {remote_key}")
         shutil.copy2(local_path, dest)
         return self.uri_for(remote_key)
 

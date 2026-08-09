@@ -1,7 +1,11 @@
 import {
+  effectiveAnalysisStatus,
+  effectiveCollectorStatus,
   effectiveStatus,
   fmt,
   fmtJst,
+  getAnalysisStatusResult,
+  getCollectorStatusResult,
   getMarketsResult,
   getOverviewResult,
   statusHealthNote,
@@ -10,6 +14,8 @@ import Link from "next/link";
 
 export default async function HomePage() {
   const overviewResult = await getOverviewResult();
+  const collectorResult = await getCollectorStatusResult();
+  const analysisStatusResult = await getAnalysisStatusResult();
   const marketsResult = await getMarketsResult();
   const configured = Boolean(process.env.NEXT_PUBLIC_DATA_BASE_URL);
 
@@ -57,6 +63,12 @@ export default async function HomePage() {
   }
 
   const overview = overviewResult.data;
+  const collectorStatus = collectorResult.ok
+    ? effectiveCollectorStatus(collectorResult.data)
+    : null;
+  const analysisFreshness = analysisStatusResult.ok
+    ? effectiveAnalysisStatus(analysisStatusResult.data)
+    : effectiveAnalysisStatus(null);
   const status = effectiveStatus(overview);
   const markets = marketsResult.ok ? marketsResult.data.markets ?? [] : [];
   const marketsFetchFailed = !marketsResult.ok;
@@ -74,7 +86,12 @@ export default async function HomePage() {
   const discovered = overview.markets_discovered;
   const analyzed = overview.markets_analyzed ?? overview.markets;
   const staleNote = statusHealthNote(status);
+  const collectorNote = collectorStatus ? statusHealthNote(collectorStatus) : null;
+  const analysisNote = statusHealthNote(analysisFreshness.status);
   const flushAt = overview.last_successful_flush || overview.last_update;
+  const collectorSyncAt = collectorResult.ok
+    ? collectorResult.data.last_successful_sync
+    : null;
   const ws = overview.ws;
 
   return (
@@ -109,13 +126,41 @@ export default async function HomePage() {
               {staleNote}
             </p>
           )}
+          {collectorNote && (
+            <p className="muted" style={{ marginTop: "0.4rem" }}>
+              Collector: {collectorNote}
+            </p>
+          )}
+          {analysisNote && (
+            <p className="muted" style={{ marginTop: "0.4rem" }}>
+              Analysis: {analysisNote}
+            </p>
+          )}
         </section>
       )}
       <section className="card">
         <div className="grid">
           <div className="kpi">
-            <div className="label">Status</div>
-            <div className={`value status-${status}`}>{status}</div>
+            <div className="label">Collector</div>
+            <div className={`value status-${collectorStatus || "UNKNOWN"}`}>
+              {collectorStatus || "UNKNOWN"}
+            </div>
+            {collectorSyncAt && (
+              <div className="muted" style={{ fontSize: "0.8rem" }}>
+                sync {fmtJst(collectorSyncAt)}
+              </div>
+            )}
+          </div>
+          <div className="kpi">
+            <div className="label">Analysis</div>
+            <div className={`value status-${analysisFreshness.status}`}>
+              {analysisFreshness.status}
+            </div>
+            {analysisStatusResult.ok && (
+              <div className="muted" style={{ fontSize: "0.8rem" }}>
+                {fmtJst(analysisStatusResult.data.generated_at)}
+              </div>
+            )}
           </div>
           <div className="kpi">
             <div className="label">Run</div>

@@ -56,6 +56,14 @@ class Settings(BaseSettings):
     analysis_interval_minutes: int = Field(default=15, ge=1)
     trade_id_cache_size: int = 50_000
 
+    # Analyzer Cloud Run Job
+    analyzer_mount_path: Path = Path("/mnt/lighter-mm")
+    analyzer_lock_lease_seconds: int = Field(default=1800, ge=60)
+    analyzer_lock_renew_interval_seconds: float = Field(default=60.0, ge=10.0)
+    duckdb_memory_limit: str = "1GiB"
+    duckdb_threads: int = Field(default=2, ge=1)
+    analysis_stale_minutes: float = Field(default=30.0, ge=5.0)
+
     # 0 => continuous; >0 => stop after N hours (cloud deploy sets 72)
     run_target_hours: float = Field(default=0.0)
 
@@ -130,6 +138,15 @@ class Settings(BaseSettings):
                 "MAX_SUBSCRIPTIONS_PER_CONNECTION",
                 "LIGHTER_MM_MAX_SUBSCRIPTIONS_PER_CONNECTION",
             ),
+            "analyzer_mount_path": (
+                "ANALYZER_MOUNT_PATH",
+                "LIGHTER_MM_ANALYZER_MOUNT_PATH",
+            ),
+            "duckdb_memory_limit": (
+                "DUCKDB_MEMORY_LIMIT",
+                "LIGHTER_MM_DUCKDB_MEMORY_LIMIT",
+            ),
+            "duckdb_threads": ("DUCKDB_THREADS", "LIGHTER_MM_DUCKDB_THREADS"),
         }
         for field, names in mapping.items():
             if field not in data or data.get(field) in (None, ""):

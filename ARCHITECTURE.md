@@ -39,7 +39,7 @@ messages/min, 50 inflight, keepalive within 2 minutes.
 
 Defaults used by this tool (safety margin):
 
-- `MAX_SUBSCRIPTIONS_PER_CONNECTION = 450`
+- `MAX_SUBSCRIPTIONS_PER_CONNECTION = 95`
 - `MAX_CLIENT_MESSAGES_PER_MINUTE = 150`
 
 ## Phases
@@ -51,32 +51,57 @@ Phase 3  Paper market maker (not implemented)
 Phase 4  Small live MM (not implemented)
 ```
 
+## Cloud layout (collector + analyzer split)
+
+```
+Lighter WebSocket
+        │
+        ▼
+Cloud Run Worker Pool (lighter-mm-collector)   1 CPU / 1 GiB
+        │  immutable Parquet chunks
+        ▼
+Private GCS (source of truth)
+        │  read-only mount
+        ▼
+Cloud Run Job (lighter-mm-analyzer)            2 CPU / 2 GiB
+        │  aggregate JSON
+        ▼
+Public GCS
+        │
+        ▼
+Vercel dashboard
+```
+
+**Collector** — collection only: WS, sampling, markouts, Parquet rotation, GCS upload, `collector_status.json`. Does **not** run DuckDB or write ranking JSON.
+
+**Analyzer** — `lighter-mm cloud-analyze` (Cloud Run Job, default schedule `*/15 * * * *`): reads GCS-mounted Parquet via DuckDB, publishes `latest.json`, `markets.json`, `candidates.json`, `market/*.json`, `analysis_status.json`.
+
+**GCS** — durable Parquet + `state.json` + analysis markers. Local `/tmp` holds only open/upload-pending chunks.
+
 ## Process layout
 
 ```
 CLI (typer)
-  └─ collect / status / analyze / rank / report / export
-       │
-       ├─ MarketDiscovery (REST, hourly refresh)
-       ├─ WsManager (sharded connections, token-bucket subscribe)
-       │     ├─ LocalOrderBook per market
-       │     ├─ TradeIngest (dedupe trade_id)
-       │     └─ MarketStatsCache
-       ├─ BookSampler (every BOOK_SAMPLE_INTERVAL_SECONDS)
-       ├─ MarkoutEngine (1s/5s/30s/60s pending queue)
-       ├─ MinuteAggregator (in-memory trade buckets)
-       ├─ ParquetWriter (rotated hourly partitions)
-       ├─ SqliteMeta (runs, markets, DQ counters)
-       └─ RichDashboard
+  ├─ collect (Worker Pool) — ingest + durable sync only
+  ├─ cloud-analyze (Cloud Run Job) — DuckDB + dashboard JSON
+  └─ analyze / rank / report / export (local dev)
+```
+
+Collector internals:
+
+```
+MarketDiscovery → WsManager → BookSampler → MarkoutEngine
+       → ParquetStore (UUID part names) → DurableSync → GCS
+       → collector_status.json
 ```
 
 Analysis path:
 
 ```
-Parquet + SQLite
-  → DuckDB / Polars aggregation
-  → scoring.py (MM Opportunity Score)
-  → rank / HTML / CSV
+GCS-mounted Parquet (books/trades/markouts)
+  → DuckDB analyze_range (AnalysisSources)
+  → scoring.py
+  → public JSON (analyzer only)
 ```
 
 ## Storage

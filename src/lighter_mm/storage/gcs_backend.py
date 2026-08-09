@@ -51,9 +51,31 @@ class GCSStorageBackend(StorageBackend):
     def local_data_dir(self) -> Path:
         return self.local_root
 
-    def upload_file(self, local_path: Path, remote_key: str, *, content_type: str | None = None) -> str:
+    def upload_file(
+        self,
+        local_path: Path,
+        remote_key: str,
+        *,
+        content_type: str | None = None,
+        if_generation_match: int | None = None,
+    ) -> str:
         blob = self._bucket.blob(remote_key)
-        blob.upload_from_filename(str(local_path), content_type=content_type)
+        kwargs: dict[str, Any] = {}
+        if if_generation_match is not None:
+            kwargs["if_generation_match"] = if_generation_match
+        try:
+            blob.upload_from_filename(
+                str(local_path), content_type=content_type, **kwargs
+            )
+        except Exception as exc:
+            if if_generation_match == 0:
+                log.warning(
+                    "gcs_immutable_upload_rejected %s (%s)",
+                    remote_key,
+                    exc,
+                    extra={"event": "gcs_immutable_upload_rejected", "path": remote_key},
+                )
+            raise
         # Raw parquet / files stay on the private bucket only.
         uri = self.uri_for(remote_key)
         log.info("gcs_uploaded %s", uri, extra={"event": "gcs_uploaded", "path": remote_key})
