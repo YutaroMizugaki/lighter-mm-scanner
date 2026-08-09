@@ -39,3 +39,27 @@ def test_bootstrap_script_exists() -> None:
     assert preflight.exists()
     assert "gcloud services enable" in bootstrap.read_text(encoding="utf-8")
     assert "gcloud services enable" not in preflight.read_text(encoding="utf-8")
+
+
+def test_cloudbuild_automap_substitutions_enabled() -> None:
+    text = CLOUDBUILD.read_text(encoding="utf-8")
+    assert "automapSubstitutions: true" in text
+
+
+def test_cloudbuild_preflight_maps_project_id_to_env() -> None:
+    text = CLOUDBUILD.read_text(encoding="utf-8")
+    preflight_block = text[text.index("id: preflight") : text.index("id: deploy\n")]
+    assert "PROJECT_ID=$PROJECT_ID" in preflight_block
+
+
+def test_preflight_script_validates_required_env_vars() -> None:
+    preflight = (ROOT / "scripts" / "cloudbuild_preflight.sh").read_text(encoding="utf-8")
+    for var in (
+        "PROJECT_ID",
+        "_REGION",
+        "_AR_REPO",
+        "_GCS_BUCKET",
+        "_GCS_PUBLIC_BUCKET",
+        "_SERVICE_ACCOUNT",
+    ):
+        assert f': "${{{var}:?' in preflight, f"missing validation for {var}"
