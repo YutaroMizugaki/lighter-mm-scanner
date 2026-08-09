@@ -245,7 +245,8 @@ class WsManager:
             return
 
         if mtype in ("subscribed/trade", "update/trade"):
-            await self._handle_trade(msg)
+            # Snapshot trades are used for dedupe warmup only; persist live updates.
+            await self._handle_trade(msg, persist=(mtype == "update/trade"))
             return
 
         if mtype in ("subscribed/market_stats", "update/market_stats"):
@@ -280,7 +281,7 @@ class WsManager:
             if asyncio.iscoroutine(maybe):
                 await maybe
 
-    async def _handle_trade(self, msg: dict) -> None:
+    async def _handle_trade(self, msg: dict, *, persist: bool = True) -> None:
         channel = str(msg.get("channel") or "")
         try:
             market_id = int(channel.split(":")[1])
@@ -311,6 +312,8 @@ class WsManager:
             self.runtime.seen_trade_ids += 1
             if market_id is not None and trade.market_id != market_id:
                 trade.market_id = market_id
+            if not persist:
+                continue
             if self.on_trade:
                 maybe = self.on_trade(trade, symbol)
                 if asyncio.iscoroutine(maybe):
