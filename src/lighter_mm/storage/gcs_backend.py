@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from lighter_mm.storage.backend import StorageBackend, VersionedJson
+from lighter_mm.storage.json_atomic import dumps_validated_json
 
 log = logging.getLogger(__name__)
 
@@ -97,22 +98,29 @@ class GCSStorageBackend(StorageBackend):
     _PRIVATE_JSON_CACHE_CONTROL = "private, max-age=0, must-revalidate"
 
     def upload_json(self, remote_key: str, payload: dict[str, Any], *, public: bool = False) -> str:
-        data = json.dumps(payload, indent=2, default=str)
-        blob = self._bucket.blob(remote_key)
+        data = dumps_validated_json(payload)
         want_public = public or (
             self.make_public_prefix is not None and remote_key.startswith(self.make_public_prefix)
         )
-        blob.cache_control = (
+        cache_control = (
             self._PUBLIC_CACHE_CONTROL if want_public else self._PRIVATE_JSON_CACHE_CONTROL
         )
-        blob.upload_from_string(data, content_type="application/json")
+        self._upload_json_blob(
+            self._bucket,
+            remote_key,
+            data,
+            cache_control=cache_control,
+        )
 
         if want_public:
             if self._public_bucket is not None:
                 try:
-                    pub = self._public_bucket.blob(remote_key)
-                    pub.cache_control = self._PUBLIC_CACHE_CONTROL
-                    pub.upload_from_string(data, content_type="application/json")
+                    self._upload_json_blob(
+                        self._public_bucket,
+                        remote_key,
+                        data,
+                        cache_control=self._PUBLIC_CACHE_CONTROL,
+                    )
                     log.info(
                         "gcs_public_uploaded %s",
                         f"gs://{self.public_bucket_name}/{remote_key}",
@@ -143,6 +151,28 @@ class GCSStorageBackend(StorageBackend):
         log.info("gcs_uploaded %s", uri, extra={"event": "gcs_uploaded", "path": remote_key})
         return uri
 
+    def _upload_json_blob(
+        self,
+        bucket: Any,
+        remote_key: str,
+        data: str,
+        *,
+        cache_control: str,
+    ) -> None:
+        """Upload JSON via a staging key, then server-side copy to the final key."""
+        staging_key = f"{remote_key}.staging"
+        staging = bucket.blob(staging_key)
+        staging.cache_control = cache_control
+        staging.upload_from_string(data, content_type="application/json")
+        bucket.copy_blob(staging, bucket, remote_key)
+        final = bucket.blob(remote_key)
+        final.cache_control = cache_control
+        final.patch()
+        try:
+            staging.delete()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("failed to delete json staging blob %s: %s", staging_key, exc)
+
     def download_json(self, remote_key: str) -> dict[str, Any] | None:
         v = self.download_json_with_generation(remote_key)
         return v.payload
@@ -161,7 +191,7 @@ class GCSStorageBackend(StorageBackend):
         *,
         if_generation_match: int,
     ) -> bool:
-        data = json.dumps(payload, indent=2, default=str)
+        data = dumps_validated_json(payload)
         blob = self._bucket.blob(remote_key)
         try:
             blob.upload_from_string(

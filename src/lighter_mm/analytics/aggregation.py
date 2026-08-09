@@ -245,6 +245,7 @@ def analyze_range(
     )
 
     book_count = con.execute("SELECT COUNT(*) FROM book_deduped").fetchone()[0]
+    latest_book_event_ms = con.execute("SELECT MAX(timestamp_ms) FROM book_deduped").fetchone()[0]
     profile: dict[str, float] = {}
     if benchmark_profile:
         profile["rss_after_book_load_mb"] = _rss_mb()
@@ -360,6 +361,7 @@ def analyze_range(
         "candidates": [s for s in scored if s.candidate],
         "avoid": avoid_wide_spread_markets(scored, 10),
         "book_row_count": book_count,
+        "latest_book_event_ms": latest_book_event_ms,
         "trade_row_count": trade_count,
         "markout_row_count": markout_count,
         "parquet_health": parquet_health,

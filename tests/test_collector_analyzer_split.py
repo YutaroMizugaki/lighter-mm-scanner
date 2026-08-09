@@ -74,8 +74,7 @@ def test_upload_success_deletes_local_closed_parquet(tmp_path: Path) -> None:
     data_root.mkdir()
     sync = DurableSync(be, run_id="run1", gcs_prefix="lighter-mm")
     local = data_root / "book_samples/date=2026-08-09/hour=10/part-x.parquet"
-    local.parent.mkdir(parents=True)
-    local.write_bytes(b"PAR1")
+    _write_book_parquet(local, int(time.time() * 1000))
     uploaded = sync.upload_new_parquets(data_root, paths=[local])
     assert len(uploaded) == 1
     assert not local.exists()
@@ -88,8 +87,7 @@ def test_upload_failure_retains_local_file(tmp_path: Path) -> None:
     data_root.mkdir()
     sync = DurableSync(be, run_id="run1", gcs_prefix="lighter-mm")
     local = data_root / "book_samples/date=2026-08-09/hour=10/part-x.parquet"
-    local.parent.mkdir(parents=True)
-    local.write_bytes(b"PAR1")
+    _write_book_parquet(local, int(time.time() * 1000))
 
     def boom(*_a, **_k):
         raise OSError("network down")

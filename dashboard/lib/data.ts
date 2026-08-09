@@ -376,7 +376,7 @@ export function statusHealthNote(
     return "Analyzer run failed — see analysis_status.json error.";
   }
   if (status === "DEGRADED") {
-    return "Analysis completed with skipped corrupt Parquet files.";
+    return "一部の収集データを読み込めませんでした。破損ファイルを除外して解析を継続しています。";
   }
   if (status === "STALE") {
     return "Analysis results are older than 30m (expected cadence: 15m).";
