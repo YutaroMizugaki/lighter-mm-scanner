@@ -4,13 +4,14 @@
 #   gcloud run worker-pools deploy
 #
 # Substitutions (set on trigger / CLI):
-#   _REGION, _AR_REPO, _WORKER_POOL, _GCS_BUCKET, _SERVICE_ACCOUNT
+#   _REGION, _AR_REPO, _WORKER_POOL, _GCS_BUCKET, _GCS_PUBLIC_BUCKET, _SERVICE_ACCOUNT
 
 substitutions:
   _REGION: asia-northeast1
   _AR_REPO: lighter-mm
   _WORKER_POOL: lighter-mm-collector
   _GCS_BUCKET: ""
+  _GCS_PUBLIC_BUCKET: ""
   _SERVICE_ACCOUNT: ""
   _CPU: "1"
   _MEMORY: 1Gi
@@ -81,6 +82,10 @@ steps:
         if [[ -n "${_SERVICE_ACCOUNT}" ]]; then
           SA_FLAGS+=(--service-account="${_SERVICE_ACCOUNT}")
         fi
+        ENV_VARS="ENVIRONMENT=cloud,STRUCTURED_LOGGING=true,LIGHTER_MM_NO_DASHBOARD=1,GCP_PROJECT_ID=$PROJECT_ID,GCP_REGION=${_REGION},GCS_BUCKET=${_GCS_BUCKET},RUN_TARGET_HOURS=${_RUN_TARGET_HOURS},GIT_SHA=$COMMIT_SHA,BOOK_SAMPLE_INTERVAL_SECONDS=5,PARQUET_ROTATION_MINUTES=15,GCS_UPLOAD_INTERVAL_MINUTES=15"
+        if [[ -n "${_GCS_PUBLIC_BUCKET}" ]]; then
+          ENV_VARS="${ENV_VARS},GCS_PUBLIC_BUCKET=${_GCS_PUBLIC_BUCKET}"
+        fi
         gcloud run worker-pools deploy "${_WORKER_POOL}" \
           --project="$PROJECT_ID" \
           --region="${_REGION}" \
@@ -88,7 +93,7 @@ steps:
           --cpu="${_CPU}" \
           --memory="${_MEMORY}" \
           --instances="${_INSTANCES}" \
-          --set-env-vars="ENVIRONMENT=cloud,STRUCTURED_LOGGING=true,LIGHTER_MM_NO_DASHBOARD=1,GCP_PROJECT_ID=$PROJECT_ID,GCP_REGION=${_REGION},GCS_BUCKET=${_GCS_BUCKET},RUN_TARGET_HOURS=${_RUN_TARGET_HOURS},GIT_SHA=$COMMIT_SHA,BOOK_SAMPLE_INTERVAL_SECONDS=5,PARQUET_ROTATION_MINUTES=15,GCS_UPLOAD_INTERVAL_MINUTES=15" \
+          --set-env-vars="${ENV_VARS}" \
           "${SA_FLAGS[@]}"
     waitFor: ["push"]
 
