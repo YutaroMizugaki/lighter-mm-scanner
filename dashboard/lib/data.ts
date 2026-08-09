@@ -5,6 +5,7 @@ export type CollectorStatus = {
   ended_at?: string | null;
   generated_at: string;
   last_successful_sync: string | null;
+  last_durable_event_at?: string | null;
   last_sync_attempt_at?: string | null;
   last_sync_error?: string | null;
   consecutive_sync_failures?: number;
@@ -62,6 +63,8 @@ export type Overview = {
   candidates: number;
   coverage_pct: number | null;
   last_update: string | null;
+  last_data_at?: string | null;
+  last_successful_sync?: string | null;
   last_successful_flush?: string | null;
   last_trade_at?: string | null;
   last_book_sample_at?: string | null;

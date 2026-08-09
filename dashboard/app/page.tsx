@@ -91,6 +91,11 @@ export default async function HomePage() {
     : null;
   const analysisNote = statusHealthNote(analysisFreshness.status, "analysis");
   const collectorSyncAt = collectorData?.last_successful_sync ?? null;
+  const lastDataAt =
+    collectorData?.last_durable_event_at ??
+    overview.last_data_at ??
+    overview.last_update ??
+    null;
   const lastAnalysisAt = analysisDisplayTimestamp(analysisData);
   const analysisError = analysisData?.status === "ERROR" ? analysisData.error : null;
   const analysisDegraded =
@@ -179,6 +184,12 @@ export default async function HomePage() {
       )}
       <section className="card">
         <div className="grid">
+          <div className="kpi">
+            <div className="label">Last Data</div>
+            <div className="muted" style={{ fontSize: "0.85rem" }}>
+              {fmtJst(lastDataAt)}
+            </div>
+          </div>
           <div className="kpi">
             <div className="label">Collector</div>
             <div className={`value status-${collectorStatus || "UNKNOWN"}`}>

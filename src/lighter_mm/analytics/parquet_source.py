@@ -61,6 +61,25 @@ def _parquet_file_list(paths: list[Path]) -> str:
     return "[" + ", ".join("'" + str(p).replace("'", "''") + "'" for p in paths) + "]"
 
 
+def _isolate_readable_parquet_files(
+    con: duckdb.DuckDBPyConnection,
+    paths: list[Path],
+) -> tuple[list[Path], list[dict[str, str]]]:
+    """Probe each Parquet file individually so one bad file cannot block analysis."""
+    valid: list[Path] = []
+    corrupt: list[dict[str, str]] = []
+    for path in paths:
+        try:
+            listed = _parquet_file_list([path])
+            con.execute(
+                f"SELECT 1 FROM read_parquet({listed}, hive_partitioning=1, union_by_name=true) LIMIT 1"
+            )
+            valid.append(path)
+        except Exception as exc:  # noqa: BLE001
+            corrupt.append({"path": str(path), "error": str(exc)})
+    return valid, corrupt
+
+
 def _probe_parquet_columns(
     con: duckdb.DuckDBPyConnection,
     patterns: list[str] | None = None,

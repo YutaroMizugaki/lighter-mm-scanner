@@ -115,6 +115,7 @@ def test_rename_failure_does_not_increment_rows_written(tmp_path: Path) -> None:
         ok = store.book._finalize_parquet_unlocked(tmp_path_file, final_path, rows_in_writer=1)
     assert not ok
     assert store.samples_written == 0
+    assert tmp_path_file.exists()
     assert not final_path.exists()
 
 

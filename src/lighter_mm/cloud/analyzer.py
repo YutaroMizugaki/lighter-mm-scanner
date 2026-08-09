@@ -138,6 +138,8 @@ def run_cloud_analyze(settings: Settings) -> int:
         if state is None:
             raise RuntimeError(f"run state missing for {run_id}")
 
+        sources = _analysis_sources_for_run(settings, run_id)
+
         if request_type == "final":
             if state.status != "completed" or not state.ended_at:
                 log.warning(
@@ -156,10 +158,9 @@ def run_cloud_analyze(settings: Settings) -> int:
                 return 0
 
         start_ms, end_ms, analysis_end_ms, durable_ms = _analysis_window_ms(
-            state, execution_start_ms=execution_start_ms
+            state, execution_start_ms=execution_start_ms, sources=sources
         )
 
-        sources = _analysis_sources_for_run(settings, run_id)
         log.info(
             "analyzing run_id=%s type=%s start_ms=%s end_ms=%s durable_ms=%s books=%s",
             run_id,

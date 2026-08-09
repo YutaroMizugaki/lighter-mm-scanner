@@ -114,9 +114,11 @@ def test_dashboard_labels_last_analysis_and_last_sync() -> None:
     data = DATA_TS.read_text(encoding="utf-8")
     assert "Last Analysis" in home
     assert "Last Sync" in home
+    assert "Last Data" in home
     assert "Last Update" not in home
     assert "analysisDisplayTimestamp" in data
     assert "last_successful_sync" in data
+    assert "last_durable_event_at" in data
 
 
 def test_dashboard_no_last_update_label() -> None:

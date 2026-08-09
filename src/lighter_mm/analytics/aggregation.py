@@ -29,6 +29,7 @@ from lighter_mm.analytics.parquet_source import (
     _default_sources,
     _glob_or_none,
     _glob_patterns,
+    _isolate_readable_parquet_files,
     _probe_parquet_columns,
     _read_view,
 )
@@ -140,16 +141,44 @@ def analyze_range(
     try:
         available_cols = _probe_parquet_columns(con, file_paths=book_valid)
     except Exception as exc:  # noqa: BLE001
-        log.exception("book parquet column probe failed: %s", exc)
-        return {
-            "hours": hours,
-            "start_ms": start_ms,
-            "end_ms": end_ms,
-            "markets": [],
-            "scored": [],
-            "error": f"book_samples parquet probe failed: {exc}",
-            "parquet_health": parquet_health,
-        }
+        log.warning("book parquet batch probe failed; isolating bad files: %s", exc)
+        book_valid, read_bad = _isolate_readable_parquet_files(con, book_valid)
+        all_corrupt.extend(read_bad)
+        parquet_health = parquet_health_summary(
+            {
+                "books": len(book_valid),
+                "trades": len(trade_valid),
+                "markouts": len(markout_valid),
+            },
+            all_corrupt,
+        )
+        if not book_valid:
+            log.error(
+                "analysis failed reason=no_readable_parquet_files corrupt_files=%s",
+                len(all_corrupt),
+            )
+            return {
+                "hours": hours,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "markets": [],
+                "scored": [],
+                "error": "no readable book_samples parquet files",
+                "parquet_health": parquet_health,
+            }
+        try:
+            available_cols = _probe_parquet_columns(con, file_paths=book_valid)
+        except Exception as retry_exc:  # noqa: BLE001
+            log.exception("book parquet column probe failed after isolation: %s", retry_exc)
+            return {
+                "hours": hours,
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "markets": [],
+                "scored": [],
+                "error": f"book_samples parquet probe failed: {retry_exc}",
+                "parquet_health": parquet_health,
+            }
 
     book_cols = _book_projection(available_cols)
     if not _read_view(

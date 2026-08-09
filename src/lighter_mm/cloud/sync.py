@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lighter_mm.storage.backend import StorageBackend
-from lighter_mm.storage.parquet_validation import validate_parquet_file
+from lighter_mm.storage.parquet_validation import parquet_max_timestamp_ms, validate_parquet_file
 
 log = logging.getLogger(__name__)
 
@@ -30,6 +30,7 @@ class UploadedParquet:
     local_path: Path
     remote_key: str
     size_bytes: int
+    max_event_timestamp_ms: int | None = None
 
 
 class DurableSync:
@@ -125,6 +126,7 @@ class DurableSync:
                     extra={"event": "parquet_validation_failed", "path": str(path)},
                 )
                 continue
+            max_event_ts = parquet_max_timestamp_ms(path)
             key = str(path)
             if key in self._uploaded:
                 continue
@@ -148,7 +150,9 @@ class DurableSync:
                 if delete_local_on_success and path.exists():
                     path.unlink()
                 self._uploaded.add(key)
-                uploaded.append(UploadedParquet(path, remote, size))
+                uploaded.append(
+                    UploadedParquet(path, remote, size, max_event_timestamp_ms=max_event_ts)
+                )
                 continue
             except Exception:
                 log.warning(
@@ -159,7 +163,9 @@ class DurableSync:
                 raise
             self._uploaded.add(key)
             self.bytes_uploaded += size
-            uploaded.append(UploadedParquet(path, remote, size))
+            uploaded.append(
+                UploadedParquet(path, remote, size, max_event_timestamp_ms=max_event_ts)
+            )
             log.info(
                 "parquet_flushed_remote",
                 extra={"event": "parquet_flushed", "path": remote, "bytes": size},

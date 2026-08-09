@@ -212,6 +212,7 @@ def test_analyzer_publishes_degraded_status(tmp_path: Path) -> None:
             started_at=now_iso(),
             status="running",
             last_successful_flush=now_iso(),
+            last_durable_event_ms=int(time.time() * 1000) - 60_000,
         ).to_public_dict(),
     )
     scored_obj = type("Scored", (), {"candidate": True})()

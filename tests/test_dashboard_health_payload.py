@@ -79,6 +79,7 @@ def test_payload_includes_flush_and_ws(tmp_path) -> None:
         started_at=now_iso(),
         status="running",
         last_successful_flush=now_iso(),
+        last_durable_event_ms=1_700_000_000_500,
         samples_written=50,
         markets=[1],
         last_trade_timestamp_ms=1_700_000_000_000,
@@ -100,5 +101,6 @@ def test_payload_includes_flush_and_ws(tmp_path) -> None:
     )
     latest = payload["latest"]
     assert latest["last_successful_flush"] == state.last_successful_flush
-    assert latest["last_update"] == state.last_successful_flush
+    assert latest["last_update"] != state.last_successful_flush
+    assert latest["last_successful_sync"] == state.last_successful_flush
     assert latest["ws"] == ws

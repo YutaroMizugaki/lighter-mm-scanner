@@ -15,6 +15,7 @@ class RunState(BaseModel):
     status: str = "running"  # running | completed | stopped | error
     observation_target_hours: float | None = None
     last_successful_flush: str | None = None
+    last_durable_event_ms: int | None = None
     last_trade_timestamp_ms: int | None = None
     collector_version: str = "0.1.0"
     git_sha: str | None = None

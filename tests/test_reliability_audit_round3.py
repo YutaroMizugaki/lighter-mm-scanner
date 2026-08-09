@@ -37,13 +37,14 @@ def _ms(iso: str) -> int:
     return int(dt.timestamp() * 1000)
 
 
-# A — Analyzer uses last_successful_flush durable watermark
+# A — Analyzer uses last_durable_event_ms durable watermark
 def test_analyzer_watermark_running_run() -> None:
     state = RunState(
         run_id="r1",
         started_at="2026-01-01T00:00:00+00:00",
         status="running",
-        last_successful_flush="2026-01-01T00:15:00+00:00",
+        last_successful_flush="2026-01-01T00:19:00+00:00",
+        last_durable_event_ms=_ms("2026-01-01T00:15:00+00:00"),
     )
     _, end_ms, _, durable_ms = _analysis_window_ms(
         state, execution_start_ms=_ms("2026-01-01T00:19:00+00:00")
@@ -58,13 +59,14 @@ def test_analyzer_refuses_missing_durable_watermark() -> None:
         run_id="r1",
         started_at="2026-01-01T00:00:00+00:00",
         status="running",
-        last_successful_flush=None,
+        last_successful_flush="2026-01-01T00:19:00+00:00",
+        last_durable_event_ms=None,
     )
     try:
         _analysis_window_ms(state, execution_start_ms=_ms("2026-01-01T00:19:00+00:00"))
         raise AssertionError("expected RuntimeError")
     except RuntimeError as exc:
-        assert "last_successful_flush" in str(exc)
+        assert "last_durable_event_ms" in str(exc)
 
 
 # C — Completed final analysis capped by durable watermark
@@ -74,7 +76,8 @@ def test_completed_run_capped_by_durable_watermark() -> None:
         started_at="2026-01-01T00:00:00+00:00",
         status="completed",
         ended_at="2026-01-03T00:00:00+00:00",
-        last_successful_flush="2026-01-02T23:59:00+00:00",
+        last_successful_flush="2026-01-03T00:05:00+00:00",
+        last_durable_event_ms=_ms("2026-01-02T23:59:00+00:00"),
     )
     _, end_ms, _, _ = _analysis_window_ms(
         state, execution_start_ms=_ms("2026-01-03T12:00:00+00:00")
@@ -88,7 +91,8 @@ def test_completed_run_uses_ended_at_when_flush_matches() -> None:
         started_at="2026-01-01T00:00:00+00:00",
         status="completed",
         ended_at="2026-01-03T00:00:00+00:00",
-        last_successful_flush="2026-01-03T00:00:00+00:00",
+        last_successful_flush="2026-01-03T00:05:00+00:00",
+        last_durable_event_ms=_ms("2026-01-03T00:00:00+00:00"),
     )
     _, end_ms, _, _ = _analysis_window_ms(
         state, execution_start_ms=_ms("2026-01-04T00:00:00+00:00")
