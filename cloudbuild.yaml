@@ -89,6 +89,8 @@ steps:
       - _GCS_PUBLIC_BUCKET=${_GCS_PUBLIC_BUCKET}
       - _SERVICE_ACCOUNT=${_SERVICE_ACCOUNT}
       - _SCHEDULER_SERVICE_ACCOUNT=${_SCHEDULER_SERVICE_ACCOUNT}
+      - _WORKER_POOL=${_WORKER_POOL}
+      - _ANALYZER_JOB=${_ANALYZER_JOB}
     waitFor: ["push"]
 
   # STEP 7 — deploy Cloud Run Worker Pool (manual scaling = 1)

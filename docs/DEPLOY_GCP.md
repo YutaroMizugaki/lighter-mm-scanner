@@ -58,6 +58,15 @@ gcloud services enable \
 If APIs are already enabled, this is a no-op. Cloud Build preflight checks API availability
 and fails with a clear message if bootstrap was skipped.
 
+Before triggering Cloud Build, run the read-only doctor (uses the same checks as preflight):
+
+```bash
+bash scripts/gcp_doctor.sh --project "$PROJECT_ID" --from-trigger lighter-mm-main
+# or pass substitutions explicitly — see scripts/gcp_doctor.sh --help
+```
+
+Exit `0` + `SAFE TO RETRY CLOUD BUILD` means known blockers are cleared.
+
 ## 3) Artifact Registry
 
 ```bash
