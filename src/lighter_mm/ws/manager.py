@@ -143,8 +143,15 @@ class WsManager:
                         1 for c in self._shard_conns.values() if c is not None
                     )
                     attempt = 0
-                    await self._subscribe_shard(ws, shard)
-                    resync_task = asyncio.create_task(self._resync_loop(ws, shard))
+                    # CRITICAL: subscribe concurrently with the read loop.
+                    # Sending all subs before reading causes receive-buffer
+                    # backlog (huge order_book snapshots) and server disconnects.
+                    sub_task = asyncio.create_task(
+                        self._subscribe_shard(ws, shard), name=f"sub-{shard.shard_id}"
+                    )
+                    resync_task = asyncio.create_task(
+                        self._resync_loop(ws, shard), name=f"resync-{shard.shard_id}"
+                    )
                     try:
                         async for raw in ws:
                             if self._stop.is_set():
@@ -157,8 +164,9 @@ class WsManager:
                                 continue
                             await self._handle_message(ws, shard, msg)
                     finally:
+                        sub_task.cancel()
                         resync_task.cancel()
-                        await asyncio.gather(resync_task, return_exceptions=True)
+                        await asyncio.gather(sub_task, resync_task, return_exceptions=True)
                         self._shard_conns[shard.shard_id] = None
                         self.runtime.connected_shards = sum(
                             1 for c in self._shard_conns.values() if c is not None
@@ -186,11 +194,16 @@ class WsManager:
                     continue
 
     async def _subscribe_shard(self, ws: ClientConnection, shard: ShardPlan) -> None:
-        for channel in shard.channels():
+        # Pace subscriptions and yield so the reader can drain snapshots.
+        for i, channel in enumerate(shard.channels(), start=1):
             if self._stop.is_set():
                 return
             await self._send(ws, {"type": "subscribe", "channel": channel})
             self.runtime.subscribed_channels += 1
+            if i % 10 == 0:
+                await asyncio.sleep(0.05)
+            else:
+                await asyncio.sleep(0)
 
     async def _resync_loop(self, ws: ClientConnection, shard: ShardPlan) -> None:
         q = self._resync_queues.setdefault(shard.shard_id, asyncio.Queue())

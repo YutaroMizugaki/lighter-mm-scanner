@@ -85,7 +85,8 @@ class CollectorApp:
             on_stats=self._on_stats,
         )
         await self._ws.start()
-        self._dashboard_enabled = self.dashboard.console.is_terminal
+        no_dash = os.environ.get("LIGHTER_MM_NO_DASHBOARD", "").lower() in {"1", "true", "yes"}
+        self._dashboard_enabled = (not no_dash) and self.dashboard.console.is_terminal
         if self._dashboard_enabled:
             self.dashboard.start()
         else:
@@ -288,6 +289,7 @@ class CollectorApp:
                 self.counters.dropped_connections = self._ws.runtime.dropped_connections
                 self.counters.book_resyncs = self._ws.runtime.book_resyncs
                 self.counters.nonce_gaps = self._ws.runtime.nonce_gaps
+                self.counters.client_messages_sent = self._ws.runtime.client_messages_sent
                 self.counters.ws_ok = self._ws.runtime.connected_shards > 0
 
     async def _markout_loop(self) -> None:

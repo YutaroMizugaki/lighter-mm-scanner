@@ -133,6 +133,11 @@ class LocalOrderBook:
         return safe_mid(bb[0], ba[0])
 
     def is_stale(self, now_ms: int, stale_seconds: float) -> bool:
+        """Stale if never synced, or silent far longer than expected.
+
+        Quiet books may not emit 50ms diffs when unchanged, so the threshold
+        is intentionally loose. Unsynced books after disconnect are always stale.
+        """
         if not self.synced or self.last_message_at_ms is None:
             return True
         return (now_ms - self.last_message_at_ms) > int(stale_seconds * 1000)

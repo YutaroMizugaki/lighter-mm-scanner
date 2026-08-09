@@ -24,7 +24,8 @@ class Settings(BaseSettings):
 
     book_sample_interval_seconds: float = Field(default=5.0, ge=1.0)
     market_refresh_seconds: int = Field(default=3600, ge=60)
-    stale_book_seconds: float = Field(default=30.0, ge=5.0)
+    # Quiet books may not emit diffs; keep this loose (connection loss → unsynced).
+    stale_book_seconds: float = Field(default=180.0, ge=5.0)
 
     # Official WS: 500 subs/conn, 200 client msgs/min — use margin
     max_subscriptions_per_connection: int = Field(default=450, ge=1, le=500)
