@@ -31,8 +31,8 @@ def test_home_page_detects_markets_fetch_failure() -> None:
     assert "Market aggregate data could not be loaded." in src
 
 
-def test_effective_status_uses_flush_not_generated_at() -> None:
+def test_effective_status_uses_durable_event_not_generated_at() -> None:
     src = DATA_TS.read_text(encoding="utf-8")
-    assert "last_successful_flush" in src
-    assert "Collector sync has not succeeded for >40m." in src
+    assert "last_durable_event_at" in src
+    assert "Market data has not been durably collected for >40m." in src
     assert "Public latest.json has not been refreshed" not in src

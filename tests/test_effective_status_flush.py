@@ -1,12 +1,11 @@
-"""Collector freshness status — prefer last_successful_flush over generated_at."""
+"""Collector freshness status — durable event age (mirrors dashboard/lib/data.ts)."""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
 
-# Mirrors dashboard/lib/data.ts effectiveStatus — keep in sync.
-def effective_status(
+def effective_collector_status(
     overview: dict,
     ok_minutes: float = 20,
     warn_minutes: float = 40,
@@ -16,100 +15,90 @@ def effective_status(
     baked = overview.get("status") or "ERROR"
     if baked in {"COMPLETED", "ERROR"}:
         return baked
-    stamp = overview.get("last_successful_flush") or overview.get("last_update")
-    if not stamp:
-        return "ERROR"
-    ts = datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() * 1000
+    sync_degraded = (overview.get("consecutive_sync_failures") or 0) > 0 or bool(
+        overview.get("last_sync_error")
+    )
+    event_stamp = overview.get("last_durable_event_at")
+    if not event_stamp:
+        if sync_degraded:
+            return "DEGRADED"
+        return "STALE"
+    ts = datetime.fromisoformat(event_stamp.replace("Z", "+00:00")).timestamp() * 1000
     age_min = (now_ms - ts) / 60_000
-    analyzed = overview.get("markets_analyzed")
-    if analyzed is None:
-        analyzed = overview.get("markets") or 0
-    samples = overview.get("samples_written") or 0
     if age_min > warn_minutes:
         return "OFFLINE"
     if age_min > ok_minutes:
         return "STALE"
-    if baked == "DEGRADED":
+    if sync_degraded or baked == "DEGRADED":
         return "DEGRADED"
-    if analyzed == 0 and samples > 0:
-        return "DEGRADED"
-    if analyzed > 0 and baked in {"OFFLINE", "STALE"}:
-        return "COLLECTING"
-    return baked
+    return "COLLECTING"
 
 
 def status_health_note(status: str) -> str | None:
-    """Mirrors dashboard/lib/data.ts statusHealthNote."""
     if status == "OFFLINE":
-        return "Collector data has not been successfully refreshed for >40m."
+        return "Market data has not been durably collected for >40m."
     if status == "STALE":
-        return "Collector data is older than 20m."
+        return "Latest durable market event is older than 20m."
     return None
 
 
-def test_fresh_last_successful_flush_is_collecting() -> None:
+def test_fresh_durable_event_is_collecting() -> None:
     now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
     overview = {
         "status": "COLLECTING",
         "last_successful_flush": (now - timedelta(minutes=2)).isoformat(),
-        "generated_at": (now - timedelta(minutes=2)).isoformat(),
+        "last_durable_event_at": (now - timedelta(minutes=2)).isoformat(),
         "markets": 205,
         "samples_written": 10000,
     }
-    assert (
-        effective_status(overview, now_ms=now.timestamp() * 1000) == "COLLECTING"
-    )
+    assert effective_collector_status(overview, now_ms=now.timestamp() * 1000) == "COLLECTING"
 
 
-def test_flush_20_to_40_min_is_stale() -> None:
+def test_fresh_sync_stale_durable_event_not_collecting() -> None:
     now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
     overview = {
         "status": "COLLECTING",
-        "last_successful_flush": (now - timedelta(minutes=25)).isoformat(),
-        "generated_at": (now - timedelta(minutes=25)).isoformat(),
+        "last_successful_flush": (now - timedelta(minutes=2)).isoformat(),
+        "last_durable_event_at": (now - timedelta(minutes=60)).isoformat(),
         "markets": 205,
         "samples_written": 10000,
     }
-    assert effective_status(overview, now_ms=now.timestamp() * 1000) == "STALE"
-    assert "collector data is older than 20m" in (status_health_note("STALE") or "").lower()
+    assert effective_collector_status(overview, now_ms=now.timestamp() * 1000) == "OFFLINE"
 
 
-def test_flush_over_40_min_is_offline() -> None:
+def test_durable_event_25_to_40_min_is_stale() -> None:
     now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
     overview = {
         "status": "COLLECTING",
-        "last_successful_flush": (now - timedelta(minutes=55)).isoformat(),
-        "generated_at": (now - timedelta(minutes=55)).isoformat(),
+        "last_successful_flush": (now - timedelta(minutes=2)).isoformat(),
+        "last_durable_event_at": (now - timedelta(minutes=25)).isoformat(),
         "markets": 205,
         "samples_written": 10000,
     }
-    assert effective_status(overview, now_ms=now.timestamp() * 1000) == "OFFLINE"
-    note = (status_health_note("OFFLINE") or "").lower()
-    assert "collector data" in note
-    assert "latest.json is stale" not in note
+    assert effective_collector_status(overview, now_ms=now.timestamp() * 1000) == "STALE"
+    assert "older than 20m" in (status_health_note("STALE") or "").lower()
 
 
-def test_fresh_generated_at_with_stale_flush_is_offline() -> None:
-    """generated_at alone must not mask a stalled collector flush."""
-    now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
-    overview = {
-        "status": "OFFLINE",
-        "last_successful_flush": (now - timedelta(minutes=55)).isoformat(),
-        "last_update": (now - timedelta(minutes=55)).isoformat(),
-        "generated_at": (now - timedelta(minutes=2)).isoformat(),
-        "markets": 205,
-        "samples_written": 10000,
-    }
-    assert effective_status(overview, now_ms=now.timestamp() * 1000) == "OFFLINE"
-
-
-def test_both_stamps_old_still_offline() -> None:
+def test_durable_event_over_40_min_is_offline() -> None:
     now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
     overview = {
         "status": "COLLECTING",
-        "last_update": (now - timedelta(minutes=55)).isoformat(),
-        "generated_at": (now - timedelta(minutes=50)).isoformat(),
+        "last_successful_flush": (now - timedelta(minutes=2)).isoformat(),
+        "last_durable_event_at": (now - timedelta(minutes=55)).isoformat(),
         "markets": 205,
         "samples_written": 10000,
     }
-    assert effective_status(overview, now_ms=now.timestamp() * 1000) == "OFFLINE"
+    assert effective_collector_status(overview, now_ms=now.timestamp() * 1000) == "OFFLINE"
+
+
+def test_sync_failure_with_fresh_durable_is_degraded() -> None:
+    now = datetime(2026, 8, 9, 12, 0, tzinfo=UTC)
+    overview = {
+        "status": "COLLECTING",
+        "last_successful_flush": (now - timedelta(minutes=2)).isoformat(),
+        "last_durable_event_at": (now - timedelta(minutes=2)).isoformat(),
+        "consecutive_sync_failures": 2,
+        "markets": 205,
+        "samples_written": 10000,
+    }
+    assert effective_collector_status(overview, now_ms=now.timestamp() * 1000) == "DEGRADED"

@@ -23,13 +23,22 @@ export type CollectorStatus = {
 };
 
 export type AnalysisStatus = {
-  status: "RUNNING" | "OK" | "DEGRADED" | "ERROR" | string;
+  status:
+    | "NOT_STARTED"
+    | "NO_ACTIVE_RUN"
+    | "RUNNING"
+    | "OK"
+    | "DEGRADED"
+    | "ERROR"
+    | string;
   run_id: string | null;
   generated_at: string;
   started_at?: string | null;
   error?: string | null;
   last_successful_analysis_at?: string | null;
   duration_seconds?: number | null;
+  git_sha?: string | null;
+  analyzer_version?: string | null;
   start_ms?: number;
   end_ms?: number;
   analysis_end_ms?: number;
@@ -118,6 +127,9 @@ export type MarketRow = {
   maker_markout_30s_median_bps: number | null;
   current_funding_rate: number | null;
   data_coverage_pct: number | null;
+  observation_coverage_pct?: number | null;
+  usable_quote_coverage_pct?: number | null;
+  spread_coverage_pct?: number | null;
   warnings?: string[];
   pros?: string[];
   cons?: string[];
@@ -262,8 +274,19 @@ function ageMinutes(stamp: string | null | undefined): number | null {
   return Number.isNaN(ageMin) ? null : ageMin;
 }
 
+function wsIsDegraded(ws: CollectorStatus["ws"]): boolean {
+  if (!ws) return false;
+  const connected = ws.connected_shards ?? 0;
+  const total = ws.total_shards ?? 0;
+  const planned = ws.planned_channels ?? ws.subscribed_channels ?? 0;
+  const acked = ws.acked_channels ?? ws.subscribed_channels ?? 0;
+  if (total > 0 && connected < total) return true;
+  if (planned > 0 && acked < planned) return true;
+  return false;
+}
+
 /**
- * Recompute collector status from collector_status.json durable sync age.
+ * Recompute collector status from durable market-event freshness, sync health, and WS health.
  */
 export function effectiveCollectorStatus(
   collector: CollectorStatus,
@@ -272,16 +295,23 @@ export function effectiveCollectorStatus(
 ): string {
   const baked = collector.status || "ERROR";
   if (baked === "COMPLETED" || baked === "ERROR") return baked;
-  const stamp = collector.last_successful_sync || null;
-  if (!stamp) {
-    if ((collector.consecutive_sync_failures ?? 0) > 0) return "DEGRADED";
+
+  const syncDegraded =
+    (collector.consecutive_sync_failures ?? 0) > 0 || Boolean(collector.last_sync_error);
+  const operationalDegraded = syncDegraded || wsIsDegraded(collector.ws) || baked === "DEGRADED";
+
+  const eventStamp = collector.last_durable_event_at || null;
+  if (!eventStamp) {
+    if (syncDegraded) return "DEGRADED";
     return baked === "DEGRADED" ? "DEGRADED" : "STALE";
   }
-  const ageMin = ageMinutes(stamp);
-  if (ageMin === null) return "ERROR";
-  if (ageMin > warnMinutes) return "OFFLINE";
-  if (ageMin > okMinutes) return "STALE";
-  if (baked === "DEGRADED") return "DEGRADED";
+
+  const eventAge = ageMinutes(eventStamp);
+  if (eventAge === null) return "ERROR";
+  if (eventAge > warnMinutes) return "OFFLINE";
+  if (eventAge > okMinutes) return "STALE";
+  if (operationalDegraded) return "DEGRADED";
+  if (baked === "COLLECTING" || baked === "STALE" || baked === "OFFLINE") return "COLLECTING";
   return baked;
 }
 
@@ -293,7 +323,9 @@ export function effectiveAnalysisStatus(
   staleMinutes = 30,
   runningStaleMinutes = 30,
 ): { status: string; stale: boolean } {
-  if (!analysis) return { status: "UNKNOWN", stale: true };
+  if (!analysis) return { status: "NOT_STARTED", stale: true };
+  if (analysis.status === "NOT_STARTED") return { status: "NOT_STARTED", stale: true };
+  if (analysis.status === "NO_ACTIVE_RUN") return { status: "NO_ACTIVE_RUN", stale: false };
   if (analysis.status === "ERROR") return { status: "ERROR", stale: false };
 
   if (analysis.status === "RUNNING") {
@@ -365,27 +397,30 @@ export function statusHealthNote(
 ): string | null {
   if (scope === "collector") {
     if (status === "OFFLINE") {
-      return "Collector sync has not succeeded for >40m.";
+      return "Market data has not been durably collected for >40m.";
     }
     if (status === "STALE") {
-      return "Collector sync is older than 20m.";
+      return "Latest durable market event is older than 20m.";
     }
     if (status === "DEGRADED") {
-      return "Collector durable sync degraded — check sync failures or book health.";
+      return "Collector degraded — check sync failures, durable event freshness, or WebSocket health.";
     }
     return null;
   }
+  if (status === "NOT_STARTED") {
+    return "Analyzer has not published a status yet.";
+  }
+  if (status === "NO_ACTIVE_RUN") {
+    return "No active collector run is available to analyze.";
+  }
   if (status === "ERROR") {
-    return "Analyzer run failed — see analysis_status.json error.";
+    return "Analyzer run failed — see error details below.";
   }
   if (status === "DEGRADED") {
     return "一部の収集データを読み込めませんでした。破損ファイルを除外して解析を継続しています。";
   }
   if (status === "STALE") {
     return "Analysis results are older than 30m (expected cadence: 15m).";
-  }
-  if (status === "UNKNOWN") {
-    return "analysis_status.json missing or unreadable.";
   }
   return null;
 }

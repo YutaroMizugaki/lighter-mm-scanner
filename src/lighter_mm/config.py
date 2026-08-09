@@ -83,6 +83,7 @@ class Settings(BaseSettings):
 
     git_sha: str | None = None
     collector_version: str = "0.1.0"
+    analyzer_version: str = "0.1.0"
 
     # Dashboard staleness thresholds (minutes)
     status_ok_minutes: float = 20.0

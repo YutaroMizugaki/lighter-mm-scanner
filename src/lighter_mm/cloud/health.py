@@ -27,6 +27,21 @@ def _age_minutes(ts: str | None, *, now: datetime | None = None) -> float | None
     return (ref - parsed).total_seconds() / 60.0
 
 
+def _age_minutes_ms(ms: int | None, *, now: datetime | None = None) -> float | None:
+    if ms is None:
+        return None
+    try:
+        parsed = datetime.fromtimestamp(ms / 1000.0, tz=UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
+    ref = now or datetime.now(UTC)
+    return (ref - parsed).total_seconds() / 60.0
+
+
+def _ws_is_degraded(ws_runtime: dict[str, object] | None) -> bool:
+    return bool(_ws_degraded(ws_runtime))
+
+
 def collector_status_label(
     state: RunState | None,
     *,
@@ -36,8 +51,10 @@ def collector_status_label(
     startup_grace_minutes: float = 5.0,
     last_sync_attempt_at: str | None = None,
     consecutive_sync_failures: int = 0,
+    last_sync_error: str | None = None,
+    ws_degraded: bool = False,
 ) -> str:
-    """Collector health label (independent of analysis freshness)."""
+    """Collector health label — durable event freshness is source of truth for STALE/OFFLINE."""
     if state is None:
         return "ERROR"
     if state.status == "completed":
@@ -45,29 +62,32 @@ def collector_status_label(
     if state.status == "error":
         return "ERROR"
 
-    flush = state.last_successful_flush
     started_age = _age_minutes(state.started_at)
     in_grace = started_age is not None and started_age <= startup_grace_minutes
+    sync_degraded = consecutive_sync_failures > 0 or bool(last_sync_error)
+    operational_degraded = degraded or ws_degraded or sync_degraded
 
-    if not flush:
+    event_age = _age_minutes_ms(state.last_durable_event_ms)
+    if event_age is None:
         if in_grace and state.status == "running":
-            return "DEGRADED" if degraded else "COLLECTING"
+            return "DEGRADED" if operational_degraded else "COLLECTING"
         if state.status == "running":
-            if consecutive_sync_failures > 0 or last_sync_attempt_at:
+            if sync_degraded:
                 return "DEGRADED"
+            if last_sync_attempt_at or state.last_successful_flush:
+                return "STALE"
             return "DEGRADED"
         return "ERROR"
 
-    age_min = _age_minutes(flush)
-    if age_min is None:
-        return "ERROR"
-    if degraded and state.status == "running" and age_min <= ok_minutes:
-        return "DEGRADED"
-    if state.status == "running" and age_min <= ok_minutes:
-        return "COLLECTING"
-    if age_min <= warn_minutes:
+    if event_age > warn_minutes:
+        return "OFFLINE" if state.status == "running" else state.status.upper()
+    if event_age > ok_minutes:
         return "STALE"
-    return "OFFLINE" if state.status == "running" else state.status.upper()
+    if operational_degraded and state.status == "running":
+        return "DEGRADED"
+    if state.status == "running":
+        return "COLLECTING"
+    return state.status.upper()
 
 
 def _ms_to_iso(ms: int | None) -> str | None:
@@ -242,7 +262,8 @@ def build_collector_status_payload(
         warnings.append(
             f"Durable sync has failed {consecutive_sync_failures} time(s) with no successful flush."
         )
-    degraded = bool(_ws_degraded(ws_runtime)) or any(
+    ws_degraded = _ws_is_degraded(ws_runtime)
+    degraded = ws_degraded or any(
         "stale" in w.lower() or "usable" in w.lower() or "sync failed" in w.lower()
         for w in warnings
     )
@@ -254,6 +275,8 @@ def build_collector_status_payload(
         startup_grace_minutes=settings.collector_startup_grace_minutes,
         last_sync_attempt_at=last_sync_attempt_at,
         consecutive_sync_failures=consecutive_sync_failures,
+        last_sync_error=last_sync_error,
+        ws_degraded=ws_degraded,
     )
     last_event_at = latest_data_timestamp_iso(
         last_book_sample_at_ms=last_book_sample_at_ms,

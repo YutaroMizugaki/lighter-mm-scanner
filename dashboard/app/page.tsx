@@ -112,7 +112,8 @@ export default async function HomePage() {
     collectorStatus === "OFFLINE" ||
     analysisFreshness.status === "ERROR" ||
     analysisFreshness.status === "STALE" ||
-    analysisFreshness.status === "UNKNOWN" ||
+    analysisFreshness.status === "NOT_STARTED" ||
+    analysisFreshness.status === "NO_ACTIVE_RUN" ||
     analysisDegraded ||
     healthWarnings.length > 0 ||
     analysisError ||

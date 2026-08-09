@@ -119,11 +119,14 @@ def test_degraded_when_ws_degraded() -> None:
 
 
 def test_collecting_on_cold_start_without_samples() -> None:
+    from datetime import UTC, datetime
+
     state = RunState(
         run_id="r1",
         started_at=now_iso(),
         status="running",
         last_successful_flush=now_iso(),
+        last_durable_event_ms=int(datetime.now(UTC).timestamp() * 1000) - 60_000,
         samples_written=0,
         markets=[1, 2, 3],
     )

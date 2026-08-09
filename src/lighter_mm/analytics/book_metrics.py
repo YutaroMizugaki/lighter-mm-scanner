@@ -59,7 +59,7 @@ def _aggregate_book_sql(
     interval_ms = int(settings.book_sample_interval_seconds * 1000)
 
     all_markets = con.execute(
-        "SELECT market_id, symbol, first_observed_ms, market_observation_seconds "
+        "SELECT market_id, symbol, first_observed_ms, last_observed_ms, market_observation_seconds "
         "FROM market_windows"
     ).fetchall()
 
@@ -68,8 +68,19 @@ def _aggregate_book_sql(
         SELECT
             market_id,
             MAX(symbol) AS symbol,
-            COUNT(*) AS observed_samples
-        FROM book_observed
+            COUNT(*) AS observed_samples,
+            COUNT(*) FILTER (
+                WHERE is_usable = true OR (is_usable IS NULL AND mid IS NOT NULL)
+            ) AS usable_samples
+        FROM book_deduped
+        GROUP BY market_id
+    ),
+    spread_cov_agg AS (
+        SELECT
+            market_id,
+            COUNT(*) AS spread_samples
+        FROM book_spread_observed
+        WHERE effective_spread_bps IS NOT NULL
         GROUP BY market_id
     ),
     metrics_agg AS (
@@ -114,6 +125,8 @@ def _aggregate_book_sql(
         mw.market_id,
         COALESCE(c.symbol, mw.symbol) AS symbol,
         COALESCE(c.observed_samples, 0) AS observed_samples,
+        COALESCE(c.usable_samples, 0) AS usable_samples,
+        COALESCE(sc.spread_samples, 0) AS spread_samples,
         s.mean_spread_bps,
         s.median_spread_bps,
         s.p10_spread_bps,
@@ -132,6 +145,7 @@ def _aggregate_book_sql(
         act.latest_book_update_age_seconds,
         act.p95_book_update_age_seconds,
         mw.first_observed_ms,
+        mw.last_observed_ms,
         mw.market_observation_seconds,
         CAST(
             GREATEST(
@@ -145,22 +159,46 @@ def _aggregate_book_sql(
                 1,
                 CAST(mw.market_observation_seconds * 1000 / {interval_ms} AS DOUBLE) + 1
             )
+        ) AS observation_coverage_pct,
+        CASE
+            WHEN COALESCE(c.observed_samples, 0) > 0 THEN LEAST(
+                100.0,
+                100.0 * COALESCE(c.usable_samples, 0) / COALESCE(c.observed_samples, 0)
+            )
+            ELSE 0.0
+        END AS usable_quote_coverage_pct,
+        CASE
+            WHEN COALESCE(c.observed_samples, 0) > 0 THEN LEAST(
+                100.0,
+                100.0 * COALESCE(sc.spread_samples, 0) / COALESCE(c.observed_samples, 0)
+            )
+            ELSE 0.0
+        END AS spread_coverage_pct,
+        LEAST(
+            100.0,
+            100.0 * COALESCE(c.observed_samples, 0) / GREATEST(
+                1,
+                CAST(mw.market_observation_seconds * 1000 / {interval_ms} AS DOUBLE) + 1
+            )
         ) AS data_coverage_pct
     FROM market_windows mw
     LEFT JOIN coverage_agg c ON mw.market_id = c.market_id
     LEFT JOIN spread_agg s ON mw.market_id = s.market_id
+    LEFT JOIN spread_cov_agg sc ON mw.market_id = sc.market_id
     LEFT JOIN metrics_agg m ON mw.market_id = m.market_id
     LEFT JOIN activity_agg act ON mw.market_id = act.market_id
     """
     result = con.execute(sql).fetchall()
     cols = [
-        "market_id", "symbol", "observed_samples", "mean_spread_bps", "median_spread_bps",
+        "market_id", "symbol", "observed_samples", "usable_samples", "spread_samples",
+        "mean_spread_bps", "median_spread_bps",
         "p10_spread_bps", "p25_spread_bps", "p75_spread_bps", "p90_spread_bps", "p95_spread_bps",
         "median_bbo_depth_usd", "median_two_sided_depth_5bps_usd",
         "median_two_sided_depth_10bps_usd", "median_two_sided_depth_25bps_usd",
         "current_funding_rate", "funding_rate", "open_interest", "daily_quote_volume_usd",
         "latest_book_update_age_seconds", "p95_book_update_age_seconds",
-        "first_observed_ms", "market_observation_seconds", "expected_samples",
+        "first_observed_ms", "last_observed_ms", "market_observation_seconds", "expected_samples",
+        "observation_coverage_pct", "usable_quote_coverage_pct", "spread_coverage_pct",
         "data_coverage_pct",
     ]
     out: dict[int, dict[str, Any]] = {}
@@ -171,11 +209,10 @@ def _aggregate_book_sql(
         obs_s = float(d.pop("market_observation_seconds") or 0)
         d["observation_hours"] = obs_s / 3600.0
         d["analysis_window_hours"] = hours
-        d["usable_samples"] = d.get("observed_samples", 0)
         out[mid] = d
         seen.add(mid)
 
-    for mid, symbol, first_obs, obs_s in all_markets:
+    for mid, symbol, first_obs, last_obs, obs_s in all_markets:
         if int(mid) in seen:
             continue
         obs = float(obs_s or 0)
@@ -184,9 +221,14 @@ def _aggregate_book_sql(
             "observation_hours": obs / 3600.0,
             "analysis_window_hours": hours,
             "first_observed_ms": first_obs,
+            "last_observed_ms": last_obs,
             "data_coverage_pct": 0.0,
+            "observation_coverage_pct": 0.0,
+            "usable_quote_coverage_pct": 0.0,
+            "spread_coverage_pct": 0.0,
             "observed_samples": 0,
             "usable_samples": 0,
+            "spread_samples": 0,
             "expected_samples": 0,
         }
     return out

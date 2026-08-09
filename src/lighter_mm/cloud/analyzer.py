@@ -60,9 +60,32 @@ def _check_leadership(lost_lock: threading.Event, *, phase: str) -> None:
 def run_cloud_analyze(settings: Settings) -> int:
     """Entry point for ``lighter-mm cloud-analyze`` Cloud Run Job."""
     backend = build_storage_backend(settings)
+    sync = DurableSync(
+        backend,
+        run_id="public",
+        gcs_prefix=settings.gcs_prefix,
+        public_prefix=settings.gcs_public_prefix,
+    )
+    last_ok = _last_successful_analysis_at(backend, sync)
+    prior_status = backend.download_json(sync.public_key("analysis_status.json"))
+
     selection = select_run_to_analyze(backend, settings)
     if selection is None:
-        log.info("no run to analyze; exiting")
+        if prior_status and prior_status.get("status") == "RUNNING":
+            log.info("no run to analyze while analysis RUNNING; leaving status unchanged")
+            return 0
+        status = "NOT_STARTED" if prior_status is None else "NO_ACTIVE_RUN"
+        _publish_analysis_status(
+            backend,
+            sync,
+            status=status,
+            run_id=None,
+            generated_at=now_iso(),
+            last_successful_analysis_at=last_ok,
+            git_sha=settings.git_sha,
+            analyzer_version=settings.analyzer_version,
+        )
+        log.info("no run to analyze; published status=%s", status)
         return 0
 
     run_id, request_type = selection
@@ -80,7 +103,11 @@ def run_cloud_analyze(settings: Settings) -> int:
         lease_seconds=settings.analyzer_lock_lease_seconds,
     )
     if not lock.acquire(run_id, git_sha=settings.git_sha):
-        log.info("analysis already running; exiting")
+        existing = backend.download_json(sync.public_key("analysis_status.json"))
+        if existing and existing.get("status") == "RUNNING":
+            log.info("analysis already running; leaving RUNNING status unchanged")
+            return 0
+        log.info("analysis lock busy; exiting without overwriting status")
         return 0
 
     lost_lock = threading.Event()
@@ -125,6 +152,8 @@ def run_cloud_analyze(settings: Settings) -> int:
             generated_at=generated_at,
             started_at=started_at,
             last_successful_analysis_at=last_ok,
+            git_sha=settings.git_sha,
+            analyzer_version=settings.analyzer_version,
         )
         log.info(
             "analysis_started run_id=%s type=%s last_successful_analysis_at=%s",
@@ -227,6 +256,8 @@ def run_cloud_analyze(settings: Settings) -> int:
             corrupt_parquet_files=int(parquet_health.get("corrupt_parquet_files") or 0),
             skipped_files=parquet_health.get("skipped_files") or None,
             parquet_health_status=parquet_health.get("status"),
+            git_sha=settings.git_sha,
+            analyzer_version=settings.analyzer_version,
         )
 
         if request_type == "final":
@@ -290,6 +321,8 @@ def run_cloud_analyze(settings: Settings) -> int:
                 corrupt_parquet_files=int(last_parquet_health.get("corrupt_parquet_files") or 0),
                 skipped_files=last_parquet_health.get("skipped_files") or None,
                 parquet_health_status=last_parquet_health.get("status"),
+                git_sha=settings.git_sha,
+                analyzer_version=settings.analyzer_version,
             )
         if request_type == "final" and final_claimed:
             _finalize_final_request_failure(

@@ -127,7 +127,7 @@ def build_narratives(
 
     if funding is not None and abs(float(funding)) > 0.01:
         warnings.append("funding relatively high")
-    cov = row.get("data_coverage_pct") or 0
+    cov = row.get("observation_coverage_pct") or row.get("data_coverage_pct") or 0
     if min_coverage_pct <= cov < 95:
         warnings.append("data coverage below 95%")
     for p in penalties:
@@ -207,7 +207,9 @@ def score_markets(
     depth = [r.get("median_two_sided_depth_10bps_usd") for r in rows]
     markout = [r.get("maker_markout_5s_median_bps") for r in rows]
     persistence = [r.get("pct_time_spread_ge_5bps") for r in rows]
-    coverage = [r.get("data_coverage_pct") for r in rows]
+    coverage = [
+        r.get("observation_coverage_pct") or r.get("data_coverage_pct") for r in rows
+    ]
 
     scored: list[ScoredMarket] = []
     for i, row in enumerate(rows):
@@ -247,7 +249,7 @@ def score_markets(
         ) / 100.0
 
         penalties: list[str] = []
-        cov = row.get("data_coverage_pct") or 0.0
+        cov = row.get("observation_coverage_pct") or row.get("data_coverage_pct") or 0.0
         if cov < thresholds.min_coverage_pct:
             score *= 0.55
             penalties.append(
