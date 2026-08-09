@@ -65,14 +65,28 @@ class GCSStorageBackend(StorageBackend):
         )
         if want_public:
             if self._public_bucket is not None:
-                pub = self._public_bucket.blob(remote_key)
-                pub.upload_from_string(data, content_type="application/json")
-                log.info(
-                    "gcs_public_uploaded %s",
-                    f"gs://{self.public_bucket_name}/{remote_key}",
-                    extra={"event": "gcs_uploaded", "path": remote_key},
-                )
+                try:
+                    pub = self._public_bucket.blob(remote_key)
+                    pub.upload_from_string(data, content_type="application/json")
+                    log.info(
+                        "gcs_public_uploaded %s",
+                        f"gs://{self.public_bucket_name}/{remote_key}",
+                        extra={"event": "gcs_public_uploaded", "path": remote_key},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.error(
+                        "gcs_public_upload_failed %s (%s)",
+                        remote_key,
+                        exc,
+                        extra={"event": "gcs_public_upload_failed", "path": remote_key},
+                    )
+                    raise
             else:
+                log.warning(
+                    "gcs_public_bucket_missing; not mirroring %s",
+                    remote_key,
+                    extra={"event": "gcs_public_bucket_missing", "path": remote_key},
+                )
                 self._try_make_public(blob)
 
         uri = self.uri_for(remote_key)
