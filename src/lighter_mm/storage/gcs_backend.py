@@ -55,18 +55,26 @@ class GCSStorageBackend(StorageBackend):
         log.info("gcs_uploaded %s", uri, extra={"event": "gcs_uploaded", "path": remote_key})
         return uri
 
+    # Public dashboard JSON must not sit behind the GCS default 1h edge cache —
+    # otherwise Vercel keeps serving a frozen latest.json while the live object
+    # on the public bucket has already advanced (observed: markets=0 for ~1h).
+    _PUBLIC_CACHE_CONTROL = "public, max-age=60, must-revalidate"
+
     def upload_json(self, remote_key: str, payload: dict[str, Any], *, public: bool = False) -> str:
         data = json.dumps(payload, indent=2, default=str)
         blob = self._bucket.blob(remote_key)
-        blob.upload_from_string(data, content_type="application/json")
-
         want_public = public or (
             self.make_public_prefix is not None and remote_key.startswith(self.make_public_prefix)
         )
         if want_public:
+            blob.cache_control = self._PUBLIC_CACHE_CONTROL
+        blob.upload_from_string(data, content_type="application/json")
+
+        if want_public:
             if self._public_bucket is not None:
                 try:
                     pub = self._public_bucket.blob(remote_key)
+                    pub.cache_control = self._PUBLIC_CACHE_CONTROL
                     pub.upload_from_string(data, content_type="application/json")
                     log.info(
                         "gcs_public_uploaded %s",

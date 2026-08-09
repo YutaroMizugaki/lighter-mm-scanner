@@ -59,9 +59,15 @@ export type FetchResult<T> =
 async function fetchJson<T>(path: string): Promise<FetchResult<T>> {
   const base = baseUrl();
   if (!base) return { ok: false, error: "NEXT_PUBLIC_DATA_BASE_URL is not set" };
-  const url = `${base}/${path.replace(/^\//, "")}`;
+  // Cache-bust query: GCS public objects previously defaulted to max-age=3600,
+  // so the edge kept serving a frozen latest.json for up to an hour.
+  const url = `${base}/${path.replace(/^\//, "")}?t=${Date.now()}`;
   try {
-    const res = await fetch(url, { next: { revalidate: 60 } });
+    const res = await fetch(url, {
+      cache: "no-store",
+      next: { revalidate: 0 },
+      headers: { "Cache-Control": "no-cache" },
+    });
     if (!res.ok) {
       return {
         ok: false,
