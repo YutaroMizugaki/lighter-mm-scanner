@@ -13,6 +13,7 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from tests.conftest import enrich_book_row
 
 from lighter_mm.analytics.aggregation import _trade_stats, analyze_window
 from lighter_mm.config import Settings
@@ -32,7 +33,7 @@ def _book_row(
     mid: float = 100.05,
     depth25: float = 400.0,
 ) -> dict:
-    return {
+    return enrich_book_row({
         "timestamp_ms": ts,
         "market_id": market_id,
         "symbol": "ETH",
@@ -68,7 +69,7 @@ def _book_row(
         "bid_depth_25bps_usd": 0.0 if stale else depth25,
         "ask_depth_25bps_usd": 0.0 if stale else depth25,
         "two_sided_depth_25bps_usd": 0.0 if stale else depth25,
-    }
+    })
 
 
 class _MockAtomicBackend:
@@ -362,7 +363,8 @@ def test_short_observation_blocks_candidate_despite_strong_metrics() -> None:
     assert scored[0].candidate is False
 
 
-def test_coverage_counts_stale_first_period(tmp_path: Path) -> None:
+def test_coverage_counts_inactive_with_mid_as_observed(tmp_path: Path) -> None:
+    """Inactive (stale-flag) rows with a valid mid count toward observation coverage."""
     settings = Settings(
         data_dir=tmp_path,
         reports_dir=tmp_path / "reports",
@@ -379,7 +381,7 @@ def test_coverage_counts_stale_first_period(tmp_path: Path) -> None:
     result = analyze_window(settings, hours=10 / 60)
     market = result["markets"][0]
     cov = market["data_coverage_pct"]
-    assert 40 <= cov <= 60
+    assert cov >= 95.0
 
 
 def test_new_market_tpm_uses_market_window(tmp_path: Path) -> None:

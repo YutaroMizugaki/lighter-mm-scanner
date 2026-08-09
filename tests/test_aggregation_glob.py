@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from tests.conftest import enrich_book_row
+
 from lighter_mm.analytics.aggregation import _glob_or_none, analyze_window
 from lighter_mm.config import Settings
 from lighter_mm.storage.parquet_store import ParquetStore
@@ -37,7 +39,7 @@ def test_analyze_window_reads_hour_partitioned_books(tmp_path: Path) -> None:
     )
     ts = int(time.time() * 1000)
     store.write_book(
-        {
+        enrich_book_row({
             "timestamp_ms": ts,
             "market_id": 1,
             "symbol": "ETH",
@@ -73,7 +75,7 @@ def test_analyze_window_reads_hour_partitioned_books(tmp_path: Path) -> None:
             "bid_depth_25bps_usd": 400.0,
             "ask_depth_25bps_usd": 400.0,
             "two_sided_depth_25bps_usd": 400.0,
-        }
+        })
     )
     store.close()
 

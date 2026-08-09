@@ -638,7 +638,7 @@ class CollectorApp:
                     stale_seconds=self.settings.stale_book_seconds,
                     now_ms=now,
                 )
-                if book.synced and not metrics.is_stale:
+                if metrics.is_usable:
                     ready += 1
                 stats = self._ws.stats_cache.get(mid)
                 row: dict[str, Any] = {
@@ -655,6 +655,9 @@ class CollectorApp:
                     "best_bid_size_usd": metrics.best_bid_size_usd,
                     "best_ask_size_usd": metrics.best_ask_size_usd,
                     "is_stale": metrics.is_stale,
+                    "is_usable": metrics.is_usable,
+                    "is_inactive": metrics.is_inactive,
+                    "book_update_age_ms": metrics.book_update_age_ms,
                     "nonce": metrics.nonce,
                     "index_price": float(stats.index_price) if stats and stats.index_price else None,
                     "mark_price": float(stats.mark_price) if stats and stats.mark_price else None,
@@ -681,7 +684,7 @@ class CollectorApp:
                 self.store.write_book(row)
                 self._sample_counts[mid] += 1
                 self._last_book_row_written_ts = now
-                if book.synced and not metrics.is_stale and metrics.mid is not None:
+                if metrics.is_usable:
                     self._last_usable_book_sample_ts = now
                     self.mid_histories[mid].add(now, metrics.mid)
                 tpm = self.activity.trades_per_minute(mid, now)
@@ -692,7 +695,8 @@ class CollectorApp:
                     "depth_10bps": metrics.depths.get("two_sided_depth_10bps_usd"),
                     "tpm": tpm,
                     "markout_5s": (sum(m5) / len(m5)) if m5 else None,
-                    "is_stale": metrics.is_stale,
+                    "is_stale": metrics.is_inactive,
+                    "is_usable": metrics.is_usable,
                 }
                 self.meta.update_dq(
                     mid,
@@ -792,7 +796,7 @@ class CollectorApp:
     def _live_top(self, n: int) -> list[dict[str, Any]]:
         rows = []
         for mid, m in self.live_metrics.items():
-            if m.get("is_stale"):
+            if not m.get("is_usable"):
                 continue
             spread = m.get("spread_bps") or 0.0
             depth = m.get("depth_10bps") or 0.0

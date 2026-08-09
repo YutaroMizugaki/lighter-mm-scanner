@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from tests.conftest import enrich_book_row
 
 from lighter_mm.analytics import aggregation as agg_mod
 from lighter_mm.analytics.aggregation import analyze_window
@@ -25,7 +26,7 @@ from lighter_mm.ws.manager import WsManager, WsRuntimeStats
 
 
 def _book_row(ts: int, *, stale: bool = False, market_id: int = 1) -> dict:
-    return {
+    return enrich_book_row({
         "timestamp_ms": ts,
         "market_id": market_id,
         "symbol": "ETH",
@@ -61,33 +62,36 @@ def _book_row(ts: int, *, stale: bool = False, market_id: int = 1) -> dict:
         "bid_depth_25bps_usd": 0.0 if stale else 400.0,
         "ask_depth_25bps_usd": 0.0 if stale else 400.0,
         "two_sided_depth_25bps_usd": 0.0 if stale else 400.0,
-    }
+    })
 
 
-# TEST A: stale mid is not added
-def test_stale_mid_not_added_to_mid_history() -> None:
+# TEST A: quiet synced book still contributes mid history
+def test_quiet_synced_book_adds_mid_history() -> None:
     hist = MidHistory(retention_seconds=180)
     book = LocalOrderBook(market_id=1, symbol="ETH")
     book.apply_snapshot(
         {
             "nonce": 1,
             "begin_nonce": 0,
-            "bids": [{"price": "100.0", "size": "1.0"}],
-            "asks": [{"price": "101.0", "size": "1.0"}],
+            "bids": [{"price": "100.00", "size": "10.0"}],
+            "asks": [{"price": "100.10", "size": "10.0"}],
         },
         recv_ms=int(time.time() * 1000) - 500_000,
     )
     metrics = book.compute_metrics(depth_bps_levels=[5, 10], stale_seconds=180, now_ms=int(time.time() * 1000))
-    assert metrics.is_stale
+    assert metrics.is_inactive
+    assert metrics.is_usable
     assert metrics.mid is not None
+    assert metrics.spread_bps is not None
+    assert metrics.depths["two_sided_depth_10bps_usd"] > 0
     before = len(hist)
-    if book.synced and not metrics.is_stale and metrics.mid is not None:
+    if metrics.is_usable and metrics.mid is not None:
         hist.add(int(time.time() * 1000), metrics.mid)
-    assert len(hist) == before
+    assert len(hist) == before + 1
 
 
-# TEST B: usable book timestamp
-def test_usable_book_timestamp_not_updated_on_stale() -> None:
+# TEST B: usable book timestamp updates even when inactive
+def test_usable_book_timestamp_updated_when_inactive() -> None:
     last_usable: int | None = None
     last_row: int | None = None
     now = int(time.time() * 1000)
@@ -96,17 +100,17 @@ def test_usable_book_timestamp_not_updated_on_stale() -> None:
         {
             "nonce": 1,
             "begin_nonce": 0,
-            "bids": [{"price": "100.0", "size": "1.0"}],
-            "asks": [{"price": "101.0", "size": "1.0"}],
+            "bids": [{"price": "100.00", "size": "10.0"}],
+            "asks": [{"price": "100.10", "size": "10.0"}],
         },
         recv_ms=now - 500_000,
     )
     metrics = book.compute_metrics(depth_bps_levels=[5, 10], stale_seconds=180, now_ms=now)
     last_row = now
-    if book.synced and not metrics.is_stale and metrics.mid is not None:
+    if metrics.is_usable and metrics.mid is not None:
         last_usable = now
     assert last_row is not None
-    assert last_usable is None
+    assert last_usable == now
 
 
 # TEST C: live TPM > 60

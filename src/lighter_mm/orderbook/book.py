@@ -32,7 +32,10 @@ class OrderBookMetrics:
     best_bid_size_usd: float | None
     best_ask_size_usd: float | None
     depths: dict[str, float]
-    is_stale: bool
+    is_stale: bool  # legacy alias: book inactivity (no recent WS update)
+    is_usable: bool
+    is_inactive: bool
+    book_update_age_ms: int | None
     nonce: int | None
 
 
@@ -140,15 +143,38 @@ class LocalOrderBook:
             return None
         return safe_mid(bb[0], ba[0])
 
-    def is_stale(self, now_ms: int, stale_seconds: float) -> bool:
-        """Stale if never synced, or silent far longer than expected.
+    def book_update_age_ms(self, now_ms: int) -> int | None:
+        """Milliseconds since the last order-book WS message, or None if never received."""
+        if self.last_message_at_ms is None:
+            return None
+        return now_ms - self.last_message_at_ms
 
-        Quiet books may not emit 50ms diffs when unchanged, so the threshold
-        is intentionally loose. Unsynced books after disconnect are always stale.
+    def is_inactive(self, now_ms: int, inactive_seconds: float) -> bool:
+        """True when no order-book update was received within ``inactive_seconds``.
+
+        Book inactivity is a market-activity signal — not a data-coverage failure.
         """
-        if not self.synced or self.last_message_at_ms is None:
+        age = self.book_update_age_ms(now_ms)
+        if age is None:
             return True
-        return (now_ms - self.last_message_at_ms) > int(stale_seconds * 1000)
+        return age > int(inactive_seconds * 1000)
+
+    def is_stale(self, now_ms: int, stale_seconds: float) -> bool:
+        """Backward-compatible alias for :meth:`is_inactive`."""
+        return self.is_inactive(now_ms, stale_seconds)
+
+    def is_usable(self) -> bool:
+        """Whether the local book is a valid observation (synced BBO + mid)."""
+        if not self.synced:
+            return False
+        bb = self.best_bid()
+        ba = self.best_ask()
+        if bb is None or ba is None:
+            return False
+        if ba[0] < bb[0]:
+            return False
+        mid = safe_mid(bb[0], ba[0])
+        return mid is not None and mid > 0
 
     def cumulative_depth_usd(
         self, side: str, mid: Decimal, bps: int
@@ -178,9 +204,11 @@ class LocalOrderBook:
         now_ms: int | None = None,
     ) -> OrderBookMetrics:
         now = now_ms or utc_ms()
-        stale = self.is_stale(now, stale_seconds)
-        if stale:
+        inactive = self.is_inactive(now, stale_seconds)
+        if inactive:
             self.stale_count += 1
+        usable = self.is_usable()
+        update_age = self.book_update_age_ms(now)
 
         bb = self.best_bid()
         ba = self.best_ask()
@@ -200,7 +228,7 @@ class LocalOrderBook:
         ask_usd = float(ba[0] * ba[1]) if ba else None
 
         depths: dict[str, float] = {}
-        if mid is not None and not stale and self.synced:
+        if mid is not None and usable:
             for bps in depth_bps_levels:
                 bid_d = float(self.cumulative_depth_usd("bid", mid, bps))
                 ask_d = float(self.cumulative_depth_usd("ask", mid, bps))
@@ -221,12 +249,15 @@ class LocalOrderBook:
             best_ask=float(best_ask) if best_ask is not None else None,
             mid=float(mid) if mid is not None else None,
             spread_absolute=spread_abs,
-            spread_bps=None if stale else spread_bps,
+            spread_bps=spread_bps,
             best_bid_size_base=bid_sz,
             best_ask_size_base=ask_sz,
             best_bid_size_usd=bid_usd,
             best_ask_size_usd=ask_usd,
             depths=depths,
-            is_stale=stale,
+            is_stale=inactive,
+            is_usable=usable,
+            is_inactive=inactive,
+            book_update_age_ms=update_age,
             nonce=self.nonce,
         )
