@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 import uuid
+from typing import Any
 
 from lighter_mm.analytics.aggregation import analyze_range
 from lighter_mm.cloud.analyzer_publish import (
@@ -101,6 +102,7 @@ def run_cloud_analyze(settings: Settings) -> int:
     generated_at = started_at
     last_ok = _last_successful_analysis_at(backend, sync)
     final_claimed = False
+    last_parquet_health: dict[str, Any] = {}
 
     try:
         if request_type == "final":
@@ -122,6 +124,7 @@ def run_cloud_analyze(settings: Settings) -> int:
             run_id=run_id,
             generated_at=generated_at,
             started_at=started_at,
+            last_successful_analysis_at=last_ok,
         )
         log.info(
             "analysis_started run_id=%s type=%s last_successful_analysis_at=%s",
@@ -174,8 +177,10 @@ def run_cloud_analyze(settings: Settings) -> int:
             sources=sources,
             duckdb_memory_limit=settings.duckdb_memory_limit,
             duckdb_threads=settings.duckdb_threads,
+            read_only=True,
         )
         parquet_health = result.get("parquet_health") or {}
+        last_parquet_health = parquet_health
         if result.get("error"):
             raise RuntimeError(str(result["error"]))
 
@@ -279,6 +284,11 @@ def run_cloud_analyze(settings: Settings) -> int:
                 started_at=started_at,
                 error=str(exc),
                 last_successful_analysis_at=last_ok,
+                duration_seconds=duration_seconds,
+                valid_parquet_files=int(last_parquet_health.get("valid_parquet_files") or 0),
+                corrupt_parquet_files=int(last_parquet_health.get("corrupt_parquet_files") or 0),
+                skipped_files=last_parquet_health.get("skipped_files") or None,
+                parquet_health_status=last_parquet_health.get("status"),
             )
         if request_type == "final" and final_claimed:
             _finalize_final_request_failure(

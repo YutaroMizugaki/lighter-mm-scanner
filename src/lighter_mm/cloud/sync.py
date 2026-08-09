@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 from lighter_mm.storage.backend import StorageBackend
+from lighter_mm.storage.parquet_validation import validate_parquet_file
 
 log = logging.getLogger(__name__)
 
@@ -185,19 +187,52 @@ class DurableSync:
                 continue
             local_key = str(local_path)
             if local_path.exists():
-                self._uploaded.add(local_key)
-            else:
-                raw = self.backend.download_bytes(remote_key)
-                if raw is None:
+                ok, err = validate_parquet_file(local_path)
+                if ok:
+                    self._uploaded.add(local_key)
                     continue
-                local_path.parent.mkdir(parents=True, exist_ok=True)
-                local_path.write_bytes(raw)
-                self._uploaded.add(local_key)
-                restored.append(remote_key)
-                log.info(
-                    "parquet_hydrated_local",
-                    extra={"event": "parquet_hydrated", "path": remote_key, "bytes": len(raw)},
+                log.warning(
+                    "local parquet corrupt; re-downloading path=%s error=%s",
+                    local_path,
+                    err,
                 )
+                try:
+                    local_path.unlink()
+                except OSError:
+                    pass
+            raw = self.backend.download_bytes(remote_key)
+            if raw is None:
+                continue
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = local_path.with_suffix(".parquet.tmp")
+            try:
+                tmp_path.write_bytes(raw)
+                ok, err = validate_parquet_file(tmp_path)
+                if not ok:
+                    log.warning(
+                        "remote parquet corrupt; skipping hydrate path=%s error=%s",
+                        remote_key,
+                        err,
+                    )
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+                    continue
+                os.replace(tmp_path, local_path)
+            except OSError as exc:
+                log.warning("hydrate atomic write failed path=%s error=%s", remote_key, exc)
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
+                continue
+            self._uploaded.add(local_key)
+            restored.append(remote_key)
+            log.info(
+                "parquet_hydrated_local",
+                extra={"event": "parquet_hydrated", "path": remote_key, "bytes": len(raw)},
+            )
             if on_progress is not None and progress_every > 0 and scanned % progress_every == 0:
                 on_progress(scanned, len(restored))
         if on_progress is not None:

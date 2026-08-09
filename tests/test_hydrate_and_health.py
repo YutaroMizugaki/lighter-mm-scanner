@@ -5,12 +5,15 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 from lighter_mm.analytics.aggregation import _glob_patterns, analyze_window
 from lighter_mm.cloud.dashboard_data import build_dashboard_payload, collector_status_label
 from lighter_mm.cloud.sync import DurableSync
 from lighter_mm.config import Settings
 from lighter_mm.storage.local_backend import LocalStorageBackend
-from lighter_mm.storage.parquet_store import ParquetStore
+from lighter_mm.storage.parquet_store import ParquetStore, _book_schema
 from lighter_mm.storage.state import RunState, now_iso
 from tests.helpers import enrich_book_row
 
@@ -63,7 +66,12 @@ def test_remote_books_hydrate_to_local_book_samples(tmp_path: Path) -> None:
 
     # Simulate prior upload: durable books/ (not book_samples/)
     src = tmp_path / "part.parquet"
-    src.write_bytes(b"parquet-bytes")
+    schema = _book_schema([5, 10, 25])
+    table = pa.Table.from_pylist(
+        [_book_row(int(time.time() * 1000))],
+        schema=schema,
+    )
+    pq.write_table(table, src)
     remote = "lighter-mm/runs/run1/books/date=2026-08-09/hour=10/part.parquet"
     be.upload_file(src, remote)
 
@@ -71,7 +79,7 @@ def test_remote_books_hydrate_to_local_book_samples(tmp_path: Path) -> None:
     assert restored == [remote]
     local = hot / "book_samples/date=2026-08-09/hour=10/part.parquet"
     assert local.exists()
-    assert local.read_bytes() == b"parquet-bytes"
+    assert local.stat().st_size > 0
     # Second hydrate is a no-op and marks file as already uploaded.
     assert sync.hydrate_run_parquets(hot) == []
     assert str(local) in sync._uploaded

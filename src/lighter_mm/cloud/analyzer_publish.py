@@ -84,11 +84,14 @@ def _publish_analysis_status(
         if parquet_health_status:
             payload["parquet_health_status"] = parquet_health_status
     elif status == "RUNNING":
-        pass
+        if last_successful_analysis_at:
+            payload["last_successful_analysis_at"] = last_successful_analysis_at
     else:
         payload["error"] = error
         if last_successful_analysis_at:
             payload["last_successful_analysis_at"] = last_successful_analysis_at
+        if duration_seconds is not None:
+            payload["duration_seconds"] = duration_seconds
         if valid_parquet_files is not None:
             payload["valid_parquet_files"] = valid_parquet_files
         if corrupt_parquet_files is not None:

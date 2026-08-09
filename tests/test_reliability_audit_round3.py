@@ -153,6 +153,7 @@ def test_sqlite_dq_failure_is_non_fatal(tmp_path: Path) -> None:
 
     asyncio.run(_inner())
     app.meta.update_dq_batch.assert_called_once()
+    assert app._pending_dq_rows == [(1, {"actual_samples": 1})]
 
 
 # G — Collector renew failure stops authoritative writes

@@ -45,6 +45,7 @@ class _RotatingWriter:
         self._current_date: str | None = None
         self._current_hour: str | None = None
         self.rows_written = 0
+        self._rows_in_open_writer = 0
         self._closed_paths: list[Path] = []
 
     def append(self, row: dict[str, Any]) -> None:
@@ -98,45 +99,62 @@ class _RotatingWriter:
     def _close_writer_unlocked(self) -> None:
         if self._writer is None:
             return
+        rows_in_writer = self._rows_in_open_writer
         self._writer.close()
         self._writer = None
+        self._rows_in_open_writer = 0
         if self._tmp_path is not None and self._current_path is not None:
-            self._finalize_parquet_unlocked(self._tmp_path, self._current_path)
+            finalized = self._finalize_parquet_unlocked(
+                self._tmp_path, self._current_path, rows_in_writer=rows_in_writer
+            )
+            if not finalized:
+                log.error(
+                    "parquet close lost %s un-finalized rows dataset=%s path=%s",
+                    rows_in_writer,
+                    self.dataset,
+                    self._current_path,
+                )
         self._current_path = None
         self._tmp_path = None
         self._current_part = None
         self._current_date = None
         self._current_hour = None
 
-    def _finalize_parquet_unlocked(self, tmp_path: Path, final_path: Path) -> None:
+    def _finalize_parquet_unlocked(
+        self, tmp_path: Path, final_path: Path, *, rows_in_writer: int
+    ) -> bool:
         ok, err = validate_parquet_file(tmp_path)
         if not ok:
             log.error(
-                "parquet write validation failed path=%s error=%s",
+                "parquet write validation failed path=%s error=%s rows_lost=%s",
                 tmp_path,
                 err,
+                rows_in_writer,
             )
             try:
                 tmp_path.unlink()
             except OSError as unlink_exc:
                 log.warning("failed to remove invalid temp parquet %s: %s", tmp_path, unlink_exc)
-            return
+            return False
         try:
             os.replace(tmp_path, final_path)
         except OSError as exc:
             log.error(
-                "parquet atomic rename failed tmp=%s final=%s error=%s",
+                "parquet atomic rename failed tmp=%s final=%s error=%s rows_lost=%s",
                 tmp_path,
                 final_path,
                 exc,
+                rows_in_writer,
             )
             try:
                 tmp_path.unlink()
             except OSError:
                 pass
-            return
+            return False
+        self.rows_written += rows_in_writer
         self._closed_paths.append(final_path)
-        log.debug("finalized parquet %s", final_path)
+        log.debug("finalized parquet %s rows=%s", final_path, rows_in_writer)
+        return True
 
     def _part_key(self, ts_ms: int | None) -> tuple[str, str, str]:
         if ts_ms is None:
@@ -179,14 +197,28 @@ class _RotatingWriter:
         for row in self._buffer:
             key = self._part_key(row.get("timestamp_ms"))
             by_part.setdefault(key, []).append(row)
-        self._buffer.clear()
+        failed_rows: list[dict[str, Any]] = []
+        flushed_any = False
         for (date, hour, part), rows in by_part.items():
-            self._ensure_writer(date, hour, part)
-            assert self._writer is not None
-            table = pa.Table.from_pylist(rows, schema=self.schema)
-            self._writer.write_table(table)
-            self.rows_written += len(rows)
-        self._last_flush = time.monotonic()
+            try:
+                self._ensure_writer(date, hour, part)
+                assert self._writer is not None
+                table = pa.Table.from_pylist(rows, schema=self.schema)
+                self._writer.write_table(table)
+                self._rows_in_open_writer += len(rows)
+                flushed_any = True
+            except Exception as exc:
+                log.error(
+                    "parquet flush write failed dataset=%s part=%s rows=%s error=%s",
+                    self.dataset,
+                    part,
+                    len(rows),
+                    exc,
+                )
+                failed_rows.extend(rows)
+        self._buffer = failed_rows
+        if flushed_any:
+            self._last_flush = time.monotonic()
 
 
 def _book_schema(depth_levels: list[int]) -> pa.Schema:

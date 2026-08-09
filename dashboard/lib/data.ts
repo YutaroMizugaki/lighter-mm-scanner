@@ -5,6 +5,9 @@ export type CollectorStatus = {
   ended_at?: string | null;
   generated_at: string;
   last_successful_sync: string | null;
+  last_sync_attempt_at?: string | null;
+  last_sync_error?: string | null;
+  consecutive_sync_failures?: number;
   samples_written: number;
   trades_written: number;
   markouts_written: number;
@@ -151,19 +154,32 @@ async function fetchJson<T>(path: string): Promise<FetchResult<T>> {
   }
 }
 
-async function resolveGenerationPrefix(): Promise<string> {
+export type DashboardBundle = {
+  prefix: string;
+  legacy: boolean;
+};
+
+export async function resolveDashboardBundle(): Promise<DashboardBundle> {
   const current = await fetchJson<DashboardGeneration>("current.json");
   if (current.ok && current.data.analysis_id) {
-    return `generations/${current.data.analysis_id}/`;
+    return {
+      prefix: `generations/${current.data.analysis_id}/`,
+      legacy: false,
+    };
   }
-  return "";
+  return { prefix: "", legacy: true };
+}
+
+async function resolveGenerationPrefix(): Promise<string> {
+  const bundle = await resolveDashboardBundle();
+  return bundle.prefix;
 }
 
 export async function getOverview(): Promise<Overview | null> {
-  const prefix = await resolveGenerationPrefix();
-  const result = await fetchJson<Overview>(`${prefix}latest.json`);
+  const bundle = await resolveDashboardBundle();
+  const result = await fetchJson<Overview>(`${bundle.prefix}latest.json`);
   if (result.ok) return result.data;
-  if (prefix) {
+  if (!bundle.legacy) {
     const legacy = await fetchJson<Overview>("latest.json");
     return legacy.ok ? legacy.data : null;
   }
@@ -171,10 +187,10 @@ export async function getOverview(): Promise<Overview | null> {
 }
 
 export async function getOverviewResult(): Promise<FetchResult<Overview>> {
-  const prefix = await resolveGenerationPrefix();
-  const result = await fetchJson<Overview>(`${prefix}latest.json`);
+  const bundle = await resolveDashboardBundle();
+  const result = await fetchJson<Overview>(`${bundle.prefix}latest.json`);
   if (result.ok) return result;
-  if (prefix) return fetchJson<Overview>("latest.json");
+  if (!bundle.legacy) return fetchJson<Overview>("latest.json");
   return result;
 }
 
@@ -186,13 +202,15 @@ export async function getAnalysisStatusResult(): Promise<FetchResult<AnalysisSta
   return fetchJson<AnalysisStatus>("analysis_status.json");
 }
 
-export async function getMarketsResult(): Promise<
-  FetchResult<{ markets: MarketRow[] }>
-> {
-  const prefix = await resolveGenerationPrefix();
-  const result = await fetchJson<{ markets: MarketRow[] }>(`${prefix}markets.json`);
+export async function getMarketsResult(
+  bundle?: DashboardBundle,
+): Promise<FetchResult<{ markets: MarketRow[] }>> {
+  const resolved = bundle ?? (await resolveDashboardBundle());
+  const result = await fetchJson<{ markets: MarketRow[] }>(
+    `${resolved.prefix}markets.json`,
+  );
   if (result.ok) return result;
-  if (prefix) return fetchJson<{ markets: MarketRow[] }>("markets.json");
+  if (!resolved.legacy) return fetchJson<{ markets: MarketRow[] }>("markets.json");
   return result;
 }
 
@@ -202,13 +220,16 @@ export async function getMarkets(): Promise<MarketRow[]> {
   return result.ok ? result.data.markets ?? [] : [];
 }
 
-export async function getMarket(symbol: string): Promise<MarketRow | null> {
-  const prefix = await resolveGenerationPrefix();
+export async function getMarket(
+  symbol: string,
+  bundle?: DashboardBundle,
+): Promise<MarketRow | null> {
+  const resolved = bundle ?? (await resolveDashboardBundle());
   const result = await fetchJson<MarketRow>(
-    `${prefix}market/${encodeURIComponent(symbol)}.json`,
+    `${resolved.prefix}market/${encodeURIComponent(symbol)}.json`,
   );
   if (result.ok) return result.data;
-  if (prefix) {
+  if (!resolved.legacy) {
     const legacy = await fetchJson<MarketRow>(`market/${encodeURIComponent(symbol)}.json`);
     return legacy.ok ? legacy.data : null;
   }
@@ -232,8 +253,14 @@ export function fmtJst(iso: string | null | undefined): string {
   );
 }
 
+function ageMinutes(stamp: string | null | undefined): number | null {
+  if (!stamp) return null;
+  const ageMin = (Date.now() - new Date(stamp).getTime()) / 60_000;
+  return Number.isNaN(ageMin) ? null : ageMin;
+}
+
 /**
- * Recompute collector status from collector_status.json flush age.
+ * Recompute collector status from collector_status.json durable sync age.
  */
 export function effectiveCollectorStatus(
   collector: CollectorStatus,
@@ -242,10 +269,13 @@ export function effectiveCollectorStatus(
 ): string {
   const baked = collector.status || "ERROR";
   if (baked === "COMPLETED" || baked === "ERROR") return baked;
-  const stamp = collector.last_successful_sync || collector.generated_at || null;
-  if (!stamp) return "ERROR";
-  const ageMin = (Date.now() - new Date(stamp).getTime()) / 60_000;
-  if (Number.isNaN(ageMin)) return "ERROR";
+  const stamp = collector.last_successful_sync || null;
+  if (!stamp) {
+    if ((collector.consecutive_sync_failures ?? 0) > 0) return "DEGRADED";
+    return baked === "DEGRADED" ? "DEGRADED" : "STALE";
+  }
+  const ageMin = ageMinutes(stamp);
+  if (ageMin === null) return "ERROR";
   if (ageMin > warnMinutes) return "OFFLINE";
   if (ageMin > okMinutes) return "STALE";
   if (baked === "DEGRADED") return "DEGRADED";
@@ -258,16 +288,29 @@ export function effectiveCollectorStatus(
 export function effectiveAnalysisStatus(
   analysis: AnalysisStatus | null,
   staleMinutes = 30,
+  runningStaleMinutes = 30,
 ): { status: string; stale: boolean } {
   if (!analysis) return { status: "UNKNOWN", stale: true };
   if (analysis.status === "ERROR") return { status: "ERROR", stale: false };
-  if (analysis.status === "RUNNING") return { status: "RUNNING", stale: false };
-  if (analysis.status === "DEGRADED") return { status: "DEGRADED", stale: false };
+
+  if (analysis.status === "RUNNING") {
+    const runningStamp = analysis.started_at || analysis.generated_at || null;
+    const runningAge = ageMinutes(runningStamp);
+    if (runningAge !== null && runningAge > runningStaleMinutes) {
+      return { status: "STALE", stale: true };
+    }
+    return { status: "RUNNING", stale: false };
+  }
+
   const stamp =
     analysis.last_successful_analysis_at || analysis.generated_at || null;
-  if (!stamp) return { status: analysis.status, stale: true };
-  const ageMin = (Date.now() - new Date(stamp).getTime()) / 60_000;
-  const stale = ageMin > staleMinutes;
+  const ageMin = ageMinutes(stamp);
+  const stale = ageMin !== null && ageMin > staleMinutes;
+
+  if (analysis.status === "DEGRADED") {
+    if (stale) return { status: "STALE", stale: true };
+    return { status: "DEGRADED", stale: false };
+  }
   if (stale && analysis.status === "OK") {
     return { status: "STALE", stale: true };
   }
@@ -300,8 +343,8 @@ export function effectiveStatus(
   if (baked === "COMPLETED" || baked === "ERROR") return baked;
   const stamp = overview.last_successful_flush || overview.last_update || null;
   if (!stamp) return "ERROR";
-  const ageMin = (Date.now() - new Date(stamp).getTime()) / 60_000;
-  if (Number.isNaN(ageMin)) return "ERROR";
+  const ageMin = ageMinutes(stamp);
+  if (ageMin === null) return "ERROR";
   const analyzed = overview.markets_analyzed ?? overview.markets ?? 0;
   const samples = overview.samples_written ?? 0;
   if (ageMin > warnMinutes) return "OFFLINE";
@@ -323,6 +366,9 @@ export function statusHealthNote(
     }
     if (status === "STALE") {
       return "Collector sync is older than 20m.";
+    }
+    if (status === "DEGRADED") {
+      return "Collector durable sync degraded — check sync failures or book health.";
     }
     return null;
   }

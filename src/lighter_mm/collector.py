@@ -101,6 +101,9 @@ class CollectorApp:
         self._lost_leadership = False
         self._pending_dq_rows: list[tuple[int, dict[str, Any]]] = []
         self._last_dq_flush_mono = 0.0
+        self._last_sync_error: str | None = None
+        self._consecutive_sync_failures = 0
+        self._last_sync_attempt_at: str | None = None
 
         self.run_id, self.state, resumed = self._resolve_run()
         self.sync = DurableSync(
@@ -479,6 +482,9 @@ class CollectorApp:
             last_book_sample_at_ms=self._last_usable_book_sample_ts,
             last_book_row_at_ms=self._last_book_row_written_ts,
             trades_without_reference_mid=self._trades_without_reference_mid,
+            last_sync_error=getattr(self, "_last_sync_error", None),
+            consecutive_sync_failures=getattr(self, "_consecutive_sync_failures", 0),
+            last_sync_attempt_at=getattr(self, "_last_sync_attempt_at", None),
         )
         self.backend.upload_json(
             self.sync.public_key("collector_status.json"), payload, public=True
@@ -487,6 +493,7 @@ class CollectorApp:
     def _sync_only(self, *, final: bool) -> None:
         """Upload closed Parquet parts — no DuckDB analysis."""
         self._require_leadership(phase="parquet sync")
+        self._last_sync_attempt_at = now_iso()
         self.store.maybe_flush()
         self.store.rotate_all()
         closed = self.store.take_closed_paths()
@@ -494,8 +501,10 @@ class CollectorApp:
             uploaded = self.sync.upload_new_parquets(
                 self.settings.data_dir, paths=closed, delete_local_on_success=True
             )
-        except Exception:
+        except Exception as exc:
             self.store.requeue_closed_paths(closed)
+            self._consecutive_sync_failures += 1
+            self._last_sync_error = str(exc)
             raise
         self._require_leadership(phase="post-sync state upload")
         log_event(
@@ -507,6 +516,8 @@ class CollectorApp:
         )
         flush_at = now_iso()
         self.state.last_successful_flush = flush_at
+        self._consecutive_sync_failures = 0
+        self._last_sync_error = None
         self._write_state()
         self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
         self.backend.upload_json(
@@ -684,6 +695,13 @@ class CollectorApp:
             self.meta.update_dq_batch(rows)
         except Exception as exc:  # noqa: BLE001
             log.warning("sqlite dq batch write failed: %s", exc)
+            # Requeue at front; cap growth to avoid unbounded memory on persistent failure.
+            merged = rows + self._pending_dq_rows
+            if len(merged) > 50_000:
+                log.error("sqlite dq requeue cap exceeded; dropping oldest rows")
+                merged = merged[-50_000:]
+            self._pending_dq_rows = merged
+            return
         self._last_dq_flush_mono = loop.time()
 
     async def _sample_loop(self) -> None:
