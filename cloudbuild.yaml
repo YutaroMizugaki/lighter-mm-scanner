@@ -28,6 +28,7 @@ substitutions:
 
 options:
   logging: CLOUD_LOGGING_ONLY
+  automapSubstitutions: true
 
 steps:
   # STEP 1 — install
@@ -81,6 +82,7 @@ steps:
     args:
       - scripts/cloudbuild_preflight.sh
     env:
+      - PROJECT_ID=$PROJECT_ID
       - _REGION=${_REGION}
       - _AR_REPO=${_AR_REPO}
       - _GCS_BUCKET=${_GCS_BUCKET}
