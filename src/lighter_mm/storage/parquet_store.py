@@ -35,11 +35,12 @@ class _RotatingWriter:
         self._lock = threading.Lock()
         self._last_flush = time.monotonic()
         self._writer: pq.ParquetWriter | None = None
+        self._current_path: Path | None = None
         self._current_part: str | None = None
         self._current_date: str | None = None
         self._current_hour: str | None = None
         self.rows_written = 0
-        self.closed_paths: list[Path] = []
+        self._closed_paths: list[Path] = []
 
     def append(self, row: dict[str, Any]) -> None:
         with self._lock:
@@ -59,17 +60,47 @@ class _RotatingWriter:
         """Force close current part file so durable sync can upload it."""
         with self._lock:
             self._flush_unlocked()
-            if self._writer is not None:
-                self._writer.close()
-                self._writer = None
-                self._current_part = None
+            self._close_writer_unlocked()
 
     def close(self) -> None:
         with self._lock:
             self._flush_unlocked()
-            if self._writer is not None:
-                self._writer.close()
-                self._writer = None
+            self._close_writer_unlocked()
+
+    def take_closed_paths(self) -> list[Path]:
+        """Return and clear completed part files safe to upload."""
+        with self._lock:
+            paths = list(self._closed_paths)
+            self._closed_paths.clear()
+            return paths
+
+    def requeue_closed_paths(self, paths: list[Path]) -> None:
+        """Return paths to the closed set after a failed upload attempt."""
+        root = self.root / self.dataset
+        with self._lock:
+            for path in paths:
+                try:
+                    path.resolve().relative_to(root.resolve())
+                except ValueError:
+                    continue
+                if path not in self._closed_paths and path != self._current_path:
+                    self._closed_paths.append(path)
+
+    def open_path(self) -> Path | None:
+        with self._lock:
+            return self._current_path
+
+    def _close_writer_unlocked(self) -> None:
+        if self._writer is None:
+            return
+        self._writer.close()
+        self._writer = None
+        if self._current_path is not None:
+            self._closed_paths.append(self._current_path)
+            self._current_path = None
+        self._current_part = None
+        self._current_date = None
+        self._current_hour = None
 
     def _part_key(self, ts_ms: int | None) -> tuple[str, str, str]:
         if ts_ms is None:
@@ -91,18 +122,17 @@ class _RotatingWriter:
         ):
             return
         if self._writer is not None:
-            self._writer.close()
-            self._writer = None
+            self._close_writer_unlocked()
         out_dir = self.root / self.dataset / f"date={date}" / f"hour={hour}"
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / f"part-{part}.parquet"
         if path.exists():
             path = out_dir / f"part-{part}-{int(time.time())}.parquet"
         self._writer = pq.ParquetWriter(path, self.schema, compression="zstd")
+        self._current_path = path
         self._current_part = part
         self._current_date = date
         self._current_hour = hour
-        self.closed_paths.append(path)
         log.debug("opened parquet %s", path)
 
     def _flush_unlocked(self) -> None:
@@ -233,6 +263,19 @@ class ParquetStore:
         self.book.rotate_now()
         self.trades.rotate_now()
         self.markouts.rotate_now()
+
+    def take_closed_paths(self) -> list[Path]:
+        """Closed Parquet parts across datasets (safe for durable upload)."""
+        return (
+            self.book.take_closed_paths()
+            + self.trades.take_closed_paths()
+            + self.markouts.take_closed_paths()
+        )
+
+    def requeue_closed_paths(self, paths: list[Path]) -> None:
+        self.book.requeue_closed_paths(paths)
+        self.trades.requeue_closed_paths(paths)
+        self.markouts.requeue_closed_paths(paths)
 
     def close(self) -> None:
         self.book.close()

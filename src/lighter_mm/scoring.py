@@ -247,13 +247,17 @@ def score_markets(
 
         tpm = float(row.get("trades_per_minute_median") or 0.0)
         min_tpm = thresholds.min_trades_per_hour / 60.0
+        # Missing markouts must not pass — that treated "no adverse-selection
+        # evidence yet" as a free candidate pass for thin/new markets.
         candidate = (
             cov >= thresholds.min_coverage_pct
             and tpm >= min_tpm
             and d10 >= thresholds.min_two_sided_depth_10bps_usd
             and (row.get("median_spread_bps") or 0) >= thresholds.min_median_spread_bps
-            and (m5 is None or m5 >= thresholds.min_markout_5s_median_bps)
-            and (m30 is None or m30 >= thresholds.min_markout_30s_median_bps)
+            and m5 is not None
+            and m5 >= thresholds.min_markout_5s_median_bps
+            and m30 is not None
+            and m30 >= thresholds.min_markout_30s_median_bps
         )
         # Also require activity percentile not bottom 20% among peers when enough markets
         if len(rows) >= 10 and pr_act < 20:
