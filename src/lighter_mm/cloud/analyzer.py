@@ -175,6 +175,7 @@ def run_cloud_analyze(settings: Settings) -> int:
             duckdb_memory_limit=settings.duckdb_memory_limit,
             duckdb_threads=settings.duckdb_threads,
         )
+        parquet_health = result.get("parquet_health") or {}
         if result.get("error"):
             raise RuntimeError(str(result["error"]))
 
@@ -194,11 +195,14 @@ def run_cloud_analyze(settings: Settings) -> int:
         candidates = [s for s in scored if s.candidate]
         completed_at = now_iso()
         duration_seconds = time.time() - execution_start
+        analysis_status = (
+            "DEGRADED" if parquet_health.get("status") == "degraded" else "OK"
+        )
         _check_leadership(lost_lock, phase="final status publish")
         _publish_analysis_status(
             backend,
             sync,
-            status="OK",
+            status=analysis_status,
             run_id=run_id,
             generated_at=completed_at,
             last_successful_analysis_at=completed_at,
@@ -213,6 +217,10 @@ def run_cloud_analyze(settings: Settings) -> int:
             markout_rows=int(result.get("markout_row_count") or 0),
             markets_analyzed=len(scored),
             candidates=len(candidates),
+            valid_parquet_files=int(parquet_health.get("valid_parquet_files") or 0),
+            corrupt_parquet_files=int(parquet_health.get("corrupt_parquet_files") or 0),
+            skipped_files=parquet_health.get("skipped_files") or None,
+            parquet_health_status=parquet_health.get("status"),
         )
 
         if request_type == "final":
@@ -229,13 +237,16 @@ def run_cloud_analyze(settings: Settings) -> int:
 
         log.info(
             "analysis_completed run_id=%s markets=%s candidates=%s book_rows=%s "
-            "duration_seconds=%.1f analysis_id=%s",
+            "duration_seconds=%.1f analysis_id=%s status=%s valid_files=%s corrupt_files=%s",
             run_id,
             len(scored),
             len(candidates),
             int(result.get("book_row_count") or 0),
             duration_seconds,
             analysis_id,
+            analysis_status,
+            parquet_health.get("valid_parquet_files"),
+            parquet_health.get("corrupt_parquet_files"),
         )
         return 0
     except LostLeadershipError as exc:

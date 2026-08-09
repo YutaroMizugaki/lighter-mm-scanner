@@ -44,6 +44,10 @@ from lighter_mm.scoring import (
     avoid_wide_spread_markets,
     score_markets,
 )
+from lighter_mm.storage.parquet_validation import (
+    parquet_health_summary,
+    prepare_parquet_dataset,
+)
 
 log = logging.getLogger(__name__)
 
@@ -96,23 +100,62 @@ def analyze_range(
     hours = max((end_ms - start_ms) / 3_600_000.0, 0.001)
     t0 = time.monotonic()
 
-    book_globs = _glob_patterns(src.books)
-    trade_globs = _glob_patterns(src.trades)
-    markout_globs = _glob_patterns(src.markouts)
+    book_valid, book_corrupt = prepare_parquet_dataset(src.books)
+    trade_valid, trade_corrupt = prepare_parquet_dataset(src.trades)
+    markout_valid, markout_corrupt = prepare_parquet_dataset(src.markouts)
+    all_corrupt = book_corrupt + trade_corrupt + markout_corrupt
+    parquet_health = parquet_health_summary(
+        {
+            "books": len(book_valid),
+            "trades": len(trade_valid),
+            "markouts": len(markout_valid),
+        },
+        all_corrupt,
+    )
 
-    if not book_globs:
+    if not book_valid:
+        log.error(
+            "analysis failed reason=no_valid_parquet_files corrupt_files=%s",
+            len(all_corrupt),
+        )
         return {
             "hours": hours,
             "start_ms": start_ms,
             "end_ms": end_ms,
             "markets": [],
             "scored": [],
-            "error": "no book_samples yet",
+            "error": (
+                "no valid book_samples parquet files"
+                if all_corrupt
+                else "no book_samples yet"
+            ),
+            "parquet_health": parquet_health,
         }
 
-    available_cols = _probe_parquet_columns(con, book_globs)
+    try:
+        available_cols = _probe_parquet_columns(con, file_paths=book_valid)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("book parquet column probe failed: %s", exc)
+        return {
+            "hours": hours,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "markets": [],
+            "scored": [],
+            "error": f"book_samples parquet probe failed: {exc}",
+            "parquet_health": parquet_health,
+        }
+
     book_cols = _book_projection(available_cols)
-    if not _read_view(con, "book_raw", book_globs, book_cols, start_ms, end_ms):
+    if not _read_view(
+        con,
+        "book_raw",
+        None,
+        book_cols,
+        start_ms,
+        end_ms,
+        file_paths=book_valid,
+    ):
         return {
             "hours": hours,
             "start_ms": start_ms,
@@ -120,6 +163,7 @@ def analyze_range(
             "markets": [],
             "scored": [],
             "error": "no book_samples yet",
+            "parquet_health": parquet_health,
         }
 
     # Dedupe book samples on (market_id, timestamp_ms) — restart/hydrate overlap defense.
@@ -227,9 +271,17 @@ def analyze_range(
 
     trade_count = 0
     trade_agg: dict[int, dict[str, Any]] = {}
-    if trade_globs:
+    if trade_valid:
         trade_cols = "timestamp_ms, market_id, symbol, trade_id, usd_amount, type"
-        if _read_view(con, "trade_raw", trade_globs, trade_cols, start_ms, end_ms):
+        if _read_view(
+            con,
+            "trade_raw",
+            None,
+            trade_cols,
+            start_ms,
+            end_ms,
+            file_paths=trade_valid,
+        ):
             trade_count = con.execute("SELECT COUNT(*) FROM trade_raw").fetchone()[0]
             t_trade = time.monotonic()
             trade_agg = _aggregate_trades_sql(con)
@@ -243,11 +295,19 @@ def analyze_range(
 
     markout_count = 0
     markout_agg: dict[int, dict[str, Any]] = {}
-    if markout_globs:
+    if markout_valid:
         markout_cols = (
             "timestamp_ms, market_id, symbol, trade_id, horizon_s, maker_markout_bps"
         )
-        if _read_view(con, "markout_raw", markout_globs, markout_cols, start_ms, end_ms):
+        if _read_view(
+            con,
+            "markout_raw",
+            None,
+            markout_cols,
+            start_ms,
+            end_ms,
+            file_paths=markout_valid,
+        ):
             markout_count = con.execute("SELECT COUNT(*) FROM markout_raw").fetchone()[0]
             t_markout = time.monotonic()
             markout_agg = _aggregate_markouts_sql(con)
@@ -280,6 +340,12 @@ def analyze_range(
         time.monotonic() - t_score,
         time.monotonic() - t0,
     )
+    log.info(
+        "analysis completed valid_files=%s corrupt_files=%s status=%s",
+        parquet_health["valid_parquet_files"],
+        parquet_health["corrupt_parquet_files"],
+        parquet_health["status"],
+    )
     result: dict[str, Any] = {
         "hours": hours,
         "start_ms": start_ms,
@@ -291,6 +357,7 @@ def analyze_range(
         "book_row_count": book_count,
         "trade_row_count": trade_count,
         "markout_row_count": markout_count,
+        "parquet_health": parquet_health,
     }
     if benchmark_profile:
         result["benchmark_profile"] = profile

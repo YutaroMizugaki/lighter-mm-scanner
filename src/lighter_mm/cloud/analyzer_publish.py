@@ -12,7 +12,7 @@ log = logging.getLogger(__name__)
 
 def _last_successful_analysis_at(backend, sync: DurableSync) -> str | None:
     status = backend.download_json(sync.public_key("analysis_status.json"))
-    if status and status.get("status") == "OK":
+    if status and status.get("status") in ("OK", "DEGRADED"):
         return status.get("last_successful_analysis_at") or status.get("generated_at")
     if status and status.get("last_successful_analysis_at"):
         return status.get("last_successful_analysis_at")
@@ -46,6 +46,10 @@ def _publish_analysis_status(
     markout_rows: int = 0,
     markets_analyzed: int = 0,
     candidates: int = 0,
+    valid_parquet_files: int | None = None,
+    corrupt_parquet_files: int | None = None,
+    skipped_files: list[dict[str, str]] | None = None,
+    parquet_health_status: str | None = None,
 ) -> None:
     payload: dict[str, Any] = {
         "status": status,
@@ -54,7 +58,7 @@ def _publish_analysis_status(
     }
     if started_at:
         payload["started_at"] = started_at
-    if status == "OK":
+    if status in ("OK", "DEGRADED"):
         payload.update(
             {
                 "last_successful_analysis_at": last_successful_analysis_at or generated_at,
@@ -71,12 +75,28 @@ def _publish_analysis_status(
         )
         if duration_seconds is not None:
             payload["duration_seconds"] = duration_seconds
+        if valid_parquet_files is not None:
+            payload["valid_parquet_files"] = valid_parquet_files
+        if corrupt_parquet_files is not None:
+            payload["corrupt_parquet_files"] = corrupt_parquet_files
+        if skipped_files:
+            payload["skipped_files"] = skipped_files
+        if parquet_health_status:
+            payload["parquet_health_status"] = parquet_health_status
     elif status == "RUNNING":
         pass
     else:
         payload["error"] = error
         if last_successful_analysis_at:
             payload["last_successful_analysis_at"] = last_successful_analysis_at
+        if valid_parquet_files is not None:
+            payload["valid_parquet_files"] = valid_parquet_files
+        if corrupt_parquet_files is not None:
+            payload["corrupt_parquet_files"] = corrupt_parquet_files
+        if skipped_files:
+            payload["skipped_files"] = skipped_files
+        if parquet_health_status:
+            payload["parquet_health_status"] = parquet_health_status
     backend.upload_json(sync.public_key("analysis_status.json"), payload, public=True)
 
 

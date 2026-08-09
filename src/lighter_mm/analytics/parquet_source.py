@@ -38,7 +38,7 @@ def _connect(
 
 
 def _glob_patterns(path: Path) -> list[str]:
-    """Locate Parquet parts under hive partitions."""
+    """Locate Parquet parts under hive partitions (legacy glob discovery)."""
     patterns: list[str] = []
     if list(path.glob("date=*/hour=*/*.parquet")):
         patterns.append(str(path / "date=*/hour=*/*.parquet"))
@@ -56,12 +56,22 @@ def _parquet_list(patterns: list[str]) -> str:
     return "[" + ", ".join("'" + p.replace("'", "''") + "'" for p in patterns) + "]"
 
 
+def _parquet_file_list(paths: list[Path]) -> str:
+    """Format explicit file paths for DuckDB read_parquet."""
+    return "[" + ", ".join("'" + str(p).replace("'", "''") + "'" for p in paths) + "]"
+
+
 def _probe_parquet_columns(
-    con: duckdb.DuckDBPyConnection, patterns: list[str]
+    con: duckdb.DuckDBPyConnection,
+    patterns: list[str] | None = None,
+    file_paths: list[Path] | None = None,
 ) -> set[str]:
-    if not patterns:
+    if file_paths:
+        listed = _parquet_file_list(file_paths)
+    elif patterns:
+        listed = _parquet_list(patterns)
+    else:
         return set()
-    listed = _parquet_list(patterns)
     rows = con.execute(
         f"DESCRIBE SELECT * FROM read_parquet({listed}, hive_partitioning=1, union_by_name=true)"
     ).fetchall()
@@ -112,15 +122,19 @@ def _book_projection(available: set[str]) -> str:
 def _read_view(
     con: duckdb.DuckDBPyConnection,
     view_name: str,
-    patterns: list[str],
+    patterns: list[str] | None,
     columns: str,
     start_ms: int,
     end_ms: int,
+    file_paths: list[Path] | None = None,
 ) -> bool:
     """Create a DuckDB view over parquet with time window + column projection."""
-    if not patterns:
+    if file_paths:
+        listed = _parquet_file_list(file_paths)
+    elif patterns:
+        listed = _parquet_list(patterns)
+    else:
         return False
-    listed = _parquet_list(patterns)
     con.execute(
         f"""
         CREATE OR REPLACE VIEW {view_name} AS

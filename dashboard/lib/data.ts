@@ -19,7 +19,7 @@ export type CollectorStatus = {
 };
 
 export type AnalysisStatus = {
-  status: "RUNNING" | "OK" | "ERROR" | string;
+  status: "RUNNING" | "OK" | "DEGRADED" | "ERROR" | string;
   run_id: string | null;
   generated_at: string;
   started_at?: string | null;
@@ -35,6 +35,10 @@ export type AnalysisStatus = {
   markout_rows?: number;
   markets_analyzed?: number;
   candidates?: number;
+  valid_parquet_files?: number;
+  corrupt_parquet_files?: number;
+  skipped_files?: Array<{ path: string; error: string }>;
+  parquet_health_status?: string;
 };
 
 export type DashboardGeneration = {
@@ -258,6 +262,7 @@ export function effectiveAnalysisStatus(
   if (!analysis) return { status: "UNKNOWN", stale: true };
   if (analysis.status === "ERROR") return { status: "ERROR", stale: false };
   if (analysis.status === "RUNNING") return { status: "RUNNING", stale: false };
+  if (analysis.status === "DEGRADED") return { status: "DEGRADED", stale: false };
   const stamp =
     analysis.last_successful_analysis_at || analysis.generated_at || null;
   if (!stamp) return { status: analysis.status, stale: true };
@@ -277,7 +282,9 @@ export function analysisDisplayTimestamp(
   if (!analysis) return null;
   return (
     analysis.last_successful_analysis_at ||
-    (analysis.status === "OK" ? analysis.generated_at : null)
+    (analysis.status === "OK" || analysis.status === "DEGRADED"
+      ? analysis.generated_at
+      : null)
   );
 }
 
@@ -321,6 +328,9 @@ export function statusHealthNote(
   }
   if (status === "ERROR") {
     return "Analyzer run failed — see analysis_status.json error.";
+  }
+  if (status === "DEGRADED") {
+    return "Analysis completed with skipped corrupt Parquet files.";
   }
   if (status === "STALE") {
     return "Analysis results are older than 30m (expected cadence: 15m).";

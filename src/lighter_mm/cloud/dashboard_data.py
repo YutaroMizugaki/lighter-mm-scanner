@@ -60,6 +60,13 @@ def build_dashboard_payload(
 
     health_warnings: list[str] = []
 
+    parquet_health = result.get("parquet_health") or {}
+    if parquet_health.get("status") == "degraded":
+        corrupt_n = int(parquet_health.get("corrupt_parquet_files") or 0)
+        health_warnings.append(
+            f"{corrupt_n} corrupted Parquet file(s) skipped during analysis."
+        )
+
     if analysis_error:
         health_warnings.append(str(analysis_error))
     if state and state.samples_written > 0 and markets_discovered > 0 and len(scored) == 0:
@@ -102,6 +109,8 @@ def build_dashboard_payload(
 
     if analysis_error:
         status = "ERROR"
+    elif parquet_health.get("status") == "degraded":
+        status = "DEGRADED"
     elif not scored:
         status = "DEGRADED"
     else:
