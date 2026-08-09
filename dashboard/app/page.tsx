@@ -139,9 +139,11 @@ export default async function HomePage() {
             <ul className="compact" style={{ marginTop: "0.4rem" }}>
               {skippedFiles.slice(0, 5).map((entry) => (
                 <li key={entry.path}>
-                  <code>{entry.path}</code>
+                  一部の収集データを読み込めませんでした（破損ファイルを除外して解析を継続しています）。
                   <br />
-                  <span className="muted">{entry.error}</span>
+                  <span className="muted">
+                    Skipped corrupt parquet: <code>{entry.path}</code>
+                  </span>
                 </li>
               ))}
             </ul>

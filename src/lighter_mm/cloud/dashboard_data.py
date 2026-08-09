@@ -9,7 +9,9 @@ from lighter_mm.analytics.aggregation import AnalysisSources, analyze_range, ana
 from lighter_mm.cloud.health import (
     _ms_to_iso,
     build_collector_status_payload,
+    build_data_diagnostics,
     collector_status_label,
+    latest_data_timestamp_iso,
 )
 from lighter_mm.config import Settings
 from lighter_mm.scoring import ScoredMarket
@@ -141,6 +143,13 @@ def build_dashboard_payload(
     last_trade_at = _ms_to_iso(state.last_trade_timestamp_ms if state else None)
     last_usable_book = _ms_to_iso(last_book_sample_at_ms)
     last_book_row = _ms_to_iso(last_book_row_at_ms)
+    latest_parquet_event_ms = result.get("latest_book_event_ms")
+    last_update = latest_data_timestamp_iso(
+        last_successful_flush=state.last_successful_flush if state else None,
+        last_book_sample_at_ms=last_book_sample_at_ms,
+        last_trade_at_ms=state.last_trade_timestamp_ms if state else None,
+        latest_parquet_event_ms=latest_parquet_event_ms,
+    )
 
     overview = {
         "title": "Lighter MM Scanner",
@@ -154,7 +163,8 @@ def build_dashboard_payload(
         "markets_discovered": markets_discovered,
         "candidates": len(candidates),
         "coverage_pct": coverage,
-        "last_update": generated_at,
+        "last_update": last_update,
+        "latest_market_event_at": _ms_to_iso(latest_parquet_event_ms),
         "last_successful_flush": state.last_successful_flush if state else None,
         "last_trade_at": last_trade_at,
         "last_book_sample_at": last_usable_book,
@@ -171,6 +181,18 @@ def build_dashboard_payload(
         "ws": ws_runtime,
         "generated_at": generated_at,
         "read_only": True,
+        "diagnostics": build_data_diagnostics(
+            collector_status=status,
+            last_event_at=last_usable_book or last_book_row,
+            last_flush_at=state.last_successful_flush if state else None,
+            connected=bool(ws_runtime and int(ws_runtime.get("connected_shards") or 0) > 0)
+            if ws_runtime
+            else None,
+            analysis_status=status if analysis_error else ("DEGRADED" if status == "DEGRADED" else "OK"),
+            analysis_completed_at=generated_at if not analysis_error else None,
+            valid_parquet_files=int(parquet_health.get("valid_parquet_files") or 0),
+            invalid_parquet_files=int(parquet_health.get("corrupt_parquet_files") or 0),
+        ),
         "disclaimer": (
             "読み取り専用のリサーチツールです。売買・ウォレット接続・APIキーは使用しません。"
             "表示されるスプレッドや取引回数は利益を保証するものではありません。"

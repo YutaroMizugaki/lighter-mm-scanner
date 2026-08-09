@@ -5,7 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from lighter_mm.cloud.health import build_data_diagnostics
 from lighter_mm.cloud.sync import DurableSync
+from lighter_mm.logging_setup import log_event
 
 log = logging.getLogger(__name__)
 
@@ -100,7 +102,17 @@ def _publish_analysis_status(
             payload["skipped_files"] = skipped_files
         if parquet_health_status:
             payload["parquet_health_status"] = parquet_health_status
+    diagnostics = build_data_diagnostics(
+        collector_status="unknown",
+        analysis_status=status,
+        analysis_started_at=started_at,
+        analysis_completed_at=generated_at if status in ("OK", "DEGRADED") else None,
+        valid_parquet_files=int(valid_parquet_files or 0),
+        invalid_parquet_files=int(corrupt_parquet_files or 0),
+    )
+    payload["diagnostics"] = diagnostics
     backend.upload_json(sync.public_key("analysis_status.json"), payload, public=True)
+    log_event(log, "status_written", "analysis_status.json published", path="analysis_status.json")
 
 
 def _generation_prefix(sync: DurableSync, analysis_id: str) -> str:

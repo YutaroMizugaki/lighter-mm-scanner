@@ -100,5 +100,5 @@ def test_payload_includes_flush_and_ws(tmp_path) -> None:
     )
     latest = payload["latest"]
     assert latest["last_successful_flush"] == state.last_successful_flush
-    assert latest["last_update"]  # analysis publish time (generated_at)
+    assert latest["last_update"] == state.last_successful_flush
     assert latest["ws"] == ws

@@ -79,6 +79,67 @@ def _ms_to_iso(ms: int | None) -> str | None:
         return None
 
 
+def latest_data_timestamp_iso(
+    *,
+    last_successful_flush: str | None = None,
+    last_book_sample_at_ms: int | None = None,
+    last_trade_at_ms: int | None = None,
+    latest_parquet_event_ms: int | None = None,
+) -> str | None:
+    """Latest successfully collected data timestamp (not analysis publish time)."""
+    candidates: list[datetime] = []
+    flush_dt = _parse_iso(last_successful_flush)
+    if flush_dt is not None:
+        candidates.append(flush_dt)
+    for ms in (last_book_sample_at_ms, last_trade_at_ms, latest_parquet_event_ms):
+        if ms is None:
+            continue
+        try:
+            candidates.append(datetime.fromtimestamp(ms / 1000.0, tz=UTC))
+        except (OverflowError, OSError, ValueError):
+            continue
+    if not candidates:
+        return None
+    return max(candidates).isoformat()
+
+
+def build_data_diagnostics(
+    *,
+    collector_status: str,
+    last_event_at: str | None = None,
+    last_flush_at: str | None = None,
+    connected: bool | None = None,
+    analysis_status: str | None = None,
+    analysis_started_at: str | None = None,
+    analysis_completed_at: str | None = None,
+    valid_parquet_files: int = 0,
+    invalid_parquet_files: int = 0,
+) -> dict[str, object]:
+    """Internal diagnostics block for health/status payloads."""
+    collector: dict[str, object] = {"status": collector_status}
+    if last_event_at is not None:
+        collector["last_event_at"] = last_event_at
+    if last_flush_at is not None:
+        collector["last_flush_at"] = last_flush_at
+    if connected is not None:
+        collector["connected"] = connected
+    analysis: dict[str, object] = {}
+    if analysis_status is not None:
+        analysis["status"] = analysis_status
+    if analysis_started_at is not None:
+        analysis["last_started_at"] = analysis_started_at
+    if analysis_completed_at is not None:
+        analysis["last_completed_at"] = analysis_completed_at
+    data: dict[str, object] = {
+        "valid_parquet_files": valid_parquet_files,
+        "invalid_parquet_files": invalid_parquet_files,
+    }
+    out: dict[str, object] = {"collector": collector, "data": data}
+    if analysis:
+        out["analysis"] = analysis
+    return out
+
+
 def _ws_degraded(ws_runtime: dict[str, object] | None) -> list[str]:
     warnings: list[str] = []
     if not ws_runtime:
@@ -174,6 +235,12 @@ def build_collector_status_payload(
         last_sync_attempt_at=last_sync_attempt_at,
         consecutive_sync_failures=consecutive_sync_failures,
     )
+    last_event_at = _ms_to_iso(last_book_sample_at_ms) or _ms_to_iso(last_book_row_at_ms)
+    ws_connected = None
+    if ws_runtime is not None:
+        connected = int(ws_runtime.get("connected_shards") or 0)
+        total = int(ws_runtime.get("total_shards") or 0)
+        ws_connected = connected > 0 if total > 0 else connected == 0
     return {
         "run_id": state.run_id,
         "status": status,
@@ -195,4 +262,12 @@ def build_collector_status_payload(
         "health_warnings": warnings,
         "git_sha": state.git_sha or settings.git_sha,
         "collector_version": state.collector_version or settings.collector_version,
+        "diagnostics": build_data_diagnostics(
+            collector_status=status,
+            last_event_at=last_event_at,
+            last_flush_at=state.last_successful_flush,
+            connected=ws_connected,
+            valid_parquet_files=0,
+            invalid_parquet_files=0,
+        ),
     }

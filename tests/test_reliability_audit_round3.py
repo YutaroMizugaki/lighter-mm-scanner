@@ -27,6 +27,7 @@ from lighter_mm.storage.lock import LostLeadershipError
 from lighter_mm.storage.sqlite_meta import SqliteMeta
 from lighter_mm.storage.state import RunState, now_iso
 from lighter_mm.ws.manager import WsManager
+from tests.test_collector_analyzer_split import _write_book_parquet
 
 
 def _ms(iso: str) -> int:
@@ -471,8 +472,7 @@ def test_network_upload_failure_retains_local(tmp_path: Path) -> None:
     data_root.mkdir()
     sync = DurableSync(be, run_id="run1", gcs_prefix="lighter-mm")
     local = data_root / "book_samples/date=2026-08-09/hour=10/part-x.parquet"
-    local.parent.mkdir(parents=True)
-    local.write_bytes(b"PAR1")
+    _write_book_parquet(local, int(datetime.now(UTC).timestamp() * 1000))
 
     def boom(*_a, **_k):
         raise OSError("network down")

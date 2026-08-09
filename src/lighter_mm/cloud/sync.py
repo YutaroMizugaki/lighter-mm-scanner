@@ -114,6 +114,17 @@ class DurableSync:
         for path in candidates:
             if not path.exists() or not path.is_file():
                 continue
+            if path.name.endswith(".tmp") or path.name.endswith(".partial"):
+                continue
+            ok, err = validate_parquet_file(path)
+            if not ok:
+                log.warning(
+                    "parquet upload skipped corrupt local file path=%s error=%s",
+                    path,
+                    err,
+                    extra={"event": "parquet_validation_failed", "path": str(path)},
+                )
+                continue
             key = str(path)
             if key in self._uploaded:
                 continue

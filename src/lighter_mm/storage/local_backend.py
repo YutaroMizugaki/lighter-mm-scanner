@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from lighter_mm.storage.backend import StorageBackend, VersionedJson
+from lighter_mm.storage.json_atomic import atomic_write_json
 
 
 class LocalStorageBackend(StorageBackend):
@@ -43,7 +44,7 @@ class LocalStorageBackend(StorageBackend):
 
     def upload_json(self, remote_key: str, payload: dict[str, Any], *, public: bool = False) -> str:
         dest = self._path(remote_key)
-        dest.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        atomic_write_json(dest, payload)
         gen_path = self._gen_path(remote_key)
         gen = int(gen_path.read_text()) if gen_path.exists() else 0
         gen_path.write_text(str(gen + 1), encoding="utf-8")
@@ -74,7 +75,7 @@ class LocalStorageBackend(StorageBackend):
         elif current.generation != if_generation_match:
             return False
         dest = self._path(remote_key)
-        dest.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        atomic_write_json(dest, payload)
         new_gen = (current.generation or 0) + 1
         self._gen_path(remote_key).write_text(str(new_gen), encoding="utf-8")
         verify = self.download_json(remote_key)
