@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 
 from lighter_mm.config import Settings
@@ -30,7 +31,30 @@ def test_shard_plan_respects_subscription_cap() -> None:
     mgr = WsManager(settings=settings, markets=markets)
     shards = mgr.plan_shards(markets.keys())
     assert len(shards) >= 2
-    assert shards[0].include_market_stats_all is True
-    assert sum(1 for s in shards if s.include_market_stats_all) == 1
+    # Every shard carries market_stats/all so stats survive a single-shard drop.
+    assert all(s.include_market_stats_all for s in shards)
     for s in shards:
         assert len(s.channels()) <= settings.max_subscriptions_per_connection
+
+
+def test_stop_invalidates_books() -> None:
+    settings = Settings()
+    markets = {0: _meta(0)}
+    mgr = WsManager(settings=settings, markets=markets)
+    book = mgr.books[0]
+    book.apply_snapshot(
+        {
+            "nonce": 10,
+            "begin_nonce": 0,
+            "bids": [{"price": "1", "size": "1"}],
+            "asks": [{"price": "2", "size": "1"}],
+        }
+    )
+    assert book.synced
+
+    async def _run() -> None:
+        await mgr.stop()
+
+    asyncio.run(_run())
+    assert book.synced is False
+    assert not book.bids and not book.asks

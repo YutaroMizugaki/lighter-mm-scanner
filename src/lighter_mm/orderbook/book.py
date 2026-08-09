@@ -72,9 +72,18 @@ class LocalOrderBook:
         self.synced = True
 
     def apply_delta(self, order_book: dict[str, Any], recv_ms: int | None = None) -> bool:
-        """Apply delta. Returns False if nonce gap → caller must resync."""
+        """Apply delta. Returns False if nonce gap → caller must resync.
+
+        ``begin_nonce`` is required for continuity. Missing begin_nonce used to
+        silently apply onto the prior book and advance ``nonce``, which can
+        stitch unrelated updates after a clean WS restart.
+        """
         begin = order_book.get("begin_nonce")
-        if begin is not None and self.nonce is not None and int(begin) != int(self.nonce):
+        if begin is None or self.nonce is None:
+            self.nonce_gap_count += 1
+            self.synced = False
+            return False
+        if int(begin) != int(self.nonce):
             self.nonce_gap_count += 1
             self.synced = False
             return False
@@ -83,8 +92,7 @@ class LocalOrderBook:
         self._apply_side(self.asks, order_book.get("asks") or [])
         if order_book.get("nonce") is not None:
             self.nonce = int(order_book["nonce"])
-        if begin is not None:
-            self.begin_nonce = int(begin)
+        self.begin_nonce = int(begin)
         self.last_updated_at = order_book.get("last_updated_at")
         self.last_message_at_ms = recv_ms or utc_ms()
         self.synced = True

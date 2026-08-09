@@ -35,15 +35,31 @@ class MidHistory:
         return None
 
     def mid_at(self, ts_ms: int, tolerance_ms: int = 2500) -> float | None:
-        """Closest mid within tolerance (prefer at-or-after for future markouts)."""
-        best: MidPoint | None = None
-        best_abs = None
+        """Mid for a future markout horizon.
+
+        Prefer the earliest mid at-or-after ``ts_ms`` within tolerance (correct
+        for post-trade markouts). Fall back to the latest mid at-or-before
+        within tolerance only when no forward sample exists yet.
+        """
+        after: MidPoint | None = None
         for p in self._points:
-            d = abs(p.ts_ms - ts_ms)
-            if d <= tolerance_ms and (best_abs is None or d < best_abs):
-                best = p
-                best_abs = d
-        return best.mid if best else None
+            if p.ts_ms < ts_ms:
+                continue
+            if p.ts_ms - ts_ms > tolerance_ms:
+                break
+            after = p
+            break
+        if after is not None:
+            return after.mid
+        before: MidPoint | None = None
+        for p in reversed(self._points):
+            if p.ts_ms > ts_ms:
+                continue
+            if ts_ms - p.ts_ms > tolerance_ms:
+                break
+            before = p
+            break
+        return before.mid if before else None
 
     def recent_mids(self) -> list[MidPoint]:
         return list(self._points)

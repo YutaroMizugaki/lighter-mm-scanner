@@ -52,33 +52,52 @@ function baseUrl(): string {
   return (process.env.NEXT_PUBLIC_DATA_BASE_URL || "").replace(/\/$/, "");
 }
 
-async function fetchJson<T>(path: string): Promise<T | null> {
+export type FetchResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; status?: number };
+
+async function fetchJson<T>(path: string): Promise<FetchResult<T>> {
   const base = baseUrl();
-  if (!base) return null;
+  if (!base) return { ok: false, error: "NEXT_PUBLIC_DATA_BASE_URL is not set" };
   const url = `${base}/${path.replace(/^\//, "")}`;
   try {
     const res = await fetch(url, { next: { revalidate: 60 } });
-    if (!res.ok) return null;
-    return (await res.json()) as T;
-  } catch {
-    return null;
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: `HTTP ${res.status} fetching ${path}`,
+        status: res.status,
+      };
+    }
+    return { ok: true, data: (await res.json()) as T };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "network error";
+    return { ok: false, error: msg };
   }
 }
 
 export async function getOverview(): Promise<Overview | null> {
+  const result = await fetchJson<Overview>("latest.json");
+  return result.ok ? result.data : null;
+}
+
+export async function getOverviewResult(): Promise<FetchResult<Overview>> {
   return fetchJson<Overview>("latest.json");
 }
 
 export async function getMarkets(): Promise<MarketRow[]> {
-  const data = await fetchJson<{ markets: MarketRow[] }>("markets.json");
-  return data?.markets ?? [];
+  const result = await fetchJson<{ markets: MarketRow[] }>("markets.json");
+  return result.ok ? result.data.markets ?? [] : [];
 }
 
 export async function getMarket(symbol: string): Promise<MarketRow | null> {
-  return fetchJson<MarketRow>(`market/${encodeURIComponent(symbol)}.json`);
+  const result = await fetchJson<MarketRow>(`market/${encodeURIComponent(symbol)}.json`);
+  return result.ok ? result.data : null;
 }
 
 export function fmt(n: number | null | undefined, digits = 2, signed = false): string {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
-  return signed ? n.toFixed(digits) : n.toFixed(digits);
+  const body = n.toFixed(digits);
+  if (!signed) return body;
+  return n > 0 ? `+${body}` : body;
 }

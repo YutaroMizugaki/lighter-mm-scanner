@@ -82,12 +82,17 @@ class GCSStorageBackend(StorageBackend):
                     )
                     raise
             else:
-                log.warning(
-                    "gcs_public_bucket_missing; not mirroring %s",
+                # Fail closed: Vercel reads the public bucket. Silent best-effort
+                # make_public on the private blob looks healthy while the dashboard
+                # stays empty under uniform bucket-level access.
+                log.error(
+                    "gcs_public_bucket_missing; refusing public upload of %s",
                     remote_key,
                     extra={"event": "gcs_public_bucket_missing", "path": remote_key},
                 )
-                self._try_make_public(blob)
+                raise RuntimeError(
+                    "GCS_PUBLIC_BUCKET is required for public dashboard JSON uploads"
+                )
 
         uri = self.uri_for(remote_key)
         log.info("gcs_uploaded %s", uri, extra={"event": "gcs_uploaded", "path": remote_key})

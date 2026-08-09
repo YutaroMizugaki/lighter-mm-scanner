@@ -77,7 +77,8 @@ class WsManager:
 
     def plan_shards(self, market_ids: Iterable[int]) -> list[ShardPlan]:
         ids = sorted(set(market_ids))
-        # Each market consumes 2 subs; one shared market_stats/all
+        # Each market consumes 2 subs; each shard also takes market_stats/all so
+        # funding/OI keep updating if shard 0 alone disconnects.
         per_conn_markets = max(
             1, (self.settings.max_subscriptions_per_connection - 1) // 2
         )
@@ -88,7 +89,7 @@ class WsManager:
                 ShardPlan(
                     shard_id=len(shards),
                     market_ids=chunk,
-                    include_market_stats_all=(len(shards) == 0),
+                    include_market_stats_all=True,
                 )
             )
         if not shards:
@@ -108,6 +109,16 @@ class WsManager:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks.clear()
+        # Clean cancel does not run the disconnect handler. Invalidate every book
+        # so the next start() cannot sample pre-restart BBO/depth as live, and
+        # deltas cannot apply onto a stale synced book before a fresh snapshot.
+        self.invalidate_all_books()
+
+    def invalidate_all_books(self) -> None:
+        for book in self.books.values():
+            if book.synced or book.bids or book.asks or book.nonce is not None:
+                book.mark_resync()
+                self.runtime.book_resyncs += 1
 
     async def add_market(self, meta: MarketMeta) -> None:
         self.markets[meta.market_id] = meta

@@ -1,8 +1,8 @@
-import { fmt, getMarkets, getOverview } from "@/lib/data";
+import { fmt, getMarkets, getOverviewResult } from "@/lib/data";
 import Link from "next/link";
 
 export default async function HomePage() {
-  const overview = await getOverview();
+  const overviewResult = await getOverviewResult();
   const markets = await getMarkets();
   const configured = Boolean(process.env.NEXT_PUBLIC_DATA_BASE_URL);
 
@@ -22,17 +22,34 @@ export default async function HomePage() {
     );
   }
 
-  if (!overview) {
+  if (!overviewResult.ok) {
+    const missing =
+      overviewResult.status === 404 ||
+      /404|not found|ENOENT/i.test(overviewResult.error);
     return (
       <section className="card">
-        <h2>No latest.json yet</h2>
+        <h2>{missing ? "No latest.json yet" : "Failed to load latest.json"}</h2>
         <p className="muted">
-          Waiting for the collector to publish dashboard aggregates. Check Cloud Logging /{" "}
-          <code>lighter-mm run-status</code>.
+          {missing
+            ? "Waiting for the collector to publish dashboard aggregates. Check Cloud Logging / "
+            : "Could not fetch public dashboard JSON. "}
+          {!missing && (
+            <>
+              Error: <code>{overviewResult.error}</code>. Check{" "}
+              <code>NEXT_PUBLIC_DATA_BASE_URL</code>, bucket IAM, and CORS.{" "}
+            </>
+          )}
+          {missing && (
+            <>
+              <code>lighter-mm run-status</code>.
+            </>
+          )}
         </p>
       </section>
     );
   }
+
+  const overview = overviewResult.data;
 
   const target = overview.observation_target_hours;
   const obs = overview.observation_hours;
