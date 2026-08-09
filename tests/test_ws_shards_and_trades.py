@@ -73,6 +73,8 @@ def test_ws_runtime_public_dict_has_health_fields() -> None:
     stats = WsRuntimeStats(
         connected_shards=5,
         total_shards=5,
+        planned_channels=415,
+        acked_channels=415,
         subscribed_channels=415,
         dropped_connections=0,
         subscription_errors=2,
@@ -82,6 +84,8 @@ def test_ws_runtime_public_dict_has_health_fields() -> None:
     pub = stats.public_dict()
     assert pub["connected_shards"] == 5
     assert pub["total_shards"] == 5
+    assert pub["planned_channels"] == 415
+    assert pub["acked_channels"] == 415
     assert pub["subscribed_channels"] == 415
     assert pub["subscription_errors"] == 2
     assert pub["trade_parse_errors"] == 3

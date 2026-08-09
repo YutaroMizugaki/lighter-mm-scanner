@@ -66,7 +66,10 @@ class CollectorApp:
         self.dashboard = LiveDashboard()
         self.counters = RuntimeCounters(started_at=datetime.now(UTC))
         self.activity = TradeActivityTracker()
-        self.mid_histories: dict[int, MidHistory] = defaultdict(MidHistory)
+        mid_retention = max(self.settings.markout_horizons_seconds) + 120
+        self.mid_histories: dict[int, MidHistory] = defaultdict(
+            lambda: MidHistory(retention_seconds=mid_retention)
+        )
         self.recent_markout_5s: dict[int, deque[float]] = defaultdict(lambda: deque(maxlen=200))
         self.live_metrics: dict[int, dict[str, Any]] = {}
         self._sample_counts: dict[int, int] = defaultdict(int)
@@ -75,7 +78,9 @@ class CollectorApp:
         self._completed = False
         self._deployment_gaps = 0
         self._last_trade_ts: int | None = None
-        self._last_book_sample_ts: int | None = None
+        self._last_book_row_written_ts: int | None = None
+        self._last_usable_book_sample_ts: int | None = None
+        self._trades_without_reference_mid: int = 0
         self.holder_id = uuid.uuid4().hex
 
         self.run_id, self.state, resumed = self._resolve_run()
@@ -506,7 +511,9 @@ class CollectorApp:
                 state=self.state,
                 storage_estimate=est,
                 ws_runtime=ws_runtime,
-                last_book_sample_at_ms=self._last_book_sample_ts,
+                last_book_sample_at_ms=self._last_usable_book_sample_ts,
+                last_book_row_at_ms=self._last_book_row_written_ts,
+                trades_without_reference_mid=self._trades_without_reference_mid,
             )
             # Core dashboard JSON — this alone must count as a successful flush.
             self.backend.upload_json(
@@ -767,9 +774,10 @@ class CollectorApp:
                 pass
 
     async def _on_book(self, market_id: int, book: LocalOrderBook, _kind: str) -> None:
+        if not book.synced:
+            return
         mid = book.mid()
         if mid is not None:
-            # Prefer exchange/book timestamp so markout horizons align with trade.ts
             ts = book.last_message_at_ms or utc_ms()
             self.mid_histories[market_id].add(ts, float(mid))
 
@@ -777,9 +785,13 @@ class CollectorApp:
         hist = self.mid_histories.get(trade.market_id)
         ref = None
         if hist is not None:
-            ref = hist.nearest_at_or_before(trade.timestamp_ms)
-            if ref is None:
+            pt = hist.nearest_at_or_before(trade.timestamp_ms)
+            if pt is not None and trade.timestamp_ms - pt.ts_ms <= 3000:
+                ref = pt.mid
+            elif pt is None:
                 ref = hist.mid_at(trade.timestamp_ms, tolerance_ms=2000)
+        if ref is None:
+            self._trades_without_reference_mid += 1
         self.activity.on_trade(trade)
         self.store.write_trade(
             {
@@ -867,8 +879,9 @@ class CollectorApp:
                 row.update(metrics.depths)
                 self.store.write_book(row)
                 self._sample_counts[mid] += 1
-                self._last_book_sample_ts = now
-                if metrics.mid is not None:
+                self._last_book_row_written_ts = now
+                if book.synced and not metrics.is_stale and metrics.mid is not None:
+                    self._last_usable_book_sample_ts = now
                     self.mid_histories[mid].add(now, metrics.mid)
                 tpm = self.activity.trades_per_minute(mid, now)
                 m5 = list(self.recent_markout_5s[mid])
@@ -913,7 +926,7 @@ class CollectorApp:
                 if self.counters.nonce_gaps > prev_gaps:
                     log_event(log, "nonce_gap", "nonce gap", run_id=self.run_id)
                 self.counters.client_messages_sent = self._ws.runtime.client_messages_sent
-                self.counters.ws_ok = self._ws.runtime.connected_shards > 0
+                self.counters.ws_ok = self._ws.runtime.ws_healthy
 
     async def _markout_loop(self) -> None:
         while not self._stop.is_set():

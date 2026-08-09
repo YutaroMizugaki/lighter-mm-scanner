@@ -115,6 +115,47 @@ class GCSStorageBackend(StorageBackend):
             return None
         return json.loads(blob.download_as_text())
 
+    def compare_and_swap_json(
+        self,
+        remote_key: str,
+        payload: dict[str, Any],
+        *,
+        if_generation_match: int | None = None,
+    ) -> bool:
+        data = json.dumps(payload, indent=2, default=str)
+        blob = self._bucket.blob(remote_key)
+        try:
+            if if_generation_match is None:
+                if blob.exists():
+                    gen = blob.generation
+                    blob.upload_from_string(
+                        data,
+                        content_type="application/json",
+                        if_generation_match=gen,
+                    )
+                else:
+                    blob.upload_from_string(
+                        data,
+                        content_type="application/json",
+                        if_generation_match=0,
+                    )
+            elif if_generation_match == 0:
+                blob.upload_from_string(
+                    data,
+                    content_type="application/json",
+                    if_generation_match=0,
+                )
+            else:
+                blob.upload_from_string(
+                    data,
+                    content_type="application/json",
+                    if_generation_match=if_generation_match,
+                )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            log.debug("compare_and_swap_json failed for %s: %s", remote_key, exc)
+            return False
+
     def download_bytes(self, remote_key: str) -> bytes | None:
         blob = self._bucket.blob(remote_key)
         if not blob.exists():
