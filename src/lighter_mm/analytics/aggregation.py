@@ -89,8 +89,34 @@ def _book_projection(available: set[str]) -> str:
         if "two_sided_depth_25bps_usd" in available
         else "CAST(NULL AS DOUBLE) AS two_sided_depth_25bps_usd"
     )
+    is_usable = (
+        "is_usable"
+        if "is_usable" in available
+        else "CAST(NULL AS BOOLEAN) AS is_usable"
+    )
+    is_inactive = (
+        "is_inactive"
+        if "is_inactive" in available
+        else "CAST(NULL AS BOOLEAN) AS is_inactive"
+    )
+    book_update_age = (
+        "book_update_age_ms"
+        if "book_update_age_ms" in available
+        else "CAST(NULL AS BIGINT) AS book_update_age_ms"
+    )
+    best_bid = (
+        "best_bid"
+        if "best_bid" in available
+        else "CAST(NULL AS DOUBLE) AS best_bid"
+    )
+    best_ask = (
+        "best_ask"
+        if "best_ask" in available
+        else "CAST(NULL AS DOUBLE) AS best_ask"
+    )
     return f"""
-        timestamp_ms, market_id, symbol, is_stale, spread_bps, mid,
+        timestamp_ms, market_id, symbol, is_stale, {is_usable}, {is_inactive},
+        {book_update_age}, spread_bps, mid, {best_bid}, {best_ask},
         best_bid_size_usd, best_ask_size_usd,
         two_sided_depth_5bps_usd, two_sided_depth_10bps_usd,
         {depth25},
@@ -140,7 +166,7 @@ def _volatility_explain_plans(
         sql = f"""
         WITH origins AS (
             SELECT market_id, timestamp_ms AS origin_ts, mid AS mid0
-            FROM book_good
+            FROM book_observed
             WHERE mid IS NOT NULL AND mid > 0
         ),
         paired AS (
@@ -150,7 +176,7 @@ def _volatility_explain_plans(
                 o.mid0,
                 (
                     SELECT b.mid
-                    FROM book_good b
+                    FROM book_observed b
                     WHERE b.market_id = o.market_id
                       AND b.timestamp_ms >= o.origin_ts + {horizon_ms}
                       AND b.timestamp_ms <= o.origin_ts + {horizon_ms} + {tolerance_ms}
@@ -235,10 +261,45 @@ def analyze_range(
     )
     con.execute(
         """
-        CREATE OR REPLACE VIEW book_good AS
+        CREATE OR REPLACE VIEW book_observed AS
         SELECT * FROM book_deduped
-        WHERE is_stale = false
-          AND mid IS NOT NULL
+        WHERE is_usable = true
+           OR (is_usable IS NULL AND mid IS NOT NULL)
+        """
+    )
+    con.execute(
+        """
+        CREATE OR REPLACE VIEW book_spread_observed AS
+        SELECT
+            *,
+            CASE
+                WHEN spread_bps IS NOT NULL THEN spread_bps
+                WHEN best_bid IS NOT NULL AND best_ask IS NOT NULL AND mid IS NOT NULL
+                     AND mid > 0 AND best_ask >= best_bid
+                THEN (best_ask - best_bid) / mid * 10000.0
+                ELSE NULL
+            END AS effective_spread_bps
+        FROM book_observed
+        """
+    )
+    # Spread/depth metrics: new rows via is_usable; legacy rows exclude stale-only
+    # depth zeros (is_stale=true with no is_usable column). Legacy spread may be
+    # recovered from best_bid/best_ask/mid when spread_bps was nulled by old collector.
+    con.execute(
+        """
+        CREATE OR REPLACE VIEW book_metrics_good AS
+        SELECT
+            *,
+            CASE
+                WHEN spread_bps IS NOT NULL THEN spread_bps
+                WHEN best_bid IS NOT NULL AND best_ask IS NOT NULL AND mid IS NOT NULL
+                     AND mid > 0 AND best_ask >= best_bid
+                THEN (best_ask - best_bid) / mid * 10000.0
+                ELSE NULL
+            END AS effective_spread_bps
+        FROM book_deduped
+        WHERE is_usable = true
+           OR (is_usable IS NULL AND is_stale = false AND mid IS NOT NULL)
         """
     )
     con.execute(
@@ -412,18 +473,17 @@ def _aggregate_book_sql(
     ).fetchall()
 
     sql = f"""
-    WITH agg AS (
+    WITH coverage_agg AS (
+        SELECT
+            market_id,
+            MAX(symbol) AS symbol,
+            COUNT(*) AS observed_samples
+        FROM book_observed
+        GROUP BY market_id
+    ),
+    metrics_agg AS (
         SELECT
             b.market_id,
-            MAX(b.symbol) AS symbol,
-            COUNT(*) AS usable_samples,
-            AVG(b.spread_bps) AS mean_spread_bps,
-            quantile_cont(b.spread_bps, 0.5) AS median_spread_bps,
-            quantile_cont(b.spread_bps, 0.10) AS p10_spread_bps,
-            quantile_cont(b.spread_bps, 0.25) AS p25_spread_bps,
-            quantile_cont(b.spread_bps, 0.75) AS p75_spread_bps,
-            quantile_cont(b.spread_bps, 0.90) AS p90_spread_bps,
-            quantile_cont(b.spread_bps, 0.95) AS p95_spread_bps,
             quantile_cont(LEAST(b.best_bid_size_usd, b.best_ask_size_usd), 0.5)
                 AS median_bbo_depth_usd,
             quantile_cont(b.two_sided_depth_5bps_usd, 0.5) AS median_two_sided_depth_5bps_usd,
@@ -433,48 +493,84 @@ def _aggregate_book_sql(
             arg_max(b.funding_rate, b.timestamp_ms) AS funding_rate,
             arg_max(b.open_interest, b.timestamp_ms) AS open_interest,
             arg_max(b.daily_quote_token_volume, b.timestamp_ms) AS daily_quote_volume_usd
-        FROM book_good b
+        FROM book_metrics_good b
         GROUP BY b.market_id
+    ),
+    spread_agg AS (
+        SELECT
+            market_id,
+            AVG(effective_spread_bps) AS mean_spread_bps,
+            quantile_cont(effective_spread_bps, 0.5) AS median_spread_bps,
+            quantile_cont(effective_spread_bps, 0.10) AS p10_spread_bps,
+            quantile_cont(effective_spread_bps, 0.25) AS p25_spread_bps,
+            quantile_cont(effective_spread_bps, 0.75) AS p75_spread_bps,
+            quantile_cont(effective_spread_bps, 0.90) AS p90_spread_bps,
+            quantile_cont(effective_spread_bps, 0.95) AS p95_spread_bps
+        FROM book_spread_observed
+        WHERE effective_spread_bps IS NOT NULL
+        GROUP BY market_id
+    ),
+    activity_agg AS (
+        SELECT
+            market_id,
+            MAX(book_update_age_ms) / 1000.0 AS latest_book_update_age_seconds,
+            quantile_cont(book_update_age_ms / 1000.0, 0.95) AS p95_book_update_age_seconds
+        FROM book_deduped
+        WHERE book_update_age_ms IS NOT NULL
+        GROUP BY market_id
     )
     SELECT
         mw.market_id,
-        COALESCE(a.symbol, mw.symbol) AS symbol,
-        COALESCE(a.usable_samples, 0) AS usable_samples,
-        a.mean_spread_bps,
-        a.median_spread_bps,
-        a.p10_spread_bps,
-        a.p25_spread_bps,
-        a.p75_spread_bps,
-        a.p90_spread_bps,
-        a.p95_spread_bps,
-        a.median_bbo_depth_usd,
-        a.median_two_sided_depth_5bps_usd,
-        a.median_two_sided_depth_10bps_usd,
-        a.median_two_sided_depth_25bps_usd,
-        a.current_funding_rate,
-        a.funding_rate,
-        a.open_interest,
-        a.daily_quote_volume_usd,
+        COALESCE(c.symbol, mw.symbol) AS symbol,
+        COALESCE(c.observed_samples, 0) AS observed_samples,
+        s.mean_spread_bps,
+        s.median_spread_bps,
+        s.p10_spread_bps,
+        s.p25_spread_bps,
+        s.p75_spread_bps,
+        s.p90_spread_bps,
+        s.p95_spread_bps,
+        m.median_bbo_depth_usd,
+        m.median_two_sided_depth_5bps_usd,
+        m.median_two_sided_depth_10bps_usd,
+        m.median_two_sided_depth_25bps_usd,
+        m.current_funding_rate,
+        m.funding_rate,
+        m.open_interest,
+        m.daily_quote_volume_usd,
+        act.latest_book_update_age_seconds,
+        act.p95_book_update_age_seconds,
         mw.first_observed_ms,
         mw.market_observation_seconds,
+        CAST(
+            GREATEST(
+                1,
+                CAST(mw.market_observation_seconds * 1000 / {interval_ms} AS DOUBLE) + 1
+            ) AS BIGINT
+        ) AS expected_samples,
         LEAST(
             100.0,
-            100.0 * COALESCE(a.usable_samples, 0) / GREATEST(
+            100.0 * COALESCE(c.observed_samples, 0) / GREATEST(
                 1,
                 CAST(mw.market_observation_seconds * 1000 / {interval_ms} AS DOUBLE) + 1
             )
         ) AS data_coverage_pct
     FROM market_windows mw
-    LEFT JOIN agg a ON mw.market_id = a.market_id
+    LEFT JOIN coverage_agg c ON mw.market_id = c.market_id
+    LEFT JOIN spread_agg s ON mw.market_id = s.market_id
+    LEFT JOIN metrics_agg m ON mw.market_id = m.market_id
+    LEFT JOIN activity_agg act ON mw.market_id = act.market_id
     """
     result = con.execute(sql).fetchall()
     cols = [
-        "market_id", "symbol", "usable_samples", "mean_spread_bps", "median_spread_bps",
+        "market_id", "symbol", "observed_samples", "mean_spread_bps", "median_spread_bps",
         "p10_spread_bps", "p25_spread_bps", "p75_spread_bps", "p90_spread_bps", "p95_spread_bps",
         "median_bbo_depth_usd", "median_two_sided_depth_5bps_usd",
         "median_two_sided_depth_10bps_usd", "median_two_sided_depth_25bps_usd",
         "current_funding_rate", "funding_rate", "open_interest", "daily_quote_volume_usd",
-        "first_observed_ms", "market_observation_seconds", "data_coverage_pct",
+        "latest_book_update_age_seconds", "p95_book_update_age_seconds",
+        "first_observed_ms", "market_observation_seconds", "expected_samples",
+        "data_coverage_pct",
     ]
     out: dict[int, dict[str, Any]] = {}
     seen: set[int] = set()
@@ -484,6 +580,7 @@ def _aggregate_book_sql(
         obs_s = float(d.pop("market_observation_seconds") or 0)
         d["observation_hours"] = obs_s / 3600.0
         d["analysis_window_hours"] = hours
+        d["usable_samples"] = d.get("observed_samples", 0)
         out[mid] = d
         seen.add(mid)
 
@@ -497,7 +594,9 @@ def _aggregate_book_sql(
             "analysis_window_hours": hours,
             "first_observed_ms": first_obs,
             "data_coverage_pct": 0.0,
+            "observed_samples": 0,
             "usable_samples": 0,
+            "expected_samples": 0,
         }
     return out
 
@@ -523,12 +622,12 @@ def _spread_persistence_sql(
         SELECT
             market_id,
             timestamp_ms,
-            spread_bps,
+            effective_spread_bps AS spread_bps,
             LEAD(timestamp_ms) OVER (
                 PARTITION BY market_id ORDER BY timestamp_ms
             ) AS next_ts
-        FROM book_good
-        WHERE spread_bps IS NOT NULL
+        FROM book_spread_observed
+        WHERE effective_spread_bps IS NOT NULL
     ),
     intervals AS (
         SELECT
@@ -589,7 +688,7 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
     WITH mids AS (
         SELECT market_id, timestamp_ms, mid,
             LAG(mid) OVER (PARTITION BY market_id ORDER BY timestamp_ms) AS prev_mid
-        FROM book_good
+        FROM book_observed
         WHERE mid IS NOT NULL AND mid > 0
     ),
     moves AS (
@@ -620,7 +719,7 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
         sql = f"""
         WITH origins AS (
             SELECT market_id, timestamp_ms AS origin_ts, mid AS mid0
-            FROM book_good
+            FROM book_observed
             WHERE mid IS NOT NULL AND mid > 0
         ),
         paired AS (
@@ -630,7 +729,7 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
                 o.mid0,
                 (
                     SELECT b.mid
-                    FROM book_good b
+                    FROM book_observed b
                     WHERE b.market_id = o.market_id
                       AND b.timestamp_ms >= o.origin_ts + {horizon_ms}
                       AND b.timestamp_ms <= o.origin_ts + {horizon_ms} + {tolerance_ms}

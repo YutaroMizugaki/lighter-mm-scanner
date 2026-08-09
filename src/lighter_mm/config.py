@@ -37,7 +37,11 @@ class Settings(BaseSettings):
 
     book_sample_interval_seconds: float = Field(default=5.0, ge=1.0)
     market_refresh_seconds: int = Field(default=3600, ge=60)
-    stale_book_seconds: float = Field(default=180.0, ge=5.0)
+    stale_book_seconds: float = Field(
+        default=180.0,
+        ge=5.0,
+        description="Book inactivity indicator threshold (no WS order-book update); not coverage.",
+    )
 
     # Lighter caps subscriptions per WS connection; keep headroom under 100
     # for market_stats/all and any future channels.

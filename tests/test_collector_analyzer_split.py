@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from tests.conftest import enrich_book_row
 
 from lighter_mm.analytics.aggregation import AnalysisSources, analyze_range
 from lighter_mm.cloud.analyzer import select_run_to_analyze
@@ -108,7 +109,7 @@ def test_parquet_filenames_unique_on_rotation(tmp_path: Path) -> None:
         tmp_path, depth_levels=[5, 10, 25], flush_rows=1, flush_seconds=60, rotation_minutes=15
     )
     ts = int(time.time() * 1000)
-    row = {
+    row = enrich_book_row({
         "timestamp_ms": ts,
         "market_id": 1,
         "symbol": "ETH",
@@ -144,7 +145,7 @@ def test_parquet_filenames_unique_on_rotation(tmp_path: Path) -> None:
         "bid_depth_25bps_usd": 1.0,
         "ask_depth_25bps_usd": 1.0,
         "two_sided_depth_25bps_usd": 1.0,
-    }
+    })
     names: set[str] = set()
     for _ in range(3):
         store.write_book(row)

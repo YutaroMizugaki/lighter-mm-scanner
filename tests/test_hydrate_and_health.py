@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from tests.conftest import enrich_book_row
+
 from lighter_mm.analytics.aggregation import _glob_patterns, analyze_window
 from lighter_mm.cloud.dashboard_data import build_dashboard_payload, collector_status_label
 from lighter_mm.cloud.sync import DurableSync
@@ -15,7 +17,7 @@ from lighter_mm.storage.state import RunState, now_iso
 
 
 def _book_row(ts: int, *, stale: bool = False) -> dict:
-    return {
+    return enrich_book_row({
         "timestamp_ms": ts,
         "market_id": 1,
         "symbol": "ETH",
@@ -51,7 +53,7 @@ def _book_row(ts: int, *, stale: bool = False) -> dict:
         "bid_depth_25bps_usd": 0.0 if stale else 400.0,
         "ask_depth_25bps_usd": 0.0 if stale else 400.0,
         "two_sided_depth_25bps_usd": 0.0 if stale else 400.0,
-    }
+    })
 
 
 def test_remote_books_hydrate_to_local_book_samples(tmp_path: Path) -> None:
@@ -160,7 +162,8 @@ def test_glob_patterns_includes_flat_and_nested(tmp_path: Path) -> None:
     assert any(p.endswith("date=*/*.parquet") for p in patterns)
 
 
-def test_coverage_ignores_stale_only_samples(tmp_path: Path) -> None:
+def test_legacy_stale_with_mid_counts_toward_coverage(tmp_path: Path) -> None:
+    """Legacy rows: is_stale=true but mid present → valid observation for coverage."""
     settings = Settings(data_dir=tmp_path, reports_dir=tmp_path / "reports")
     store = ParquetStore(
         tmp_path, depth_levels=[5, 10, 25], flush_rows=1, flush_seconds=60
@@ -170,4 +173,4 @@ def test_coverage_ignores_stale_only_samples(tmp_path: Path) -> None:
     store.close()
     result = analyze_window(settings, hours=1.0)
     assert result["markets"]
-    assert result["markets"][0]["data_coverage_pct"] == 0.0
+    assert result["markets"][0]["data_coverage_pct"] >= 99.0

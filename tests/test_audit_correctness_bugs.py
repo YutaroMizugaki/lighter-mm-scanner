@@ -9,6 +9,7 @@ from pathlib import Path
 
 import polars as pl
 import pyarrow.parquet as pq
+from tests.conftest import enrich_book_row
 
 from lighter_mm.analytics.aggregation import _trade_stats
 from lighter_mm.collector import CollectorApp
@@ -23,7 +24,7 @@ from lighter_mm.ws.manager import WsManager
 
 
 def _book_row(ts: int, market_id: int = 1) -> dict:
-    return {
+    return enrich_book_row({
         "timestamp_ms": ts,
         "market_id": market_id,
         "symbol": "ETH",
@@ -56,7 +57,7 @@ def _book_row(ts: int, market_id: int = 1) -> dict:
         "bid_depth_10bps_usd": 200.0,
         "ask_depth_10bps_usd": 200.0,
         "two_sided_depth_10bps_usd": 200.0,
-    }
+    })
 
 
 def test_unsynced_book_drops_delta_instead_of_snapshot_apply() -> None:

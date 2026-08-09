@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
+from tests.conftest import enrich_book_row
+
 from lighter_mm.storage.parquet_store import ParquetStore
 from lighter_mm.util import backoff_delay
 
@@ -55,7 +57,7 @@ def test_parquet_rotation_and_flush(tmp_path: Path) -> None:
             "ask_depth_10bps_usd": 2.0,
             "two_sided_depth_10bps_usd": 2.0,
         }
-        store.write_book(row)
+        store.write_book(enrich_book_row(row))
     store.close()
     parts = list((tmp_path / "book_samples").glob("date=*/hour=*/*.parquet"))
     assert parts, "expected parquet part files under date=/hour="

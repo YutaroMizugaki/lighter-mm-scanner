@@ -82,7 +82,12 @@ def size_fit_map(depth_10: float | None) -> dict[str, bool]:
     return out
 
 
-def build_narratives(row: dict[str, Any], penalties: list[str]) -> tuple[list[str], list[str], list[str]]:
+def build_narratives(
+    row: dict[str, Any],
+    penalties: list[str],
+    *,
+    min_coverage_pct: float = 90.0,
+) -> tuple[list[str], list[str], list[str]]:
     pros: list[str] = []
     cons: list[str] = []
     warnings: list[str] = []
@@ -122,7 +127,8 @@ def build_narratives(row: dict[str, Any], penalties: list[str]) -> tuple[list[st
 
     if funding is not None and abs(float(funding)) > 0.01:
         warnings.append("funding relatively high")
-    if (row.get("data_coverage_pct") or 0) < 95:
+    cov = row.get("data_coverage_pct") or 0
+    if min_coverage_pct <= cov < 95:
         warnings.append("data coverage below 95%")
     for p in penalties:
         if p not in warnings:
@@ -244,7 +250,9 @@ def score_markets(
         cov = row.get("data_coverage_pct") or 0.0
         if cov < thresholds.min_coverage_pct:
             score *= 0.55
-            penalties.append("strong penalty: observation coverage < 90%")
+            penalties.append(
+                f"strong penalty: observation coverage < {thresholds.min_coverage_pct:.0f}%"
+            )
         tc = row.get("total_trade_count") or 0
         hours = max(row.get("observation_hours") or 1.0, 0.01)
         if tc < thresholds.min_trades_per_hour * hours * 0.25:
@@ -299,7 +307,9 @@ def score_markets(
         if len(rows) >= 10 and pr_act < 20:
             candidate = False
 
-        pros, cons, warnings = build_narratives(row, penalties)
+        pros, cons, warnings = build_narratives(
+            row, penalties, min_coverage_pct=thresholds.min_coverage_pct
+        )
         rec = recommended_max_order(
             row.get("median_two_sided_depth_5bps_usd"),
             row.get("median_two_sided_depth_10bps_usd"),
