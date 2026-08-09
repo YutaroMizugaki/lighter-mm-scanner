@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import threading
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
@@ -185,8 +186,8 @@ def test_gcs_cas_race_loser_cannot_overwrite() -> None:
     assert backend.generation == gen_after_a
 
 
-def test_acquire_same_expired_generation_race() -> None:
-    """Both contenders read the same expired lock at generation=N; only one CAS wins."""
+def test_acquire_stale_generation_cas_race() -> None:
+    """Both contenders read expired lock at generation=N; only one CAS wins."""
     backend = _MockAtomicBackend()
     backend.payload = {
         "holder_id": "old",
@@ -195,15 +196,41 @@ def test_acquire_same_expired_generation_race() -> None:
     }
     backend.generation = 5
 
+    read_barrier = threading.Barrier(2, timeout=5)
+    original_download = backend.download_json_with_generation
+
+    def synced_download(key: str) -> VersionedJson:
+        result = original_download(key)
+        read_barrier.wait(timeout=5)
+        return result
+
+    backend.download_json_with_generation = synced_download  # type: ignore[method-assign]
+
     a = LeaderLock(backend, "lock.json", holder_id="a", lease_seconds=60)
     b = LeaderLock(backend, "lock.json", holder_id="b", lease_seconds=60)
 
-    assert a.acquire("run1") is True
-    assert backend.payload["holder_id"] == "a"
+    results: dict[str, bool] = {}
+
+    def try_acquire(lock: LeaderLock, name: str) -> None:
+        results[name] = lock.acquire("run1")
+
+    t_a = threading.Thread(target=try_acquire, args=(a, "a"))
+    t_b = threading.Thread(target=try_acquire, args=(b, "b"))
+    t_a.start()
+    t_b.start()
+    t_a.join(timeout=10)
+    t_b.join(timeout=10)
+
+    winners = [name for name, ok in results.items() if ok]
+    losers = [name for name, ok in results.items() if not ok]
+    assert len(winners) == 1
+    assert len(losers) == 1
+    assert backend.payload is not None
+    assert backend.payload["holder_id"] == winners[0]
     assert backend.generation == 6
-    assert b.acquire("run1") is False
-    assert backend.payload["holder_id"] == "a"
     assert backend.upload_json_calls == 0
+    loser = a if losers[0] == "a" else b
+    assert loser.cas_conflicts == 1
 
 
 def test_renew_generation_conflict_returns_false() -> None:
@@ -261,6 +288,32 @@ def test_tpm_mean_uses_fractional_observation_seconds() -> None:
     stats = _trade_stats(df, 1, observation_seconds=150.0)
     assert stats["trades_per_minute_mean"] == pytest.approx(0.4, rel=1e-6)
     assert stats["trades_per_minute_mean"] != pytest.approx(0.5)
+
+
+def test_tpm_median_uses_wall_clock_minute_slots() -> None:
+    """61s window spanning 3 UTC minute buckets — trade only in middle minute."""
+    start = datetime(2026, 1, 1, 12, 0, 59, tzinfo=UTC)
+    start_ms = int(start.timestamp() * 1000)
+    end_ms = start_ms + 61_000
+    trade_ms = start_ms + 1_000  # 12:01:00
+    df = pl.DataFrame(
+        {
+            "market_id": [1],
+            "timestamp_ms": [trade_ms],
+            "usd_amount": [1.0],
+            "type": ["trade"],
+        }
+    )
+    stats = _trade_stats(
+        df,
+        1,
+        observation_seconds=61.0,
+        effective_start_ms=start_ms,
+        effective_end_ms=end_ms,
+    )
+    # Buckets [12:00, 12:01, 12:02] => [0, 1, 0]; median = 0
+    assert stats["trades_per_minute_median"] == 0.0
+    assert stats["trades_per_minute_mean"] == pytest.approx(1.0 / (61.0 / 60.0), rel=1e-3)
 
 
 def test_tpm_150s_boundary_activity_fail() -> None:

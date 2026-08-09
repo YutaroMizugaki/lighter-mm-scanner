@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-import math
+import resource
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -99,7 +100,58 @@ def _read_view(
     return True
 
 
-def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
+def _rss_mb() -> float:
+    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        return usage / (1024 * 1024)
+    return usage / 1024
+
+
+def _volatility_explain_plans(
+    con: duckdb.DuckDBPyConnection, settings: Settings
+) -> dict[str, str]:
+    """Return EXPLAIN ANALYZE text for forward-horizon volatility queries."""
+    tolerance_ms = max(int(settings.book_sample_interval_seconds * 1500), 2500)
+    plans: dict[str, str] = {}
+    for horizon_s, label in [(5, "5s"), (30, "30s"), (60, "60s")]:
+        horizon_ms = horizon_s * 1000
+        sql = f"""
+        WITH origins AS (
+            SELECT market_id, timestamp_ms AS origin_ts, mid AS mid0
+            FROM book_good
+            WHERE mid IS NOT NULL AND mid > 0
+        ),
+        paired AS (
+            SELECT
+                o.market_id,
+                o.origin_ts,
+                o.mid0,
+                (
+                    SELECT b.mid
+                    FROM book_good b
+                    WHERE b.market_id = o.market_id
+                      AND b.timestamp_ms >= o.origin_ts + {horizon_ms}
+                      AND b.timestamp_ms <= o.origin_ts + {horizon_ms} + {tolerance_ms}
+                      AND b.mid > 0
+                    ORDER BY b.timestamp_ms ASC
+                    LIMIT 1
+                ) AS mid1
+            FROM origins o
+        )
+        SELECT market_id, COUNT(*) FROM paired WHERE mid1 IS NOT NULL GROUP BY market_id
+        """
+        rows = con.execute(f"EXPLAIN ANALYZE {sql}").fetchall()
+        plans[label] = "\n".join(str(r[1] if len(r) > 1 else r[0]) for r in rows)
+    return plans
+
+
+def analyze_window(
+    settings: Settings,
+    hours: float,
+    *,
+    benchmark_profile: bool = False,
+    explain_volatility: bool = False,
+) -> dict[str, Any]:
     if hours <= 0:
         return {
             "hours": hours,
@@ -165,6 +217,9 @@ def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
     )
 
     book_count = con.execute("SELECT COUNT(*) FROM book_deduped").fetchone()[0]
+    profile: dict[str, float] = {}
+    if benchmark_profile:
+        profile["rss_after_book_load_mb"] = _rss_mb()
     log.info(
         "analysis phase=book_load elapsed=%.3fs book_rows=%s",
         time.monotonic() - t0,
@@ -173,16 +228,22 @@ def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
 
     t_book = time.monotonic()
     book_agg = _aggregate_book_sql(con, settings, start_ms, end_ms, hours)
+    if benchmark_profile:
+        profile["rss_after_book_aggregate_mb"] = _rss_mb()
     log.info("analysis phase=book_aggregate elapsed=%.3fs markets=%s", time.monotonic() - t_book, len(book_agg))
 
     t_persist = time.monotonic()
     persistence = _spread_persistence_sql(
         con, settings.spread_thresholds_bps, settings.book_sample_interval_seconds
     )
+    if benchmark_profile:
+        profile["rss_after_spread_persistence_mb"] = _rss_mb()
     log.info("analysis phase=spread_persistence elapsed=%.3fs", time.monotonic() - t_persist)
 
     t_vol = time.monotonic()
     volatility = _volatility_sql(con, settings)
+    if benchmark_profile:
+        profile["rss_after_volatility_mb"] = _rss_mb()
     log.info("analysis phase=volatility elapsed=%.3fs", time.monotonic() - t_vol)
 
     trade_count = 0
@@ -193,6 +254,8 @@ def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
             trade_count = con.execute("SELECT COUNT(*) FROM trade_raw").fetchone()[0]
             t_trade = time.monotonic()
             trade_agg = _aggregate_trades_sql(con)
+            if benchmark_profile:
+                profile["rss_after_trade_aggregate_mb"] = _rss_mb()
             log.info(
                 "analysis phase=trade_aggregate elapsed=%.3fs trade_rows=%s",
                 time.monotonic() - t_trade,
@@ -209,6 +272,8 @@ def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
             markout_count = con.execute("SELECT COUNT(*) FROM markout_raw").fetchone()[0]
             t_markout = time.monotonic()
             markout_agg = _aggregate_markouts_sql(con)
+            if benchmark_profile:
+                profile["rss_after_markout_aggregate_mb"] = _rss_mb()
             log.info(
                 "analysis phase=markout_aggregate elapsed=%.3fs markout_rows=%s",
                 time.monotonic() - t_markout,
@@ -229,12 +294,14 @@ def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
         min_observation_hours=settings.min_observation_hours_for_candidate,
     )
     scored = score_markets(rows, thresholds=thresholds)
+    if benchmark_profile:
+        profile["rss_after_score_mb"] = _rss_mb()
     log.info(
         "analysis phase=score elapsed=%.3fs total_elapsed=%.3fs",
         time.monotonic() - t_score,
         time.monotonic() - t0,
     )
-    return {
+    result: dict[str, Any] = {
         "hours": hours,
         "start_ms": start_ms,
         "end_ms": end_ms,
@@ -246,6 +313,11 @@ def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
         "trade_row_count": trade_count,
         "markout_row_count": markout_count,
     }
+    if benchmark_profile:
+        result["benchmark_profile"] = profile
+    if explain_volatility:
+        result["volatility_explain"] = _volatility_explain_plans(con, settings)
+    return result
 
 
 def _aggregate_book_sql(
@@ -538,17 +610,48 @@ def _aggregate_trades_sql(
         """
     )
     sql = """
-    WITH per_minute AS (
+    WITH window_bounds AS (
         SELECT
             market_id,
-            (timestamp_ms // 60000) * 60000 AS minute_ms,
-            COUNT(*) AS cnt
-        FROM trade_deduped
-        GROUP BY market_id, minute_ms
+            FLOOR(effective_start_ms / 60000.0)::BIGINT AS start_minute_idx,
+            FLOOR(effective_end_ms / 60000.0)::BIGINT AS end_minute_idx,
+            CAST(
+                FLOOR(effective_end_ms / 60000.0)
+                - FLOOR(effective_start_ms / 60000.0)
+                + 1
+            AS INTEGER) AS minute_slots,
+            market_observation_seconds
+        FROM market_windows
     ),
-    minute_lists AS (
-        SELECT market_id, LIST(cnt ORDER BY minute_ms) AS cnts, COUNT(*) AS active_minutes
-        FROM per_minute
+    per_minute AS (
+        SELECT
+            market_id,
+            (timestamp_ms // 60000) AS minute_idx,
+            COUNT(*)::DOUBLE AS cnt
+        FROM trade_deduped
+        GROUP BY market_id, minute_idx
+    ),
+    slot_rows AS (
+        SELECT
+            wb.market_id,
+            wb.minute_slots,
+            wb.market_observation_seconds,
+            wb.start_minute_idx + slot_offset AS minute_idx,
+            COALESCE(pm.cnt, 0.0) AS cnt
+        FROM window_bounds wb
+        CROSS JOIN UNNEST(range(wb.minute_slots)) AS u(slot_offset)
+        LEFT JOIN per_minute pm
+          ON pm.market_id = wb.market_id
+         AND pm.minute_idx = wb.start_minute_idx + slot_offset
+    ),
+    slot_lists AS (
+        SELECT
+            market_id,
+            MAX(minute_slots) AS minute_slots,
+            MAX(market_observation_seconds) AS market_observation_seconds,
+            LIST(cnt ORDER BY minute_idx) AS cnts,
+            COUNT(*) FILTER (WHERE cnt > 0) AS active_minutes
+        FROM slot_rows
         GROUP BY market_id
     ),
     trade_agg AS (
@@ -580,33 +683,35 @@ def _aggregate_trades_sql(
         t.total_quote_volume,
         t.median_trade_size_usd,
         i.median_intertrade_ms,
-        ml.cnts,
-        ml.active_minutes,
-        mw.market_observation_seconds
+        sl.cnts,
+        sl.active_minutes,
+        sl.minute_slots,
+        sl.market_observation_seconds
     FROM trade_agg t
     LEFT JOIN intertrade i ON t.market_id = i.market_id
-    LEFT JOIN minute_lists ml ON t.market_id = ml.market_id
-    LEFT JOIN market_windows mw ON t.market_id = mw.market_id
+    LEFT JOIN slot_lists sl ON t.market_id = sl.market_id
     """
     out: dict[int, dict[str, Any]] = {}
     for row in con.execute(sql).fetchall():
-        mid, tc, vol, med_size, inter_ms, cnts, active_minutes, obs_s = row
+        mid, tc, vol, med_size, inter_ms, cnts, active_minutes, minute_slots, obs_s = row
         tc = int(tc or 0)
         obs_s = float(obs_s or 0)
         effective_minutes_float = max(obs_s / 60.0, 1.0 / 60.0)
         tpm_mean = float(tc) / effective_minutes_float
-        minute_slots = max(1, math.ceil(obs_s / 60.0)) if obs_s > 0 else 1
+        slots = max(1, int(minute_slots or 0))
         cnt_list = [float(c) for c in (cnts or [])]
-        zeros = max(0, minute_slots - int(active_minutes or 0))
-        padded = cnt_list + [0.0] * zeros
+        if len(cnt_list) < slots:
+            cnt_list = cnt_list + [0.0] * (slots - len(cnt_list))
+        elif len(cnt_list) > slots:
+            cnt_list = cnt_list[:slots]
         out[int(mid)] = {
             "total_trade_count": tc,
             "total_quote_volume": float(vol or 0),
             "median_trade_size_usd": med_size,
             "median_intertrade_ms": inter_ms,
             "trades_per_minute_mean": tpm_mean,
-            "trades_per_minute_median": percentile(padded, 50) or 0.0,
-            "trades_per_minute_p90": percentile(padded, 90) or 0.0,
+            "trades_per_minute_median": percentile(cnt_list, 50) or 0.0,
+            "trades_per_minute_p90": percentile(cnt_list, 90) or 0.0,
         }
     return out
 
@@ -759,6 +864,8 @@ def _trade_stats(
     *,
     window_minutes: int = 1,
     observation_seconds: float | None = None,
+    effective_start_ms: int | None = None,
+    effective_end_ms: int | None = None,
 ):  # noqa: ANN001
     """Legacy wrapper for unit tests."""
     import polars as pl
@@ -770,6 +877,10 @@ def _trade_stats(
     if "symbol" not in trade_df.columns:
         trade_df = trade_df.with_columns(pl.lit("TEST").alias("symbol"))
     obs_s = float(observation_seconds) if observation_seconds is not None else float(window_minutes * 60)
+    if effective_start_ms is None:
+        effective_start_ms = int(trade_df["timestamp_ms"].min())
+    if effective_end_ms is None:
+        effective_end_ms = effective_start_ms + int(obs_s * 1000)
     con = duckdb.connect(":memory:")
     con.register("trade_raw", trade_df)
     con.execute(
@@ -779,8 +890,8 @@ def _trade_stats(
             market_id,
             MAX(symbol) AS symbol,
             MIN(timestamp_ms) AS first_observed_ms,
-            MIN(timestamp_ms) AS effective_start_ms,
-            MAX(timestamp_ms) AS effective_end_ms,
+            {int(effective_start_ms)}::BIGINT AS effective_start_ms,
+            {int(effective_end_ms)}::BIGINT AS effective_end_ms,
             {obs_s}::DOUBLE AS market_observation_seconds
         FROM trade_raw
         GROUP BY market_id
