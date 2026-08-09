@@ -17,6 +17,7 @@ from lighter_mm.config import Settings, build_storage_backend, ensure_dirs
 from lighter_mm.dashboard import LiveDashboard
 from lighter_mm.engine.markout import MarkoutEngine
 from lighter_mm.engine.mid_history import MidHistory
+from lighter_mm.engine.reference_mid import reference_mid_for_trade
 from lighter_mm.engine.trade_activity import TradeActivityTracker
 from lighter_mm.logging_setup import log_event
 from lighter_mm.models import MarketStatsSnapshot, RuntimeCounters, TradeEvent
@@ -783,13 +784,7 @@ class CollectorApp:
 
     async def _on_trade(self, trade: TradeEvent, symbol: str) -> None:
         hist = self.mid_histories.get(trade.market_id)
-        ref = None
-        if hist is not None:
-            pt = hist.nearest_at_or_before(trade.timestamp_ms)
-            if pt is not None and trade.timestamp_ms - pt.ts_ms <= 3000:
-                ref = pt.mid
-            elif pt is None:
-                ref = hist.mid_at(trade.timestamp_ms, tolerance_ms=2000)
+        ref = reference_mid_for_trade(hist, trade.timestamp_ms)
         if ref is None:
             self._trades_without_reference_mid += 1
         self.activity.on_trade(trade)

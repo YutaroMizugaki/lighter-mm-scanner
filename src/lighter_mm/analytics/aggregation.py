@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import resource
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -47,6 +49,33 @@ def _parquet_list(patterns: list[str]) -> str:
     return "[" + ", ".join("'" + p.replace("'", "''") + "'" for p in patterns) + "]"
 
 
+def _probe_parquet_columns(
+    con: duckdb.DuckDBPyConnection, patterns: list[str]
+) -> set[str]:
+    if not patterns:
+        return set()
+    listed = _parquet_list(patterns)
+    rows = con.execute(
+        f"DESCRIBE SELECT * FROM read_parquet({listed}, hive_partitioning=1, union_by_name=true)"
+    ).fetchall()
+    return {str(r[0]) for r in rows}
+
+
+def _book_projection(available: set[str]) -> str:
+    depth25 = (
+        "two_sided_depth_25bps_usd"
+        if "two_sided_depth_25bps_usd" in available
+        else "CAST(NULL AS DOUBLE) AS two_sided_depth_25bps_usd"
+    )
+    return f"""
+        timestamp_ms, market_id, symbol, is_stale, spread_bps, mid,
+        best_bid_size_usd, best_ask_size_usd,
+        two_sided_depth_5bps_usd, two_sided_depth_10bps_usd,
+        {depth25},
+        current_funding_rate, funding_rate, open_interest, daily_quote_token_volume
+    """
+
+
 def _read_view(
     con: duckdb.DuckDBPyConnection,
     view_name: str,
@@ -71,7 +100,58 @@ def _read_view(
     return True
 
 
-def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
+def _rss_mb() -> float:
+    usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    if sys.platform == "darwin":
+        return usage / (1024 * 1024)
+    return usage / 1024
+
+
+def _volatility_explain_plans(
+    con: duckdb.DuckDBPyConnection, settings: Settings
+) -> dict[str, str]:
+    """Return EXPLAIN ANALYZE text for forward-horizon volatility queries."""
+    tolerance_ms = max(int(settings.book_sample_interval_seconds * 1500), 2500)
+    plans: dict[str, str] = {}
+    for horizon_s, label in [(5, "5s"), (30, "30s"), (60, "60s")]:
+        horizon_ms = horizon_s * 1000
+        sql = f"""
+        WITH origins AS (
+            SELECT market_id, timestamp_ms AS origin_ts, mid AS mid0
+            FROM book_good
+            WHERE mid IS NOT NULL AND mid > 0
+        ),
+        paired AS (
+            SELECT
+                o.market_id,
+                o.origin_ts,
+                o.mid0,
+                (
+                    SELECT b.mid
+                    FROM book_good b
+                    WHERE b.market_id = o.market_id
+                      AND b.timestamp_ms >= o.origin_ts + {horizon_ms}
+                      AND b.timestamp_ms <= o.origin_ts + {horizon_ms} + {tolerance_ms}
+                      AND b.mid > 0
+                    ORDER BY b.timestamp_ms ASC
+                    LIMIT 1
+                ) AS mid1
+            FROM origins o
+        )
+        SELECT market_id, COUNT(*) FROM paired WHERE mid1 IS NOT NULL GROUP BY market_id
+        """
+        rows = con.execute(f"EXPLAIN ANALYZE {sql}").fetchall()
+        plans[label] = "\n".join(str(r[1] if len(r) > 1 else r[0]) for r in rows)
+    return plans
+
+
+def analyze_window(
+    settings: Settings,
+    hours: float,
+    *,
+    benchmark_profile: bool = False,
+    explain_volatility: bool = False,
+) -> dict[str, Any]:
     if hours <= 0:
         return {
             "hours": hours,
@@ -93,12 +173,8 @@ def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
     if not book_globs:
         return {"hours": hours, "markets": [], "scored": [], "error": "no book_samples yet"}
 
-    book_cols = """
-        timestamp_ms, market_id, symbol, is_stale, spread_bps, mid,
-        best_bid_size_usd, best_ask_size_usd,
-        two_sided_depth_5bps_usd, two_sided_depth_10bps_usd,
-        current_funding_rate, funding_rate, open_interest, daily_quote_token_volume
-    """
+    available_cols = _probe_parquet_columns(con, book_globs)
+    book_cols = _book_projection(available_cols)
     if not _read_view(con, "book_raw", book_globs, book_cols, start_ms, end_ms):
         return {"hours": hours, "markets": [], "scored": [], "error": "no book_samples yet"}
 
@@ -122,8 +198,28 @@ def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
           AND mid IS NOT NULL
         """
     )
+    con.execute(
+        f"""
+        CREATE OR REPLACE VIEW market_windows AS
+        SELECT
+            market_id,
+            MAX(symbol) AS symbol,
+            MIN(timestamp_ms) AS first_observed_ms,
+            GREATEST(CAST({start_ms} AS BIGINT), MIN(timestamp_ms)) AS effective_start_ms,
+            CAST({end_ms} AS BIGINT) AS effective_end_ms,
+            CAST(
+                CAST({end_ms} AS BIGINT) - GREATEST(CAST({start_ms} AS BIGINT), MIN(timestamp_ms))
+                AS DOUBLE
+            ) / 1000.0 AS market_observation_seconds
+        FROM book_deduped
+        GROUP BY market_id
+        """
+    )
 
     book_count = con.execute("SELECT COUNT(*) FROM book_deduped").fetchone()[0]
+    profile: dict[str, float] = {}
+    if benchmark_profile:
+        profile["rss_after_book_load_mb"] = _rss_mb()
     log.info(
         "analysis phase=book_load elapsed=%.3fs book_rows=%s",
         time.monotonic() - t0,
@@ -132,14 +228,22 @@ def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
 
     t_book = time.monotonic()
     book_agg = _aggregate_book_sql(con, settings, start_ms, end_ms, hours)
+    if benchmark_profile:
+        profile["rss_after_book_aggregate_mb"] = _rss_mb()
     log.info("analysis phase=book_aggregate elapsed=%.3fs markets=%s", time.monotonic() - t_book, len(book_agg))
 
     t_persist = time.monotonic()
-    persistence = _spread_persistence_sql(con, settings.spread_thresholds_bps)
+    persistence = _spread_persistence_sql(
+        con, settings.spread_thresholds_bps, settings.book_sample_interval_seconds
+    )
+    if benchmark_profile:
+        profile["rss_after_spread_persistence_mb"] = _rss_mb()
     log.info("analysis phase=spread_persistence elapsed=%.3fs", time.monotonic() - t_persist)
 
     t_vol = time.monotonic()
     volatility = _volatility_sql(con, settings)
+    if benchmark_profile:
+        profile["rss_after_volatility_mb"] = _rss_mb()
     log.info("analysis phase=volatility elapsed=%.3fs", time.monotonic() - t_vol)
 
     trade_count = 0
@@ -149,7 +253,9 @@ def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
         if _read_view(con, "trade_raw", trade_globs, trade_cols, start_ms, end_ms):
             trade_count = con.execute("SELECT COUNT(*) FROM trade_raw").fetchone()[0]
             t_trade = time.monotonic()
-            trade_agg = _aggregate_trades_sql(con, hours)
+            trade_agg = _aggregate_trades_sql(con)
+            if benchmark_profile:
+                profile["rss_after_trade_aggregate_mb"] = _rss_mb()
             log.info(
                 "analysis phase=trade_aggregate elapsed=%.3fs trade_rows=%s",
                 time.monotonic() - t_trade,
@@ -166,6 +272,8 @@ def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
             markout_count = con.execute("SELECT COUNT(*) FROM markout_raw").fetchone()[0]
             t_markout = time.monotonic()
             markout_agg = _aggregate_markouts_sql(con)
+            if benchmark_profile:
+                profile["rss_after_markout_aggregate_mb"] = _rss_mb()
             log.info(
                 "analysis phase=markout_aggregate elapsed=%.3fs markout_rows=%s",
                 time.monotonic() - t_markout,
@@ -183,14 +291,17 @@ def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
         min_markout_samples_5s=settings.min_markout_samples_5s,
         min_markout_samples_30s=settings.min_markout_samples_30s,
         min_median_trades_per_minute=settings.min_median_trades_per_minute,
+        min_observation_hours=settings.min_observation_hours_for_candidate,
     )
     scored = score_markets(rows, thresholds=thresholds)
+    if benchmark_profile:
+        profile["rss_after_score_mb"] = _rss_mb()
     log.info(
         "analysis phase=score elapsed=%.3fs total_elapsed=%.3fs",
         time.monotonic() - t_score,
         time.monotonic() - t0,
     )
-    return {
+    result: dict[str, Any] = {
         "hours": hours,
         "start_ms": start_ms,
         "end_ms": end_ms,
@@ -202,6 +313,11 @@ def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
         "trade_row_count": trade_count,
         "markout_row_count": markout_count,
     }
+    if benchmark_profile:
+        result["benchmark_profile"] = profile
+    if explain_volatility:
+        result["volatility_explain"] = _volatility_explain_plans(con, settings)
+    return result
 
 
 def _aggregate_book_sql(
@@ -214,18 +330,13 @@ def _aggregate_book_sql(
     """Per-market book aggregates via DuckDB GROUP BY."""
     interval_ms = int(settings.book_sample_interval_seconds * 1000)
 
-    # All discovered markets (including stale-only) for coverage denominator.
     all_markets = con.execute(
-        "SELECT market_id, MAX(symbol) AS symbol FROM book_deduped GROUP BY market_id"
+        "SELECT market_id, symbol, first_observed_ms, market_observation_seconds "
+        "FROM market_windows"
     ).fetchall()
 
     sql = f"""
-    WITH first_seen AS (
-        SELECT market_id, MIN(timestamp_ms) AS first_observed_ms
-        FROM book_good
-        GROUP BY market_id
-    ),
-    agg AS (
+    WITH agg AS (
         SELECT
             b.market_id,
             MAX(b.symbol) AS symbol,
@@ -241,7 +352,7 @@ def _aggregate_book_sql(
                 AS median_bbo_depth_usd,
             quantile_cont(b.two_sided_depth_5bps_usd, 0.5) AS median_two_sided_depth_5bps_usd,
             quantile_cont(b.two_sided_depth_10bps_usd, 0.5) AS median_two_sided_depth_10bps_usd,
-            CAST(NULL AS DOUBLE) AS median_two_sided_depth_25bps_usd,
+            quantile_cont(b.two_sided_depth_25bps_usd, 0.5) AS median_two_sided_depth_25bps_usd,
             arg_max(b.current_funding_rate, b.timestamp_ms) AS current_funding_rate,
             arg_max(b.funding_rate, b.timestamp_ms) AS funding_rate,
             arg_max(b.open_interest, b.timestamp_ms) AS open_interest,
@@ -250,20 +361,35 @@ def _aggregate_book_sql(
         GROUP BY b.market_id
     )
     SELECT
-        a.*,
-        f.first_observed_ms,
+        mw.market_id,
+        COALESCE(a.symbol, mw.symbol) AS symbol,
+        COALESCE(a.usable_samples, 0) AS usable_samples,
+        a.mean_spread_bps,
+        a.median_spread_bps,
+        a.p10_spread_bps,
+        a.p25_spread_bps,
+        a.p75_spread_bps,
+        a.p90_spread_bps,
+        a.p95_spread_bps,
+        a.median_bbo_depth_usd,
+        a.median_two_sided_depth_5bps_usd,
+        a.median_two_sided_depth_10bps_usd,
+        a.median_two_sided_depth_25bps_usd,
+        a.current_funding_rate,
+        a.funding_rate,
+        a.open_interest,
+        a.daily_quote_volume_usd,
+        mw.first_observed_ms,
+        mw.market_observation_seconds,
         LEAST(
             100.0,
-            100.0 * a.usable_samples / GREATEST(
+            100.0 * COALESCE(a.usable_samples, 0) / GREATEST(
                 1,
-                CAST(
-                    (CAST({end_ms} AS BIGINT) - GREATEST(CAST({start_ms} AS BIGINT), f.first_observed_ms))
-                    / {interval_ms} AS DOUBLE
-                ) + 1
+                CAST(mw.market_observation_seconds * 1000 / {interval_ms} AS DOUBLE) + 1
             )
         ) AS data_coverage_pct
-    FROM agg a
-    LEFT JOIN first_seen f ON a.market_id = f.market_id
+    FROM market_windows mw
+    LEFT JOIN agg a ON mw.market_id = a.market_id
     """
     result = con.execute(sql).fetchall()
     cols = [
@@ -272,33 +398,43 @@ def _aggregate_book_sql(
         "median_bbo_depth_usd", "median_two_sided_depth_5bps_usd",
         "median_two_sided_depth_10bps_usd", "median_two_sided_depth_25bps_usd",
         "current_funding_rate", "funding_rate", "open_interest", "daily_quote_volume_usd",
-        "first_observed_ms", "data_coverage_pct",
+        "first_observed_ms", "market_observation_seconds", "data_coverage_pct",
     ]
     out: dict[int, dict[str, Any]] = {}
+    seen: set[int] = set()
     for row in result:
         d = dict(zip(cols, row, strict=True))
         mid = int(d.pop("market_id"))
-        d["observation_hours"] = hours
+        obs_s = float(d.pop("market_observation_seconds") or 0)
+        d["observation_hours"] = obs_s / 3600.0
+        d["analysis_window_hours"] = hours
         out[mid] = d
+        seen.add(mid)
 
-    # Stale-only markets: present in deduped but not in good aggregates.
-    for mid, symbol in all_markets:
-        if int(mid) not in out:
-            out[int(mid)] = {
-                "symbol": symbol,
-                "observation_hours": hours,
-                "data_coverage_pct": 0.0,
-                "usable_samples": 0,
-            }
+    for mid, symbol, first_obs, obs_s in all_markets:
+        if int(mid) in seen:
+            continue
+        obs = float(obs_s or 0)
+        out[int(mid)] = {
+            "symbol": symbol,
+            "observation_hours": obs / 3600.0,
+            "analysis_window_hours": hours,
+            "first_observed_ms": first_obs,
+            "data_coverage_pct": 0.0,
+            "usable_samples": 0,
+        }
     return out
 
 
 def _spread_persistence_sql(
-    con: duckdb.DuckDBPyConnection, thresholds: list[float]
+    con: duckdb.DuckDBPyConnection,
+    thresholds: list[float],
+    sample_interval_seconds: float,
 ) -> dict[int, dict[str, Any]]:
     """Time-weighted spread persistence via DuckDB window functions."""
     if not thresholds:
         return {}
+    default_dt = float(sample_interval_seconds)
     threshold_cases = []
     for t in thresholds:
         key = int(t) if float(t).is_integer() else t
@@ -323,9 +459,9 @@ def _spread_persistence_sql(
             market_id,
             spread_bps,
             CASE
-                WHEN next_ts IS NULL THEN 5.0
+                WHEN next_ts IS NULL THEN {default_dt}
                 WHEN (next_ts - timestamp_ms) / 1000.0 <= 0
-                    OR (next_ts - timestamp_ms) / 1000.0 > 60 THEN 5.0
+                    OR (next_ts - timestamp_ms) / 1000.0 > 60 THEN {default_dt}
                 ELSE (next_ts - timestamp_ms) / 1000.0
             END AS dt_sec
         FROM spreads
@@ -406,38 +542,36 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
     for horizon_s, label in horizons[1:]:
         horizon_ms = horizon_s * 1000
         sql = f"""
-        WITH mids AS (
-            SELECT market_id, timestamp_ms, mid
+        WITH origins AS (
+            SELECT market_id, timestamp_ms AS origin_ts, mid AS mid0
             FROM book_good
             WHERE mid IS NOT NULL AND mid > 0
         ),
-        pairs AS (
+        paired AS (
             SELECT
-                a.market_id,
-                a.mid AS mid0,
-                b.mid AS mid1,
-                ABS(b.timestamp_ms - (a.timestamp_ms + {horizon_ms})) AS gap
-            FROM mids a
-            JOIN mids b
-              ON a.market_id = b.market_id
-             AND b.timestamp_ms >= a.timestamp_ms + {horizon_ms} - {tolerance_ms}
-             AND b.timestamp_ms <= a.timestamp_ms + {horizon_ms} + {tolerance_ms}
-        ),
-        best AS (
-            SELECT market_id, mid0, mid1,
-                ROW_NUMBER() OVER (
-                    PARTITION BY market_id, mid0 ORDER BY gap
-                ) AS rn
-            FROM pairs
-            WHERE mid0 > 0 AND mid1 > 0
+                o.market_id,
+                o.origin_ts,
+                o.mid0,
+                (
+                    SELECT b.mid
+                    FROM book_good b
+                    WHERE b.market_id = o.market_id
+                      AND b.timestamp_ms >= o.origin_ts + {horizon_ms}
+                      AND b.timestamp_ms <= o.origin_ts + {horizon_ms} + {tolerance_ms}
+                      AND b.mid > 0
+                    ORDER BY b.timestamp_ms ASC
+                    LIMIT 1
+                ) AS mid1
+            FROM origins o
         ),
         moves AS (
             SELECT market_id,
                 ABS(LN(mid1 / mid0)) * 10000.0 AS move_bps
-            FROM best
-            WHERE rn = 1
+            FROM paired
+            WHERE mid1 IS NOT NULL AND mid0 > 0
         )
         SELECT market_id,
+            COUNT(*) AS sample_count,
             quantile_cont(move_bps, 0.5) AS p50,
             quantile_cont(move_bps, 0.90) AS p90,
             quantile_cont(move_bps, 0.95) AS p95
@@ -445,9 +579,10 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
         GROUP BY market_id
         """
         for row in con.execute(sql).fetchall():
-            mid, p50, p90, p95 = row
+            mid, sample_count, p50, p90, p95 = row
             out.setdefault(int(mid), {})
             out[int(mid)].update({
+                f"volatility_{label}_sample_count": int(sample_count or 0),
                 f"p50_abs_mid_move_{label}_bps": p50,
                 f"p90_abs_mid_move_{label}_bps": p90,
                 f"p95_abs_mid_move_{label}_bps": p95,
@@ -457,12 +592,11 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
 
 
 def _aggregate_trades_sql(
-    con: duckdb.DuckDBPyConnection, hours: float
+    con: duckdb.DuckDBPyConnection,
 ) -> dict[int, dict[str, Any]]:
     """Per-market trade stats with dedupe on (market_id, trade_id)."""
     from lighter_mm.util import percentile
 
-    n_minutes = max(1, int(hours * 60))
     con.execute(
         """
         CREATE OR REPLACE VIEW trade_deduped AS
@@ -476,17 +610,48 @@ def _aggregate_trades_sql(
         """
     )
     sql = """
-    WITH per_minute AS (
+    WITH window_bounds AS (
         SELECT
             market_id,
-            (timestamp_ms // 60000) * 60000 AS minute_ms,
-            COUNT(*) AS cnt
-        FROM trade_deduped
-        GROUP BY market_id, minute_ms
+            FLOOR(effective_start_ms / 60000.0)::BIGINT AS start_minute_idx,
+            FLOOR(effective_end_ms / 60000.0)::BIGINT AS end_minute_idx,
+            CAST(
+                FLOOR(effective_end_ms / 60000.0)
+                - FLOOR(effective_start_ms / 60000.0)
+                + 1
+            AS INTEGER) AS minute_slots,
+            market_observation_seconds
+        FROM market_windows
     ),
-    minute_lists AS (
-        SELECT market_id, LIST(cnt ORDER BY minute_ms) AS cnts, COUNT(*) AS active_minutes
-        FROM per_minute
+    per_minute AS (
+        SELECT
+            market_id,
+            (timestamp_ms // 60000) AS minute_idx,
+            COUNT(*)::DOUBLE AS cnt
+        FROM trade_deduped
+        GROUP BY market_id, minute_idx
+    ),
+    slot_rows AS (
+        SELECT
+            wb.market_id,
+            wb.minute_slots,
+            wb.market_observation_seconds,
+            wb.start_minute_idx + slot_offset AS minute_idx,
+            COALESCE(pm.cnt, 0.0) AS cnt
+        FROM window_bounds wb
+        CROSS JOIN UNNEST(range(wb.minute_slots)) AS u(slot_offset)
+        LEFT JOIN per_minute pm
+          ON pm.market_id = wb.market_id
+         AND pm.minute_idx = wb.start_minute_idx + slot_offset
+    ),
+    slot_lists AS (
+        SELECT
+            market_id,
+            MAX(minute_slots) AS minute_slots,
+            MAX(market_observation_seconds) AS market_observation_seconds,
+            LIST(cnt ORDER BY minute_idx) AS cnts,
+            COUNT(*) FILTER (WHERE cnt > 0) AS active_minutes
+        FROM slot_rows
         GROUP BY market_id
     ),
     trade_agg AS (
@@ -518,28 +683,35 @@ def _aggregate_trades_sql(
         t.total_quote_volume,
         t.median_trade_size_usd,
         i.median_intertrade_ms,
-        ml.cnts,
-        ml.active_minutes
+        sl.cnts,
+        sl.active_minutes,
+        sl.minute_slots,
+        sl.market_observation_seconds
     FROM trade_agg t
     LEFT JOIN intertrade i ON t.market_id = i.market_id
-    LEFT JOIN minute_lists ml ON t.market_id = ml.market_id
+    LEFT JOIN slot_lists sl ON t.market_id = sl.market_id
     """
     out: dict[int, dict[str, Any]] = {}
     for row in con.execute(sql).fetchall():
-        mid, tc, vol, med_size, inter_ms, cnts, active_minutes = row
+        mid, tc, vol, med_size, inter_ms, cnts, active_minutes, minute_slots, obs_s = row
         tc = int(tc or 0)
-        tpm_mean = float(tc) / float(n_minutes)
+        obs_s = float(obs_s or 0)
+        effective_minutes_float = max(obs_s / 60.0, 1.0 / 60.0)
+        tpm_mean = float(tc) / effective_minutes_float
+        slots = max(1, int(minute_slots or 0))
         cnt_list = [float(c) for c in (cnts or [])]
-        zeros = max(0, n_minutes - int(active_minutes or 0))
-        padded = cnt_list + [0.0] * zeros
+        if len(cnt_list) < slots:
+            cnt_list = cnt_list + [0.0] * (slots - len(cnt_list))
+        elif len(cnt_list) > slots:
+            cnt_list = cnt_list[:slots]
         out[int(mid)] = {
             "total_trade_count": tc,
             "total_quote_volume": float(vol or 0),
             "median_trade_size_usd": med_size,
             "median_intertrade_ms": inter_ms,
             "trades_per_minute_mean": tpm_mean,
-            "trades_per_minute_median": percentile(padded, 50) or 0.0,
-            "trades_per_minute_p90": percentile(padded, 90) or 0.0,
+            "trades_per_minute_median": percentile(cnt_list, 50) or 0.0,
+            "trades_per_minute_p90": percentile(cnt_list, 90) or 0.0,
         }
     return out
 
@@ -590,12 +762,19 @@ def _merge_market_rows(
     all_ids = set(book_agg) | set(trade_agg) | set(markout_agg)
     rows: list[dict[str, Any]] = []
     for mid in sorted(all_ids):
-        row: dict[str, Any] = {"market_id": mid, "observation_hours": hours}
+        row: dict[str, Any] = {
+            "market_id": mid,
+            "analysis_window_hours": hours,
+            "observation_hours": 0.0,
+        }
         if mid in book_agg:
             row.update(book_agg[mid])
         else:
             row["symbol"] = trade_agg.get(mid, {}).get("symbol") or markout_agg.get(mid, {}).get("symbol")
             row["data_coverage_pct"] = 0.0
+            row["observation_hours"] = 0.0
+        row.setdefault("analysis_window_hours", hours)
+        row.setdefault("observation_hours", 0.0)
         row.update(persistence.get(mid, {}))
         row.update(volatility.get(mid, {}))
         row.update(trade_agg.get(mid, _empty_trade_stats()))
@@ -679,7 +858,15 @@ def _spread_persistence(book, thresholds):  # noqa: ANN001
     return out
 
 
-def _trade_stats(trade_df, market_id: int, *, window_minutes: int = 1):  # noqa: ANN001
+def _trade_stats(
+    trade_df,
+    market_id: int,
+    *,
+    window_minutes: int = 1,
+    observation_seconds: float | None = None,
+    effective_start_ms: int | None = None,
+    effective_end_ms: int | None = None,
+):  # noqa: ANN001
     """Legacy wrapper for unit tests."""
     import polars as pl
 
@@ -689,10 +876,28 @@ def _trade_stats(trade_df, market_id: int, *, window_minutes: int = 1):  # noqa:
         trade_df = trade_df.with_columns(pl.arange(0, trade_df.height).alias("trade_id"))
     if "symbol" not in trade_df.columns:
         trade_df = trade_df.with_columns(pl.lit("TEST").alias("symbol"))
+    obs_s = float(observation_seconds) if observation_seconds is not None else float(window_minutes * 60)
+    if effective_start_ms is None:
+        effective_start_ms = int(trade_df["timestamp_ms"].min())
+    if effective_end_ms is None:
+        effective_end_ms = effective_start_ms + int(obs_s * 1000)
     con = duckdb.connect(":memory:")
     con.register("trade_raw", trade_df)
-    hours = max(window_minutes / 60.0, 1 / 60)
-    agg = _aggregate_trades_sql(con, hours)
+    con.execute(
+        f"""
+        CREATE OR REPLACE VIEW market_windows AS
+        SELECT
+            market_id,
+            MAX(symbol) AS symbol,
+            MIN(timestamp_ms) AS first_observed_ms,
+            {int(effective_start_ms)}::BIGINT AS effective_start_ms,
+            {int(effective_end_ms)}::BIGINT AS effective_end_ms,
+            {obs_s}::DOUBLE AS market_observation_seconds
+        FROM trade_raw
+        GROUP BY market_id
+        """
+    )
+    agg = _aggregate_trades_sql(con)
     return agg.get(market_id, _empty_trade_stats())
 
 

@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from lighter_mm.storage.backend import StorageBackend
+from lighter_mm.storage.backend import StorageBackend, VersionedJson
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +24,8 @@ class LockInfo:
 class LeaderLock:
     """Lease lock stored as JSON via StorageBackend.
 
-    Uses GCS generation preconditions when available (compare-and-swap).
+    GCS backends use generation-precondition CAS with no upload fallback.
+    Local backends use best-effort compare_and_swap_json only.
     """
 
     def __init__(
@@ -39,7 +40,7 @@ class LeaderLock:
         self.lock_key = lock_key
         self.holder_id = holder_id or uuid.uuid4().hex
         self.lease_seconds = lease_seconds
-        self._generation: int | None = None
+        self.cas_conflicts = 0
 
     def _lock_payload(self, run_id: str, git_sha: str | None) -> dict:
         info = LockInfo(
@@ -50,29 +51,36 @@ class LeaderLock:
         )
         return info.__dict__
 
+    def _is_held_by_other(self, current: VersionedJson) -> bool:
+        if not current.payload:
+            return False
+        exp = datetime.fromisoformat(current.payload["expires_at"])
+        return (
+            current.payload.get("holder_id") != self.holder_id
+            and exp > datetime.now(UTC)
+        )
+
     def acquire(self, run_id: str, git_sha: str | None = None) -> bool:
-        now = datetime.now(UTC)
-        existing = self.backend.download_json(self.lock_key)
-        if existing:
-            exp = datetime.fromisoformat(existing["expires_at"])
-            if existing.get("holder_id") != self.holder_id and exp > now:
-                log.warning(
-                    "leader lock held by %s until %s",
-                    existing.get("holder_id"),
-                    existing.get("expires_at"),
-                    extra={"event": "leader_lock_busy"},
-                )
-                return False
+        current = self.backend.download_json_with_generation(self.lock_key)
+        if self._is_held_by_other(current):
+            log.warning(
+                "leader lock held by %s until %s",
+                current.payload.get("holder_id") if current.payload else "?",
+                current.payload.get("expires_at") if current.payload else "?",
+                extra={"event": "leader_lock_busy"},
+            )
+            return False
+        gen_match = 0 if current.payload is None else int(current.generation or 0)
         payload = self._lock_payload(run_id, git_sha)
-        gen_match = 0 if not existing else None
         ok = self.backend.compare_and_swap_json(
             self.lock_key, payload, if_generation_match=gen_match
         )
         if not ok:
-            # Fallback: non-atomic path for local backend
-            self.backend.upload_json(self.lock_key, payload)
-            verify = self.backend.download_json(self.lock_key)
-            ok = bool(verify and verify.get("holder_id") == self.holder_id)
+            self.cas_conflicts += 1
+            log.debug(
+                "leader lock CAS conflict on acquire",
+                extra={"event": "leader_lock_cas_conflict", "run_id": run_id},
+            )
         if ok:
             log.info(
                 "leader lock acquired",
@@ -81,24 +89,35 @@ class LeaderLock:
         return ok
 
     def renew(self, run_id: str, git_sha: str | None = None) -> bool:
-        existing = self.backend.download_json(self.lock_key)
-        if not existing or existing.get("holder_id") != self.holder_id:
-            return self.acquire(run_id, git_sha=git_sha)
+        current = self.backend.download_json_with_generation(self.lock_key)
+        if not current.payload or current.payload.get("holder_id") != self.holder_id:
+            return False
+        if current.generation is None:
+            return False
         payload = self._lock_payload(run_id, git_sha)
-        ok = self.backend.compare_and_swap_json(self.lock_key, payload)
+        ok = self.backend.compare_and_swap_json(
+            self.lock_key, payload, if_generation_match=int(current.generation)
+        )
         if not ok:
-            self.backend.upload_json(self.lock_key, payload)
-            verify = self.backend.download_json(self.lock_key)
-            ok = bool(verify and verify.get("holder_id") == self.holder_id)
+            self.cas_conflicts += 1
+            log.debug(
+                "leader lock CAS conflict on renew",
+                extra={"event": "leader_lock_cas_conflict", "run_id": run_id},
+            )
         return ok
 
     def release(self) -> None:
-        existing = self.backend.download_json(self.lock_key)
-        if existing and existing.get("holder_id") == self.holder_id:
-            existing["expires_at"] = datetime.now(UTC).isoformat()
-            existing["released"] = True
-            self.backend.compare_and_swap_json(self.lock_key, existing)
-            self.backend.upload_json(self.lock_key, existing)
+        current = self.backend.download_json_with_generation(self.lock_key)
+        if not current.payload or current.payload.get("holder_id") != self.holder_id:
+            return
+        if current.generation is None:
+            return
+        existing = dict(current.payload)
+        existing["expires_at"] = datetime.now(UTC).isoformat()
+        existing["released"] = True
+        if self.backend.compare_and_swap_json(
+            self.lock_key, existing, if_generation_match=int(current.generation)
+        ):
             log.info("leader lock released", extra={"event": "leader_lock_released"})
 
 
