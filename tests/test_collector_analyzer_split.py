@@ -9,7 +9,6 @@ from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from tests.conftest import enrich_book_row
 
 from lighter_mm.analytics.aggregation import AnalysisSources, analyze_range
 from lighter_mm.cloud.analyzer import select_run_to_analyze
@@ -21,6 +20,7 @@ from lighter_mm.storage.local_backend import LocalStorageBackend
 from lighter_mm.storage.lock import LeaderLock
 from lighter_mm.storage.parquet_store import ParquetStore
 from lighter_mm.storage.state import RunState, now_iso
+from tests.helpers import enrich_book_row
 
 
 def _write_book_parquet(path: Path, ts: int) -> None:

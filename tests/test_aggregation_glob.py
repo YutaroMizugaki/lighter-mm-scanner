@@ -5,11 +5,10 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from tests.conftest import enrich_book_row
-
 from lighter_mm.analytics.aggregation import _glob_or_none, analyze_window
 from lighter_mm.config import Settings
 from lighter_mm.storage.parquet_store import ParquetStore
+from tests.helpers import enrich_book_row
 
 
 def test_glob_or_none_prefers_hour_partitions(tmp_path: Path) -> None:
