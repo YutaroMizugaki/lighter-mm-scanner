@@ -1,4 +1,4 @@
-import { fmt, getMarkets, getOverviewResult } from "@/lib/data";
+import { effectiveStatus, fmt, getMarkets, getOverviewResult } from "@/lib/data";
 import Link from "next/link";
 
 export default async function HomePage() {
@@ -50,6 +50,7 @@ export default async function HomePage() {
   }
 
   const overview = overviewResult.data;
+  const status = effectiveStatus(overview);
 
   const target = overview.observation_target_hours;
   const obs = overview.observation_hours;
@@ -60,13 +61,27 @@ export default async function HomePage() {
     .slice(0, 12);
   const discovered = overview.markets_discovered;
   const analyzed = overview.markets_analyzed ?? overview.markets;
+  const staleNote =
+    status === "OFFLINE"
+      ? "Public latest.json has not been refreshed for >40m — collector publish/deploy may be stuck."
+      : status === "STALE"
+        ? "Public latest.json is older than 20m — waiting for the next collector sync."
+        : null;
 
   return (
     <>
-      {(overview.status === "DEGRADED" || healthWarnings.length > 0 || overview.analysis_error) && (
+      {(status === "DEGRADED" ||
+        status === "STALE" ||
+        status === "OFFLINE" ||
+        healthWarnings.length > 0 ||
+        overview.analysis_error ||
+        staleNote) && (
         <section className="note">
           <strong>Data health:</strong>{" "}
-          {overview.analysis_error || healthWarnings[0] || "Collector flush is fresh but analysis is empty."}
+          {overview.analysis_error ||
+            healthWarnings[0] ||
+            staleNote ||
+            "Collector flush is fresh but analysis is empty."}
           {healthWarnings.length > 1 && (
             <ul className="compact">
               {healthWarnings.slice(1).map((w) => (
@@ -80,7 +95,7 @@ export default async function HomePage() {
         <div className="grid">
           <div className="kpi">
             <div className="label">Status</div>
-            <div className={`value status-${overview.status}`}>{overview.status}</div>
+            <div className={`value status-${status}`}>{status}</div>
           </div>
           <div className="kpi">
             <div className="label">Run</div>
