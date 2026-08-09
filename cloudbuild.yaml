@@ -22,20 +22,21 @@ options:
 
 steps:
   # STEP 1 — install
-  - name: ghcr.io/astral-sh/uv:0.12.3
+  # Distroless uv:0.12.3 has no Python; use the Python 3.12 image for sync/test.
+  - name: ghcr.io/astral-sh/uv:0.12.3-python3.12-bookworm-slim
     id: install
     entrypoint: uv
     args: ["sync", "--frozen", "--all-extras"]
 
   # STEP 2 — ruff
-  - name: ghcr.io/astral-sh/uv:0.12.3
+  - name: ghcr.io/astral-sh/uv:0.12.3-python3.12-bookworm-slim
     id: ruff
     entrypoint: uv
     args: ["run", "ruff", "check", "src", "tests"]
     waitFor: ["install"]
 
   # STEP 3 — pytest (must pass before deploy)
-  - name: ghcr.io/astral-sh/uv:0.12.3
+  - name: ghcr.io/astral-sh/uv:0.12.3-python3.12-bookworm-slim
     id: pytest
     entrypoint: uv
     args: ["run", "pytest", "-q"]
