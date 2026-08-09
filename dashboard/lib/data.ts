@@ -6,11 +6,16 @@ export type Overview = {
   observation_hours: number | null;
   observation_target_hours: number | null;
   markets: number;
+  markets_analyzed?: number;
+  markets_discovered?: number;
   candidates: number;
   coverage_pct: number | null;
   last_update: string | null;
   git_sha: string | null;
   collector_version: string | null;
+  analysis_error?: string | null;
+  health_warnings?: string[];
+  samples_written?: number;
   top_candidate: {
     symbol: string;
     score: number;

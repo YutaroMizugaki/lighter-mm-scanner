@@ -153,7 +153,7 @@ PR branches should **not** deploy the worker pool (trigger is main-only).
 
 ```bash
 gcloud builds submit --config=cloudbuild.yaml \
-  --substitutions=_GCS_BUCKET=${PRIVATE_BUCKET},_SERVICE_ACCOUNT=${COLLECTOR_SA}
+  --substitutions=_GCS_BUCKET=${PRIVATE_BUCKET},_GCS_PUBLIC_BUCKET=${PUBLIC_BUCKET},_SERVICE_ACCOUNT=${COLLECTOR_SA}
 ```
 
 Or deploy an already-built image:

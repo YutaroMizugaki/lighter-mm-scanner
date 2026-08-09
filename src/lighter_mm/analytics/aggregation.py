@@ -10,7 +10,12 @@ import duckdb
 import polars as pl
 
 from lighter_mm.config import Settings
-from lighter_mm.scoring import ScoredMarket, avoid_wide_spread_markets, score_markets
+from lighter_mm.scoring import (
+    CandidateThresholds,
+    ScoredMarket,
+    avoid_wide_spread_markets,
+    score_markets,
+)
 from lighter_mm.util import percentile
 
 
@@ -20,64 +25,74 @@ def _connect(data_dir: Path) -> duckdb.DuckDBPyConnection:
     return con
 
 
-def _glob_or_none(path: Path) -> str | None:
+def _glob_patterns(path: Path) -> list[str]:
     """Locate Parquet parts under hive partitions.
 
     Writers use ``date=YYYY-MM-DD/hour=HH/*.parquet``. An older flat layout
-    ``date=YYYY-MM-DD/*.parquet`` is still accepted for local/dev data.
+    ``date=YYYY-MM-DD/*.parquet`` is still accepted. When both exist, both are
+    returned so migration-era datasets are not silently truncated.
     """
-    nested = list(path.glob("date=*/hour=*/*.parquet"))
-    if nested:
-        return str(path / "date=*/hour=*/*.parquet")
-    flat = list(path.glob("date=*/*.parquet"))
-    if flat:
-        return str(path / "date=*/*.parquet")
-    return None
+    patterns: list[str] = []
+    if list(path.glob("date=*/hour=*/*.parquet")):
+        patterns.append(str(path / "date=*/hour=*/*.parquet"))
+    if list(path.glob("date=*/*.parquet")):
+        patterns.append(str(path / "date=*/*.parquet"))
+    return patterns
+
+
+def _glob_or_none(path: Path) -> str | None:
+    """Compatibility helper: prefer hour partitions, else flat date layout."""
+    patterns = _glob_patterns(path)
+    return patterns[0] if patterns else None
+
+
+def _read_parquet_window(
+    con: duckdb.DuckDBPyConnection, patterns: list[str], start_ms: int
+) -> pl.DataFrame:
+    if not patterns:
+        return pl.DataFrame()
+    # DuckDB accepts a list of globs; keep hive partitions for date=/hour=.
+    listed = "[" + ", ".join("'" + p.replace("'", "''") + "'" for p in patterns) + "]"
+    return con.execute(
+        f"""
+        SELECT * FROM read_parquet({listed}, hive_partitioning=1, union_by_name=true)
+        WHERE timestamp_ms >= {start_ms}
+        """
+    ).pl()
 
 
 def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
+    if hours <= 0:
+        return {
+            "hours": hours,
+            "markets": [],
+            "scored": [],
+            "error": "hours must be > 0 (use a positive lookback window)",
+        }
     data_dir = settings.data_dir
     con = _connect(data_dir)
     now_ms = con.execute("SELECT CAST(epoch_ms(current_timestamp) AS BIGINT)").fetchone()[0]
     start_ms = now_ms - int(hours * 3600 * 1000)
 
-    book_glob = _glob_or_none(data_dir / "book_samples")
-    trade_glob = _glob_or_none(data_dir / "trades")
-    markout_glob = _glob_or_none(data_dir / "markouts")
+    book_globs = _glob_patterns(data_dir / "book_samples")
+    trade_globs = _glob_patterns(data_dir / "trades")
+    markout_globs = _glob_patterns(data_dir / "markouts")
 
-    if book_glob is None:
+    if not book_globs:
         return {"hours": hours, "markets": [], "scored": [], "error": "no book_samples yet"}
 
-    book_df = con.execute(
-        f"""
-        SELECT * FROM read_parquet('{book_glob}', hive_partitioning=1)
-        WHERE timestamp_ms >= {start_ms}
-        """
-    ).pl()
-
-    trade_df = (
-        con.execute(
-            f"""
-            SELECT * FROM read_parquet('{trade_glob}', hive_partitioning=1)
-            WHERE timestamp_ms >= {start_ms}
-            """
-        ).pl()
-        if trade_glob
-        else pl.DataFrame()
-    )
-    markout_df = (
-        con.execute(
-            f"""
-            SELECT * FROM read_parquet('{markout_glob}', hive_partitioning=1)
-            WHERE timestamp_ms >= {start_ms}
-            """
-        ).pl()
-        if markout_glob
-        else pl.DataFrame()
-    )
+    book_df = _read_parquet_window(con, book_globs, start_ms)
+    trade_df = _read_parquet_window(con, trade_globs, start_ms)
+    markout_df = _read_parquet_window(con, markout_globs, start_ms)
 
     rows = _aggregate_markets(book_df, trade_df, markout_df, hours, settings)
-    scored = score_markets(rows)
+    thresholds = CandidateThresholds(
+        min_coverage_pct=settings.min_coverage_pct,
+        min_trades_per_hour=settings.min_trades_per_hour,
+        min_two_sided_depth_10bps_usd=settings.min_two_sided_depth_10bps_usd,
+        min_median_spread_bps=settings.min_median_spread_bps,
+    )
+    scored = score_markets(rows, thresholds=thresholds)
     return {
         "hours": hours,
         "start_ms": start_ms,
@@ -109,9 +124,10 @@ def _aggregate_markets(
     for m in markets:
         mid = m["market_id"]
         symbol = m["symbol"]
-        b_all = book_df.filter(pl.col("market_id") == mid)
         b = good.filter(pl.col("market_id") == mid)
-        actual = b_all.height
+        # Coverage is usable (non-stale) samples only — stale rows look like data
+        # but carry null spreads / zero depths and must not inflate coverage.
+        actual = b.height
         coverage = min(100.0, 100.0 * actual / expected_samples)
 
         if b.is_empty():

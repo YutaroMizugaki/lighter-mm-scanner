@@ -37,12 +37,28 @@ export default async function HomePage() {
   const target = overview.observation_target_hours;
   const obs = overview.observation_hours;
   const top = overview.top_candidate;
+  const healthWarnings = overview.health_warnings || [];
   const warnings = markets
     .flatMap((m) => (m.warnings || []).map((w) => ({ symbol: m.symbol, w })))
     .slice(0, 12);
+  const discovered = overview.markets_discovered;
+  const analyzed = overview.markets_analyzed ?? overview.markets;
 
   return (
     <>
+      {(overview.status === "DEGRADED" || healthWarnings.length > 0 || overview.analysis_error) && (
+        <section className="note">
+          <strong>Data health:</strong>{" "}
+          {overview.analysis_error || healthWarnings[0] || "Collector flush is fresh but analysis is empty."}
+          {healthWarnings.length > 1 && (
+            <ul className="compact">
+              {healthWarnings.slice(1).map((w) => (
+                <li key={w}>{w}</li>
+              ))}
+            </ul>
+          )}
+        </section>
+      )}
       <section className="card">
         <div className="grid">
           <div className="kpi">
@@ -62,7 +78,9 @@ export default async function HomePage() {
           </div>
           <div className="kpi">
             <div className="label">Markets</div>
-            <div className="value">{overview.markets}</div>
+            <div className="value">
+              {discovered != null && discovered > 0 ? `${analyzed}/${discovered}` : analyzed}
+            </div>
           </div>
           <div className="kpi">
             <div className="label">Coverage</div>

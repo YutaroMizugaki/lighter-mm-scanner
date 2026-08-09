@@ -16,6 +16,8 @@ def collector_status_label(
     *,
     ok_minutes: float,
     warn_minutes: float,
+    analysis_error: str | None = None,
+    markets_analyzed: int = 0,
 ) -> str:
     if state is None:
         return "ERROR"
@@ -34,6 +36,15 @@ def collector_status_label(
     except ValueError:
         return "ERROR"
     age_min = (datetime.now(UTC) - ts).total_seconds() / 60.0
+    # Same class of bug as MARKETS=0: flush looks fresh but analysis cannot read data.
+    # Cold start (samples_written=0) stays COLLECTING even with "no book_samples yet".
+    if (
+        state.status == "running"
+        and age_min <= ok_minutes
+        and markets_analyzed == 0
+        and state.samples_written > 0
+    ):
+        return "DEGRADED"
     if state.status == "running" and age_min <= ok_minutes:
         return "COLLECTING"
     if age_min <= warn_minutes:
@@ -52,10 +63,16 @@ def build_dashboard_payload(
     scored: list[ScoredMarket] = result.get("scored") or []
     candidates = [s for s in scored if s.candidate]
     avoid = result.get("avoid") or []
+    analysis_error = result.get("error")
+    if not analysis_error and state and state.samples_written > 0 and not scored:
+        analysis_error = "analysis returned 0 markets despite samples_written > 0"
+    markets_discovered = len(state.markets) if state else 0
     status = collector_status_label(
         state,
         ok_minutes=settings.status_ok_minutes,
         warn_minutes=settings.status_warn_minutes,
+        analysis_error=analysis_error,
+        markets_analyzed=len(scored),
     )
     obs_hours = None
     if state and state.started_at:
@@ -72,7 +89,16 @@ def build_dashboard_payload(
     ]
     coverage = sum(coverage_vals) / len(coverage_vals) if coverage_vals else None
 
-    top = scored[0] if scored else None
+    top = candidates[0] if candidates else None
+    health_warnings: list[str] = []
+    if analysis_error:
+        health_warnings.append(str(analysis_error))
+    if state and state.samples_written > 0 and markets_discovered > 0 and len(scored) == 0:
+        health_warnings.append(
+            f"discovered {markets_discovered} markets but analyzed 0 "
+            "(check local Parquet / hydrate after redeploy)"
+        )
+
     overview = {
         "title": "Lighter MM Scanner",
         "status": status,
@@ -81,12 +107,17 @@ def build_dashboard_payload(
         "observation_hours": obs_hours,
         "observation_target_hours": state.observation_target_hours if state else hours,
         "markets": len(scored),
+        "markets_analyzed": len(scored),
+        "markets_discovered": markets_discovered,
         "candidates": len(candidates),
         "coverage_pct": coverage,
         "last_update": state.last_successful_flush if state else None,
         "git_sha": state.git_sha if state else settings.git_sha,
         "collector_version": state.collector_version if state else settings.collector_version,
         "top_candidate": _market_card(top) if top else None,
+        "analysis_error": analysis_error,
+        "health_warnings": health_warnings,
+        "samples_written": state.samples_written if state else 0,
         "storage_estimate": storage_estimate,
         "generated_at": datetime.now(UTC).isoformat(),
         "read_only": True,
@@ -109,6 +140,7 @@ def build_dashboard_payload(
         "avoid": [_market_row(s) for s in avoid],
         "market_details": market_details,
         "raw_records": scored_to_records(scored)[:500],
+        "analysis_error": analysis_error,
     }
 
 
