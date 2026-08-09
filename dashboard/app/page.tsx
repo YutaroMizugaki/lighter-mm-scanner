@@ -1,9 +1,16 @@
-import { effectiveStatus, fmt, getMarkets, getOverviewResult } from "@/lib/data";
+import {
+  effectiveStatus,
+  fmt,
+  fmtJst,
+  getMarketsResult,
+  getOverviewResult,
+  statusHealthNote,
+} from "@/lib/data";
 import Link from "next/link";
 
 export default async function HomePage() {
   const overviewResult = await getOverviewResult();
-  const markets = await getMarkets();
+  const marketsResult = await getMarketsResult();
   const configured = Boolean(process.env.NEXT_PUBLIC_DATA_BASE_URL);
 
   if (!configured) {
@@ -51,22 +58,24 @@ export default async function HomePage() {
 
   const overview = overviewResult.data;
   const status = effectiveStatus(overview);
+  const markets = marketsResult.ok ? marketsResult.data.markets ?? [] : [];
+  const marketsFetchFailed = !marketsResult.ok;
 
   const target = overview.observation_target_hours;
   const obs = overview.observation_hours;
   const top = overview.top_candidate;
-  const healthWarnings = overview.health_warnings || [];
+  const healthWarnings = [...(overview.health_warnings || [])];
+  if (marketsFetchFailed) {
+    healthWarnings.unshift("Market aggregate data could not be loaded.");
+  }
   const warnings = markets
     .flatMap((m) => (m.warnings || []).map((w) => ({ symbol: m.symbol, w })))
     .slice(0, 12);
   const discovered = overview.markets_discovered;
   const analyzed = overview.markets_analyzed ?? overview.markets;
-  const staleNote =
-    status === "OFFLINE"
-      ? "Public latest.json has not been refreshed for >40m — collector publish/deploy may be stuck."
-      : status === "STALE"
-        ? "Public latest.json is older than 20m — waiting for the next collector sync."
-        : null;
+  const staleNote = statusHealthNote(status);
+  const flushAt = overview.last_successful_flush || overview.last_update;
+  const ws = overview.ws;
 
   return (
     <>
@@ -75,19 +84,30 @@ export default async function HomePage() {
         status === "OFFLINE" ||
         healthWarnings.length > 0 ||
         overview.analysis_error ||
-        staleNote) && (
+        staleNote ||
+        marketsFetchFailed) && (
         <section className="note">
           <strong>Data health:</strong>{" "}
           {overview.analysis_error ||
             healthWarnings[0] ||
             staleNote ||
             "Collector flush is fresh but analysis is empty."}
+          {marketsFetchFailed && (
+            <p className="muted" style={{ marginTop: "0.4rem", fontSize: "0.85rem" }}>
+              Dashboard data fetch failed. {marketsResult.error}
+            </p>
+          )}
           {healthWarnings.length > 1 && (
             <ul className="compact">
               {healthWarnings.slice(1).map((w) => (
                 <li key={w}>{w}</li>
               ))}
             </ul>
+          )}
+          {staleNote && healthWarnings[0] !== staleNote && !overview.analysis_error && (
+            <p className="muted" style={{ marginTop: "0.4rem" }}>
+              {staleNote}
+            </p>
           )}
         </section>
       )}
@@ -123,15 +143,26 @@ export default async function HomePage() {
           <div className="kpi">
             <div className="label">Last Update</div>
             <div className="value" style={{ fontSize: "0.95rem" }}>
-              {overview.last_update
-                ? new Date(overview.last_update).toLocaleString()
-                : "—"}
+              {fmtJst(flushAt)}
             </div>
           </div>
         </div>
         <p className="muted" style={{ marginTop: "0.8rem" }}>
           git {overview.git_sha || "unknown"} · collector {overview.collector_version || "?"} ·
-          generated {overview.generated_at}
+          Generated: {fmtJst(overview.generated_at)}
+          {ws != null && (
+            <>
+              {" "}
+              · WS {ws.connected_shards ?? "?"}/{ws.total_shards ?? "?"} shards ·{" "}
+              {ws.subscribed_channels ?? "?"} ch
+              {(ws.subscription_errors ?? 0) > 0 && (
+                <> · sub_err {ws.subscription_errors}</>
+              )}
+              {(ws.trade_parse_errors ?? 0) > 0 && (
+                <> · trade_parse_err {ws.trade_parse_errors}</>
+              )}
+            </>
+          )}
         </p>
       </section>
 
@@ -153,54 +184,60 @@ export default async function HomePage() {
 
       <section className="card">
         <h2>Top MM Candidates (preview)</h2>
-        <div style={{ overflowX: "auto" }}>
-          <table>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Symbol</th>
-                <th>Rank</th>
-                <th>Score</th>
-                <th>Spread</th>
-                <th>%≥5bp</th>
-                <th>Depth10</th>
-                <th>TPM</th>
-                <th>M5</th>
-                <th>M30</th>
-                <th>Funding</th>
-              </tr>
-            </thead>
-            <tbody>
-              {markets
-                .filter((m) => m.is_candidate)
-                .slice(0, 15)
-                .map((m, i) => (
-                  <tr key={m.symbol}>
-                    <td>{i + 1}</td>
-                    <td>
-                      <Link href={`/markets/${encodeURIComponent(m.symbol)}`}>{m.symbol}</Link>
-                    </td>
-                    <td>
-                      <span className={`badge ${m.letter_rank}`}>{m.letter_rank}</span>
-                    </td>
-                    <td>{fmt(m.score, 1)}</td>
-                    <td>{fmt(m.median_spread_bps)}</td>
-                    <td>
-                      {m.pct_time_spread_ge_5bps != null
-                        ? `${(m.pct_time_spread_ge_5bps * 100).toFixed(0)}%`
-                        : "—"}
-                    </td>
-                    <td>{fmt(m.median_two_sided_depth_10bps_usd, 0)}</td>
-                    <td>{fmt(m.trades_per_minute_median)}</td>
-                    <td>{fmt(m.maker_markout_5s_median_bps, 2, true)}</td>
-                    <td>{fmt(m.maker_markout_30s_median_bps, 2, true)}</td>
-                    <td>{fmt(m.current_funding_rate, 4)}</td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
-        </div>
-        {!markets.some((m) => m.is_candidate) && (
+        {marketsFetchFailed ? (
+          <p className="muted">Market aggregate data could not be loaded.</p>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Symbol</th>
+                  <th>Rank</th>
+                  <th>Score</th>
+                  <th>Spread</th>
+                  <th>%≥5bp</th>
+                  <th>Depth10</th>
+                  <th>TPM med</th>
+                  <th>TPM avg</th>
+                  <th>M5</th>
+                  <th>M30</th>
+                  <th>Funding</th>
+                </tr>
+              </thead>
+              <tbody>
+                {markets
+                  .filter((m) => m.is_candidate)
+                  .slice(0, 15)
+                  .map((m, i) => (
+                    <tr key={m.symbol}>
+                      <td>{i + 1}</td>
+                      <td>
+                        <Link href={`/markets/${encodeURIComponent(m.symbol)}`}>{m.symbol}</Link>
+                      </td>
+                      <td>
+                        <span className={`badge ${m.letter_rank}`}>{m.letter_rank}</span>
+                      </td>
+                      <td>{fmt(m.score, 1)}</td>
+                      <td>{fmt(m.median_spread_bps)}</td>
+                      <td>
+                        {m.pct_time_spread_ge_5bps != null
+                          ? `${(m.pct_time_spread_ge_5bps * 100).toFixed(0)}%`
+                          : "—"}
+                      </td>
+                      <td>{fmt(m.median_two_sided_depth_10bps_usd, 0)}</td>
+                      <td>{fmt(m.trades_per_minute_median)}</td>
+                      <td>{fmt(m.trades_per_minute_mean)}</td>
+                      <td>{fmt(m.maker_markout_5s_median_bps, 2, true)}</td>
+                      <td>{fmt(m.maker_markout_30s_median_bps, 2, true)}</td>
+                      <td>{fmt(m.current_funding_rate, 4)}</td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {!marketsFetchFailed && !markets.some((m) => m.is_candidate) && (
           <p className="muted">No candidates yet (need longer observation / filters).</p>
         )}
       </section>

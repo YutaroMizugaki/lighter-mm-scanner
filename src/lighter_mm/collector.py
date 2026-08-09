@@ -75,6 +75,7 @@ class CollectorApp:
         self._completed = False
         self._deployment_gaps = 0
         self._last_trade_ts: int | None = None
+        self._last_book_sample_ts: int | None = None
         self.holder_id = uuid.uuid4().hex
 
         self.run_id, self.state, resumed = self._resolve_run()
@@ -452,8 +453,28 @@ class CollectorApp:
             # generated_at moves — detail-upload failures used to block the flush).
             flush_at = now_iso()
             self.state.last_successful_flush = flush_at
+            ws_runtime = None
+            if self._ws is not None:
+                ws_runtime = self._ws.runtime.public_dict()
+                log_event(
+                    log,
+                    "ws_runtime",
+                    (
+                        f"shards={ws_runtime.get('connected_shards')}/"
+                        f"{ws_runtime.get('total_shards')} "
+                        f"channels={ws_runtime.get('subscribed_channels')} "
+                        f"sub_err={ws_runtime.get('subscription_errors')} "
+                        f"trade_parse_err={ws_runtime.get('trade_parse_errors')}"
+                    ),
+                    run_id=self.run_id,
+                )
             payload = build_dashboard_payload(
-                self.settings, hours=window, state=self.state, storage_estimate=est
+                self.settings,
+                hours=window,
+                state=self.state,
+                storage_estimate=est,
+                ws_runtime=ws_runtime,
+                last_book_sample_at_ms=self._last_book_sample_ts,
             )
             # Core dashboard JSON — this alone must count as a successful flush.
             self.backend.upload_json(
@@ -536,12 +557,20 @@ class CollectorApp:
             "candidates": 0,
             "coverage_pct": None,
             "last_update": now,
+            "last_successful_flush": self.state.last_successful_flush,
+            "last_trade_at": None,
+            "last_book_sample_at": None,
             "git_sha": self.settings.git_sha,
             "collector_version": self.settings.collector_version,
             "top_candidate": None,
             "analysis_error": error,
             "health_warnings": [error],
             "samples_written": self.state.samples_written,
+            "ws": (
+                self._ws.runtime.public_dict()
+                if getattr(self, "_ws", None) is not None
+                else None
+            ),
             "generated_at": now,
             "read_only": True,
             "disclaimer": (
@@ -721,6 +750,7 @@ class CollectorApp:
                 row.update(metrics.depths)
                 self.store.write_book(row)
                 self._sample_counts[mid] += 1
+                self._last_book_sample_ts = now
                 if metrics.mid is not None:
                     self.mid_histories[mid].add(now, metrics.mid)
                 tpm = self.activity.trades_per_minute(mid, now)

@@ -52,12 +52,23 @@ def collector_status_label(
     return "OFFLINE" if state.status == "running" else state.status.upper()
 
 
+def _ms_to_iso(ms: int | None) -> str | None:
+    if ms is None:
+        return None
+    try:
+        return datetime.fromtimestamp(ms / 1000.0, tz=UTC).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def build_dashboard_payload(
     settings: Settings,
     *,
     hours: float,
     state: RunState | None,
     storage_estimate: dict[str, Any] | None = None,
+    ws_runtime: dict[str, Any] | None = None,
+    last_book_sample_at_ms: int | None = None,
 ) -> dict[str, Any]:
     result = analyze_window(settings, hours)
     scored: list[ScoredMarket] = result.get("scored") or []
@@ -98,6 +109,34 @@ def build_dashboard_payload(
             f"discovered {markets_discovered} markets but analyzed 0 "
             "(check local Parquet / hydrate after redeploy)"
         )
+    if coverage is not None and coverage < 80.0:
+        health_warnings.append(
+            f"Low data coverage: {coverage:.1f}%. WebSocket connectivity or "
+            "subscription limits may be affecting collection."
+        )
+    if coverage is not None and coverage < settings.min_coverage_pct:
+        health_warnings.append(
+            "Candidate ranking is provisional because observation coverage "
+            f"is below the required {settings.min_coverage_pct:.0f}%."
+        )
+
+    markout_trade_inconsistent = 0
+    for s in scored:
+        r = s.row
+        if (
+            r.get("maker_markout_5s_median_bps") is not None
+            and (r.get("total_trade_count") or 0) == 0
+        ):
+            markout_trade_inconsistent += 1
+    if markout_trade_inconsistent:
+        health_warnings.append(
+            f"markout exists but trade count is zero on {markout_trade_inconsistent} "
+            "market(s); possible trade aggregation inconsistency"
+        )
+
+    flush = state.last_successful_flush if state else None
+    last_trade_at = _ms_to_iso(state.last_trade_timestamp_ms if state else None)
+    last_book_sample_at = _ms_to_iso(last_book_sample_at_ms)
 
     overview = {
         "title": "Lighter MM Scanner",
@@ -111,7 +150,11 @@ def build_dashboard_payload(
         "markets_discovered": markets_discovered,
         "candidates": len(candidates),
         "coverage_pct": coverage,
-        "last_update": state.last_successful_flush if state else None,
+        # last_update remains an alias of last_successful_flush for older clients.
+        "last_update": flush,
+        "last_successful_flush": flush,
+        "last_trade_at": last_trade_at,
+        "last_book_sample_at": last_book_sample_at,
         "git_sha": state.git_sha if state else settings.git_sha,
         "collector_version": state.collector_version if state else settings.collector_version,
         "top_candidate": _market_card(top) if top else None,
@@ -119,6 +162,7 @@ def build_dashboard_payload(
         "health_warnings": health_warnings,
         "samples_written": state.samples_written if state else 0,
         "storage_estimate": storage_estimate,
+        "ws": ws_runtime,
         "generated_at": datetime.now(UTC).isoformat(),
         "read_only": True,
         "disclaimer": (
@@ -159,6 +203,14 @@ def _market_card(s: ScoredMarket) -> dict[str, Any]:
 
 def _market_row(s: ScoredMarket) -> dict[str, Any]:
     r = s.row
+    warnings = list(s.warnings or [])
+    if (
+        r.get("maker_markout_5s_median_bps") is not None
+        and (r.get("total_trade_count") or 0) == 0
+    ):
+        warnings.append(
+            "markout exists but trade count is zero; possible trade aggregation inconsistency"
+        )
     return {
         "symbol": r.get("symbol"),
         "market_id": r.get("market_id"),
@@ -169,12 +221,14 @@ def _market_row(s: ScoredMarket) -> dict[str, Any]:
         "pct_time_spread_ge_5bps": r.get("pct_time_spread_ge_5bps"),
         "median_two_sided_depth_10bps_usd": r.get("median_two_sided_depth_10bps_usd"),
         "trades_per_minute_median": r.get("trades_per_minute_median"),
+        "trades_per_minute_mean": r.get("trades_per_minute_mean"),
+        "total_trade_count": r.get("total_trade_count"),
         "maker_markout_5s_median_bps": r.get("maker_markout_5s_median_bps"),
         "maker_markout_30s_median_bps": r.get("maker_markout_30s_median_bps"),
         "current_funding_rate": r.get("current_funding_rate"),
         "data_coverage_pct": r.get("data_coverage_pct"),
         "recommended_max_order_usd": s.recommended_max_order_usd,
-        "warnings": s.warnings,
+        "warnings": warnings,
         "pros": s.pros[:6],
         "cons": s.cons[:6],
     }
@@ -190,6 +244,7 @@ def _market_detail(s: ScoredMarket) -> dict[str, Any]:
             "median_two_sided_depth_5bps_usd": r.get("median_two_sided_depth_5bps_usd"),
             "median_two_sided_depth_25bps_usd": r.get("median_two_sided_depth_25bps_usd"),
             "total_trade_count": r.get("total_trade_count"),
+            "trades_per_minute_mean": r.get("trades_per_minute_mean"),
             "total_quote_volume": r.get("total_quote_volume"),
             "p50_abs_mid_move_5s_bps": r.get("p50_abs_mid_move_5s_bps"),
             "p95_abs_mid_move_5s_bps": r.get("p95_abs_mid_move_5s_bps"),
