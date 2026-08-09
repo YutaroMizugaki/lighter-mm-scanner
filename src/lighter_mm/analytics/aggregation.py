@@ -73,12 +73,70 @@ def _rss_mb() -> float:
     return usage / 1024
 
 
+def _create_market_windows_view(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    start_ms: int,
+    end_ms: int,
+    active_market_ids: set[int] | None = None,
+) -> None:
+    """Lifecycle-aware per-market observation bounds for coverage metrics.
+
+    When ``active_market_ids`` is provided (Cloud Analyzer with RunState):
+    - markets still active at analysis end use ``end_ms`` as effective_end_ms
+    - markets inactive before analysis end cap at last_observed_ms
+
+    Fallback when ``active_market_ids`` is None (local analysis without RunState):
+    use ``end_ms`` for all markets so trailing collector outages are not hidden.
+    Do not infer inactive from last_observed_ms alone.
+    """
+    if active_market_ids is None:
+        effective_end_expr = f"CAST({end_ms} AS BIGINT)"
+    elif active_market_ids:
+        ids_sql = ", ".join(str(i) for i in sorted(active_market_ids))
+        effective_end_expr = (
+            f"CASE WHEN market_id IN ({ids_sql}) "
+            f"THEN CAST({end_ms} AS BIGINT) "
+            f"ELSE MAX(timestamp_ms) END"
+        )
+    else:
+        effective_end_expr = "MAX(timestamp_ms)"
+
+    con.execute(
+        f"""
+        CREATE OR REPLACE VIEW market_windows AS
+        SELECT
+            market_id,
+            symbol,
+            first_observed_ms,
+            last_observed_ms,
+            effective_start_ms,
+            effective_end_ms,
+            CAST(effective_end_ms - effective_start_ms AS DOUBLE) / 1000.0
+                AS market_observation_seconds
+        FROM (
+            SELECT
+                market_id,
+                MAX(symbol) AS symbol,
+                MIN(timestamp_ms) AS first_observed_ms,
+                MAX(timestamp_ms) AS last_observed_ms,
+                GREATEST(CAST({start_ms} AS BIGINT), MIN(timestamp_ms))
+                    AS effective_start_ms,
+                {effective_end_expr} AS effective_end_ms
+            FROM book_deduped
+            GROUP BY market_id
+        ) bounds
+        """
+    )
+
+
 def analyze_range(
     settings: Settings,
     *,
     start_ms: int,
     end_ms: int,
     sources: AnalysisSources | None = None,
+    active_market_ids: set[int] | None = None,
     benchmark_profile: bool = False,
     explain_volatility: bool = False,
     duckdb_memory_limit: str | None = None,
@@ -255,24 +313,11 @@ def analyze_range(
            OR (is_usable IS NULL AND is_stale = false AND mid IS NOT NULL)
         """
     )
-    con.execute(
-        f"""
-        CREATE OR REPLACE VIEW market_windows AS
-        SELECT
-            market_id,
-            MAX(symbol) AS symbol,
-            MIN(timestamp_ms) AS first_observed_ms,
-            MAX(timestamp_ms) AS last_observed_ms,
-            GREATEST(CAST({start_ms} AS BIGINT), MIN(timestamp_ms)) AS effective_start_ms,
-            LEAST(CAST({end_ms} AS BIGINT), MAX(timestamp_ms)) AS effective_end_ms,
-            CAST(
-                LEAST(CAST({end_ms} AS BIGINT), MAX(timestamp_ms))
-                - GREATEST(CAST({start_ms} AS BIGINT), MIN(timestamp_ms))
-                AS DOUBLE
-            ) / 1000.0 AS market_observation_seconds
-        FROM book_deduped
-        GROUP BY market_id
-        """
+    _create_market_windows_view(
+        con,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        active_market_ids=active_market_ids,
     )
 
     book_count = con.execute("SELECT COUNT(*) FROM book_deduped").fetchone()[0]

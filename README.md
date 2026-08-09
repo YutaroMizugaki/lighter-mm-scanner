@@ -85,7 +85,7 @@ Lighter → Collector Worker Pool → immutable Parquet → Private GCS
 - **Schedule:** `*/15 * * * *` (Cloud Scheduler → Cloud Run Job)
 - **GCS mount:** `/mnt/lighter-mm` (read-only)
 - **Publishes:** `current.json` + `generations/{id}/*` (and legacy `latest.json` mirror), `analysis_status.json`
-- **Analysis window:** end time is capped at `state.last_successful_flush` (durable GCS watermark), never execution time
+- **Analysis window:** end time is capped at `state.last_durable_event_ms` (durable market-event watermark), never execution time
 - **Manual run:** `gcloud run jobs execute lighter-mm-analyzer --region=...`
 
 ### Public JSON roles
