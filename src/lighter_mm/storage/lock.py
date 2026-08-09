@@ -25,6 +25,22 @@ class LockInfo:
     git_sha: str | None = None
 
 
+def _parse_lock_expiry(payload: dict | None) -> datetime | None:
+    if not payload:
+        return None
+    raw = payload.get("expires_at")
+    if not raw:
+        return None
+    try:
+        exp = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=UTC)
+        return exp
+    except (TypeError, ValueError):
+        log.warning("leader lock has invalid expires_at: %r", raw)
+        return None
+
+
 class LeaderLock:
     """Lease lock stored as JSON via StorageBackend.
 
@@ -58,11 +74,14 @@ class LeaderLock:
     def _is_held_by_other(self, current: VersionedJson) -> bool:
         if not current.payload:
             return False
-        exp = datetime.fromisoformat(current.payload["expires_at"])
-        return (
-            current.payload.get("holder_id") != self.holder_id
-            and exp > datetime.now(UTC)
-        )
+        holder = current.payload.get("holder_id")
+        if not holder:
+            log.warning("leader lock missing holder_id; treating as expired")
+            return False
+        exp = _parse_lock_expiry(current.payload)
+        if exp is None:
+            return False
+        return holder != self.holder_id and exp > datetime.now(UTC)
 
     def acquire(self, run_id: str, git_sha: str | None = None) -> bool:
         current = self.backend.download_json_with_generation(self.lock_key)

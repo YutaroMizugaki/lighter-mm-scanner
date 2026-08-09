@@ -15,7 +15,7 @@ jobs:
         with:
           version: "0.12.3"
       - name: Sync
-        run: uv sync --all-extras
+        run: uv sync --frozen --all-extras
       - name: Ruff
         run: uv run ruff check src tests
       - name: Pytest

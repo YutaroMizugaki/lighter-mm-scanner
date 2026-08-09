@@ -5,6 +5,8 @@
 #
 # Substitutions (set on trigger / CLI):
 #   _REGION, _AR_REPO, _WORKER_POOL, _GCS_BUCKET, _GCS_PUBLIC_BUCKET, _SERVICE_ACCOUNT
+#
+# API enable is NOT part of this pipeline — run scripts/bootstrap_gcp.sh once as admin.
 
 substitutions:
   _REGION: asia-northeast1
@@ -35,21 +37,21 @@ steps:
     entrypoint: uv
     args: ["sync", "--frozen", "--all-extras"]
 
-  # STEP 2 — ruff
+  # STEP 2 — ruff (parallel with pytest after install)
   - name: ghcr.io/astral-sh/uv:0.12.3-python3.12-trixie-slim
     id: ruff
     entrypoint: uv
     args: ["run", "ruff", "check", "src", "tests"]
     waitFor: ["install"]
 
-  # STEP 3 — pytest (must pass before deploy)
+  # STEP 3 — pytest (must pass before build/deploy)
   - name: ghcr.io/astral-sh/uv:0.12.3-python3.12-trixie-slim
     id: pytest
     entrypoint: uv
     args: ["run", "pytest", "-q"]
     waitFor: ["install"]
 
-  # STEP 4 — Docker build with GIT_SHA
+  # STEP 4 — Docker build with GIT_SHA (only after ruff + pytest pass)
   - name: gcr.io/cloud-builders/docker
     id: build
     args:
@@ -72,7 +74,22 @@ steps:
       - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/collector
     waitFor: ["build"]
 
-  # STEP 6 — deploy Cloud Run Worker Pool (manual scaling = 1)
+  # STEP 6 — preflight (no API enable; fail fast with actionable message)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: preflight
+    entrypoint: bash
+    args:
+      - scripts/cloudbuild_preflight.sh
+    env:
+      - _REGION=${_REGION}
+      - _AR_REPO=${_AR_REPO}
+      - _GCS_BUCKET=${_GCS_BUCKET}
+      - _GCS_PUBLIC_BUCKET=${_GCS_PUBLIC_BUCKET}
+      - _SERVICE_ACCOUNT=${_SERVICE_ACCOUNT}
+      - _SCHEDULER_SERVICE_ACCOUNT=${_SCHEDULER_SERVICE_ACCOUNT}
+    waitFor: ["push"]
+
+  # STEP 7 — deploy Cloud Run Worker Pool (manual scaling = 1)
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     id: deploy
     entrypoint: bash
@@ -80,14 +97,6 @@ steps:
       - -c
       - |
         set -euo pipefail
-        if [[ -z "${_GCS_BUCKET}" ]]; then
-          echo "ERROR: _GCS_BUCKET substitution is required" >&2
-          exit 1
-        fi
-        if [[ -z "${_GCS_PUBLIC_BUCKET}" ]]; then
-          echo "ERROR: _GCS_PUBLIC_BUCKET substitution is required for dashboard JSON" >&2
-          exit 1
-        fi
         # Note: bash vars must use $$ so Cloud Build does not treat them as substitutions.
         SA_FLAGS=()
         if [[ -n "${_SERVICE_ACCOUNT}" ]]; then
@@ -102,9 +111,9 @@ steps:
           --instances="${_INSTANCES}" \
           --set-env-vars="ENVIRONMENT=cloud,STRUCTURED_LOGGING=true,LIGHTER_MM_NO_DASHBOARD=1,GCP_PROJECT_ID=$PROJECT_ID,GCP_REGION=${_REGION},GCS_BUCKET=${_GCS_BUCKET},GCS_PUBLIC_BUCKET=${_GCS_PUBLIC_BUCKET},RUN_TARGET_HOURS=${_RUN_TARGET_HOURS},GIT_SHA=$COMMIT_SHA,BOOK_SAMPLE_INTERVAL_SECONDS=5,PARQUET_ROTATION_MINUTES=15,GCS_UPLOAD_INTERVAL_MINUTES=5,MAX_SUBSCRIPTIONS_PER_CONNECTION=95" \
           "$${SA_FLAGS[@]}"
-    waitFor: ["push"]
+    waitFor: ["preflight"]
 
-  # STEP 7 — deploy Cloud Run Analyzer Job (same image, GCS mount read-only)
+  # STEP 8 — deploy Cloud Run Analyzer Job (same image, GCS mount read-only)
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     id: deploy-analyzer
     entrypoint: bash
@@ -112,10 +121,6 @@ steps:
       - -c
       - |
         set -euo pipefail
-        if [[ -z "${_GCS_BUCKET}" ]]; then
-          echo "ERROR: _GCS_BUCKET substitution is required" >&2
-          exit 1
-        fi
         SA_FLAGS=()
         if [[ -n "${_SERVICE_ACCOUNT}" ]]; then
           SA_FLAGS+=(--service-account="${_SERVICE_ACCOUNT}")
@@ -135,25 +140,7 @@ steps:
           --add-volume=name=gcs-data,type=cloud-storage,bucket=${_GCS_BUCKET},readonly=true \
           --add-volume-mount=volume=gcs-data,mount-path=${_ANALYZER_MOUNT_PATH} \
           "$${SA_FLAGS[@]}"
-    waitFor: ["push"]
-
-  # STEP 8 — ensure required APIs (idempotent; safe on every deploy)
-  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
-    id: enable-apis
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        set -euo pipefail
-        gcloud services enable \
-          run.googleapis.com \
-          cloudscheduler.googleapis.com \
-          cloudbuild.googleapis.com \
-          artifactregistry.googleapis.com \
-          storage.googleapis.com \
-          iam.googleapis.com \
-          --project="$PROJECT_ID"
-    waitFor: ["push"]
+    waitFor: ["preflight"]
 
   # STEP 9 — grant Scheduler SA permission to invoke Analyzer Job
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
@@ -176,7 +163,7 @@ steps:
           --region="${_REGION}" \
           --member="serviceAccount:$$SCHEDULER_SA" \
           --role="roles/run.invoker"
-    waitFor: ["deploy-analyzer", "enable-apis"]
+    waitFor: ["deploy-analyzer"]
 
   # STEP 10 — Cloud Scheduler for periodic analyzer runs (Cloud Run Jobs v2 API)
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim

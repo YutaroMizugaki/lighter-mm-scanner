@@ -36,9 +36,14 @@ gcloud config set project lighter-mm-scanner
 
 **Set a budget alert** (Billing → Budgets & alerts). Suggested starter: $20–50/month with email at 50/90/100%.
 
-## 2) Enable APIs
+## 2) Enable APIs (one-time admin bootstrap)
+
+**Run once** with Project Owner or Service Usage Admin (`serviceusage.services.enable`).
+Normal `cloudbuild.yaml` deploys do **not** enable APIs.
 
 ```bash
+./scripts/bootstrap_gcp.sh
+# or manually:
 gcloud services enable \
   run.googleapis.com \
   cloudscheduler.googleapis.com \
@@ -50,7 +55,8 @@ gcloud services enable \
   cloudresourcemanager.googleapis.com
 ```
 
-Cloud Build also enables `run.googleapis.com` and `cloudscheduler.googleapis.com` on each deploy (idempotent).
+If APIs are already enabled, this is a no-op. Cloud Build preflight checks API availability
+and fails with a clear message if bootstrap was skipped.
 
 ## 3) Artifact Registry
 

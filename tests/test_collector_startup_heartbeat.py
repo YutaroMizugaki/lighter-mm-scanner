@@ -2,14 +2,61 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
+
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from lighter_mm.cloud.sync import DurableSync
 from lighter_mm.collector import CollectorApp
 from lighter_mm.config import Settings
 from lighter_mm.storage.local_backend import LocalStorageBackend
+from lighter_mm.storage.parquet_store import _book_schema
 from lighter_mm.storage.state import RunState, now_iso
+from tests.helpers import enrich_book_row
+
+
+def _minimal_book_row(ts: int) -> dict:
+    return enrich_book_row({
+        "timestamp_ms": ts,
+        "market_id": 1,
+        "symbol": "ETH",
+        "best_bid": 100.0,
+        "best_ask": 100.1,
+        "mid": 100.05,
+        "spread_absolute": 0.1,
+        "spread_bps": 10.0,
+        "best_bid_size_base": 1.0,
+        "best_ask_size_base": 1.0,
+        "best_bid_size_usd": 100.0,
+        "best_ask_size_usd": 100.1,
+        "is_stale": False,
+        "is_usable": True,
+        "nonce": 1,
+        "index_price": None,
+        "mark_price": None,
+        "stats_mid_price": None,
+        "open_interest": None,
+        "last_trade_price": None,
+        "current_funding_rate": None,
+        "funding_rate": None,
+        "daily_base_token_volume": None,
+        "daily_quote_token_volume": None,
+        "daily_price_low": None,
+        "daily_price_high": None,
+        "daily_price_change": None,
+        "bid_depth_5bps_usd": 50.0,
+        "ask_depth_5bps_usd": 50.0,
+        "two_sided_depth_5bps_usd": 50.0,
+        "bid_depth_10bps_usd": 200.0,
+        "ask_depth_10bps_usd": 200.0,
+        "two_sided_depth_10bps_usd": 200.0,
+        "bid_depth_25bps_usd": 400.0,
+        "ask_depth_25bps_usd": 400.0,
+        "two_sided_depth_25bps_usd": 400.0,
+    })
 
 
 def test_hydrate_invokes_progress_callback(tmp_path: Path) -> None:
@@ -18,10 +65,12 @@ def test_hydrate_invokes_progress_callback(tmp_path: Path) -> None:
     data_root.mkdir()
     sync = DurableSync(be, run_id="run1", gcs_prefix="lighter-mm")
 
-    # Seed a few remote parquet objects.
+    schema = _book_schema([5, 10, 25])
+    ts = int(time.time() * 1000)
     for i in range(3):
         local = tmp_path / f"part{i}.parquet"
-        local.write_bytes(b"PAR1" + bytes([i]))
+        table = pa.Table.from_pylist([_minimal_book_row(ts + i)], schema=schema)
+        pq.write_table(table, local)
         be.upload_file(
             local,
             f"lighter-mm/runs/run1/books/date=2026-08-09/hour=0{i}/part.parquet",
@@ -77,6 +126,9 @@ def test_heartbeat_running_updates_active_run_and_latest(tmp_path: Path) -> None
     app._last_usable_book_sample_ts = None
     app._last_book_row_written_ts = None
     app._trades_without_reference_mid = 0
+    app._last_sync_error = None
+    app._consecutive_sync_failures = 0
+    app._last_sync_attempt_at = None
     app.store = MagicMock(samples_written=0, trades_written=0, markouts_written=0)
     app.counters = MagicMock(
         dropped_connections=0, book_resyncs=0, nonce_gaps=0

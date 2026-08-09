@@ -21,7 +21,9 @@ def test_cloudbuild_scheduler_iam_and_oauth() -> None:
     assert "roles/run.invoker" in text
     assert "oauth-service-account-email" in text
     assert "_SCHEDULER_SERVICE_ACCOUNT" in text
-    assert "cloudscheduler.googleapis.com" in text
+    bootstrap = ROOT / "scripts" / "bootstrap_gcp.sh"
+    assert bootstrap.exists()
+    assert "cloudscheduler.googleapis.com" in bootstrap.read_text(encoding="utf-8")
 
 
 def test_cloudbuild_scheduler_schedule_and_name() -> None:

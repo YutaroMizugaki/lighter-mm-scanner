@@ -39,7 +39,9 @@ def _effective_analysis_status(
     status: str | None,
     generated_at: str | None,
     last_ok: str | None = None,
+    started_at: str | None = None,
     stale_minutes: float = 30,
+    running_stale_minutes: float = 30,
 ) -> str:
     """Mirror dashboard/lib/data.ts effectiveAnalysisStatus."""
     if status is None:
@@ -47,6 +49,13 @@ def _effective_analysis_status(
     if status == "ERROR":
         return "ERROR"
     if status == "RUNNING":
+        running_stamp = started_at or generated_at
+        if running_stamp:
+            age_min = (
+                datetime.now(UTC) - datetime.fromisoformat(running_stamp.replace("Z", "+00:00"))
+            ).total_seconds() / 60
+            if age_min > running_stale_minutes:
+                return "STALE"
         return "RUNNING"
     stamp = last_ok or generated_at
     if not stamp:
@@ -55,6 +64,8 @@ def _effective_analysis_status(
         datetime.now(UTC) - datetime.fromisoformat(stamp.replace("Z", "+00:00"))
     ).total_seconds() / 60
     stale = age_min > stale_minutes
+    if status == "DEGRADED":
+        return "STALE" if stale else "DEGRADED"
     if stale and status == "OK":
         return "STALE"
     if status == "OK":
@@ -115,3 +126,15 @@ def test_dashboard_no_last_update_label() -> None:
 
 def test_analysis_unknown_when_status_missing() -> None:
     assert _effective_analysis_status(None, None) == "UNKNOWN"
+
+
+def test_running_over_30m_becomes_stale() -> None:
+    now = datetime.now(UTC)
+    old = _iso(now - timedelta(minutes=45))
+    assert _effective_analysis_status("RUNNING", old, started_at=old) == "STALE"
+
+
+def test_degraded_over_30m_becomes_stale() -> None:
+    now = datetime.now(UTC)
+    old = _iso(now - timedelta(minutes=45))
+    assert _effective_analysis_status("DEGRADED", old, old) == "STALE"

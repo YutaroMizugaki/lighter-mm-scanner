@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     # Dashboard staleness thresholds (minutes)
     status_ok_minutes: float = 20.0
     status_warn_minutes: float = 40.0
+    collector_startup_grace_minutes: float = Field(default=5.0, ge=0.0)
 
     order_notionals_usd: list[float] = Field(
         default_factory=lambda: [25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]

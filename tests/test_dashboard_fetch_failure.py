@@ -12,8 +12,9 @@ HOME_PAGE = ROOT / "dashboard" / "app" / "page.tsx"
 
 def test_get_markets_result_exported() -> None:
     src = DATA_TS.read_text(encoding="utf-8")
-    assert "export async function getMarketsResult()" in src
-    assert 'fetchJson<{ markets: MarketRow[] }>("markets.json")' in src
+    assert "export async function getMarketsResult(" in src
+    assert "markets.json" in src
+    assert "resolveDashboardBundle" in src
 
 
 def test_markets_page_surfaces_fetch_failure() -> None:

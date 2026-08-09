@@ -8,15 +8,17 @@ import {
   getCollectorStatusResult,
   getMarketsResult,
   getOverviewResult,
+  resolveDashboardBundle,
   statusHealthNote,
 } from "@/lib/data";
 import Link from "next/link";
 
 export default async function HomePage() {
+  const bundle = await resolveDashboardBundle();
   const overviewResult = await getOverviewResult();
   const collectorResult = await getCollectorStatusResult();
   const analysisStatusResult = await getAnalysisStatusResult();
-  const marketsResult = await getMarketsResult();
+  const marketsResult = await getMarketsResult(bundle);
   const configured = Boolean(process.env.NEXT_PUBLIC_DATA_BASE_URL);
 
   if (!configured) {

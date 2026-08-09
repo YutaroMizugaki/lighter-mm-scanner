@@ -82,6 +82,7 @@ def analyze_range(
     explain_volatility: bool = False,
     duckdb_memory_limit: str | None = None,
     duckdb_threads: int | None = None,
+    read_only: bool = False,
 ) -> dict[str, Any]:
     """Aggregate Parquet over an explicit time window and source paths."""
     if end_ms <= start_ms:
@@ -99,10 +100,14 @@ def analyze_range(
     )
     hours = max((end_ms - start_ms) / 3_600_000.0, 0.001)
     t0 = time.monotonic()
+    prep_kwargs = {
+        "quarantine": not read_only,
+        "cleanup_temp": not read_only,
+    }
 
-    book_valid, book_corrupt = prepare_parquet_dataset(src.books)
-    trade_valid, trade_corrupt = prepare_parquet_dataset(src.trades)
-    markout_valid, markout_corrupt = prepare_parquet_dataset(src.markouts)
+    book_valid, book_corrupt = prepare_parquet_dataset(src.books, **prep_kwargs)
+    trade_valid, trade_corrupt = prepare_parquet_dataset(src.trades, **prep_kwargs)
+    markout_valid, markout_corrupt = prepare_parquet_dataset(src.markouts, **prep_kwargs)
     all_corrupt = book_corrupt + trade_corrupt + markout_corrupt
     parquet_health = parquet_health_summary(
         {
@@ -375,6 +380,7 @@ def analyze_window(
     explain_volatility: bool = False,
     duckdb_memory_limit: str | None = None,
     duckdb_threads: int | None = None,
+    read_only: bool = False,
 ) -> dict[str, Any]:
     """Backward-compatible lookback wrapper over ``analyze_range``."""
     if hours <= 0:
@@ -396,6 +402,7 @@ def analyze_window(
         explain_volatility=explain_volatility,
         duckdb_memory_limit=duckdb_memory_limit,
         duckdb_threads=duckdb_threads,
+        read_only=read_only,
     )
 
 
