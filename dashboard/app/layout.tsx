@@ -22,9 +22,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </header>
           {children}
           <p className="note">
-            READ-ONLY research tool. No trading, wallet, or API keys. Displayed spread × trade
-            count ≠ profit — validate fill probability, adverse selection, and inventory risk
-            separately before any paper/live MM.
+            読み取り専用のリサーチツールです。売買・ウォレット接続・APIキーは使用しません。表示されるスプレッドや取引回数は利益を保証するものではありません。実際のマーケットメイクでは、約定確率・逆選択・在庫リスクを別途検証してください。
           </p>
         </main>
       </body>
