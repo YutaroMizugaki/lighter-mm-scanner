@@ -25,14 +25,23 @@ class GCSStorageBackend(StorageBackend):
         from google.cloud import storage  # lazy import
 
         self.bucket_name = bucket_name
-        self.public_bucket_name = public_bucket_name or None
+        self.public_bucket_name = (public_bucket_name or "").strip() or None
         self.local_root = local_root
         self.local_root.mkdir(parents=True, exist_ok=True)
         self.make_public_prefix = make_public_prefix
         self._client = storage.Client(project=project_id)
         self._bucket = self._client.bucket(bucket_name)
         self._public_bucket = (
-            self._client.bucket(public_bucket_name) if public_bucket_name else None
+            self._client.bucket(self.public_bucket_name) if self.public_bucket_name else None
+        )
+        log.info(
+            "gcs_backend_ready private=%s public=%s",
+            self.bucket_name,
+            self.public_bucket_name or "",
+            extra={
+                "event": "gcs_backend_ready",
+                "path": self.public_bucket_name or "",
+            },
         )
 
     def local_data_dir(self) -> Path:

@@ -164,17 +164,23 @@ def build_storage_backend(settings: Settings):
     from lighter_mm.storage.local_backend import LocalStorageBackend
 
     if settings.is_cloud:
-        if not settings.gcs_bucket:
+        # Prefer Settings, but also accept raw process env (Cloud Run injects
+        # unprefixed GCS_* vars; belt-and-suspenders if pydantic misses one).
+        gcs_bucket = settings.gcs_bucket or _env_first("GCS_BUCKET", "LIGHTER_MM_GCS_BUCKET")
+        public_bucket = settings.gcs_public_bucket or _env_first(
+            "GCS_PUBLIC_BUCKET", "LIGHTER_MM_GCS_PUBLIC_BUCKET"
+        )
+        if not gcs_bucket:
             raise RuntimeError("GCS_BUCKET is required when ENVIRONMENT=cloud")
         from lighter_mm.storage.gcs_backend import GCSStorageBackend
 
         local_root = settings.tmp_dir
         local_root.mkdir(parents=True, exist_ok=True)
         return GCSStorageBackend(
-            settings.gcs_bucket,
+            gcs_bucket,
             local_root=local_root,
-            project_id=settings.gcp_project_id,
+            project_id=settings.gcp_project_id or _env_first("GCP_PROJECT_ID"),
             make_public_prefix=settings.gcs_public_prefix.rstrip("/") + "/",
-            public_bucket_name=settings.gcs_public_bucket,
+            public_bucket_name=public_bucket,
         )
     return LocalStorageBackend(settings.data_dir)

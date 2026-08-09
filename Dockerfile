@@ -19,6 +19,7 @@ RUN useradd --create-home --uid 10001 appuser
 WORKDIR /app
 
 ENV PATH="/app/.venv/bin:$PATH" \
+    PYTHONPATH="/app/src" \
     PYTHONUNBUFFERED=1 \
     ENVIRONMENT=cloud \
     STRUCTURED_LOGGING=true \
