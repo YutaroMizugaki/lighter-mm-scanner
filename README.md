@@ -61,17 +61,44 @@ Env vars: see `.env.example` (`ENVIRONMENT`, `GCS_BUCKET`, `RUN_TARGET_HOURS`, `
 | Piece | Role |
 |-------|------|
 | GitHub `main` | Source of truth |
-| Cloud Build | ruff → pytest → Docker → Artifact Registry → **Cloud Run Worker Pool** |
-| GCS | Durable Parquet + `state.json` + public dashboard JSON |
-| Vercel (`dashboard/`) | Read-only UI over aggregate JSON only |
-
-- Deploy guide: **[docs/DEPLOY_GCP.md](./docs/DEPLOY_GCP.md)**
-- Cloud architecture: **[docs/ARCHITECTURE_CLOUD.md](./docs/ARCHITECTURE_CLOUD.md)**
+| Cloud Build | ruff → pytest → Docker → Artifact Registry → **Worker Pool** + **Analyzer Job** + Scheduler |
+| Private GCS | Durable immutable Parquet + run state |
+| Public GCS | Dashboard JSON (`latest.json`, `collector_status.json`, `analysis_status.json`, …) |
+| Vercel (`dashboard/`) | Read-only UI |
 
 ```text
-main push → Cloud Build tests → Worker Pool deploy (1 vCPU / 1Gi / instances=1)
-         → resume active run via GCS state + leader lock
-         → Vercel rebuilds dashboard (independent of collector)
+Lighter → Collector Worker Pool → immutable Parquet → Private GCS
+      → Analyzer Job (*/15) → Public JSON → Vercel
+```
+
+### Collector deployment
+
+- **Command:** `lighter-mm collect`
+- **Resources:** 1 CPU / 1 GiB (Worker Pool, `instances=1`)
+- **Publishes:** `public/collector_status.json` (health only — no ranking JSON)
+- **Local disk:** open chunk + upload-pending closed chunks only (no 72h hydrate on resume)
+
+### Analyzer Job deployment
+
+- **Command:** `lighter-mm cloud-analyze`
+- **Resources:** 2 CPU / 2 GiB (configurable via `_ANALYZER_CPU` / `_ANALYZER_MEMORY`)
+- **Schedule:** `*/15 * * * *` (Cloud Scheduler → Cloud Run Job)
+- **GCS mount:** `/mnt/lighter-mm` (read-only)
+- **Publishes:** `latest.json`, `markets.json`, `candidates.json`, `market/*.json`, `analysis_status.json`
+- **Manual run:** `gcloud run jobs execute lighter-mm-analyzer --region=...`
+
+### Public JSON roles
+
+| File | Writer | Purpose |
+|------|--------|---------|
+| `collector_status.json` | Collector | WS/sync health, samples written |
+| `analysis_status.json` | Analyzer | Last analysis OK/ERROR, row counts |
+| `latest.json` | Analyzer | Ranked overview for dashboard |
+| `markets.json` / `candidates.json` | Analyzer | Tables and candidate list |
+
+```bash
+# Local / manual analyzer (hydrates Parquet for dev)
+uv run lighter-mm cloud-analyze
 ```
 
 ### Cost safety
@@ -110,15 +137,21 @@ reports/
 Cloud (`ENVIRONMENT=cloud`):
 
 ```
-/tmp/lighter-mm/          # hot path only (not durable)
-gs://<BUCKET>/lighter-mm/
-  runs/<run_id>/books|trades|markouts|state|reports/
+/tmp/lighter-mm/          # hot path only: open + upload-pending chunks
+gs://<PRIVATE_BUCKET>/lighter-mm/
+  runs/<run_id>/books|trades|markouts|state/
   state/active_run.json
   state/leader.lock.json
-  public/latest.json      # dashboard (never raw books/trades)
+  state/analyzer.lock.json
+  analysis-requests/<run_id>.json
+gs://<PUBLIC_BUCKET>/lighter-mm/public/
+  collector_status.json   # collector health
+  analysis_status.json    # analyzer health
+  latest.json             # ranking overview (analyzer)
+  markets.json / candidates.json / market/*.json
 ```
 
-Hot order books stay in memory. Only 5-second derived book metrics (plus trades / resolved markouts) are persisted — not every 50ms raw book update. Durable sync rotates/uploads at least every **15 minutes**.
+Durable sync uploads immutable Parquet (`if_generation_match=0`) and deletes local closed files after success. Analyzer reads mounted GCS history directly — no 72h download to `/tmp`.
 
 ## Metric definitions
 
@@ -185,14 +218,14 @@ Order book continuity: `begin_nonce` must equal previous `nonce`; on gap the mar
 
 - WS drops → reconnect with backoff, rebuild books from snapshot
 - Nonce gaps → per-market resync
-- SIGINT/SIGTERM / Worker revision → final flush → GCS upload → state update
-- main redeploy → resume same `run_id` when `active_run.status=running`
-- Leader lock prevents dual collectors (`instances=1` + lease)
-- Coverage gaps during deploys are recorded (`deployment_gaps`) and surface as STALE/OFFLINE in the dashboard
+- SIGINT/SIGTERM / Worker revision → flush → upload Parquet → `collector_status.json` → state (no DuckDB on shutdown)
+- main redeploy → resume via `active_run.json` + `state.json` (no Parquet hydrate)
+- Leader lock prevents dual collectors; analyzer lock prevents overlapping analysis runs
+- Collector health (`collector_status.json`) and analysis freshness (`analysis_status.json`) are independent in the dashboard
 
 ## After 72 hours
 
-Cloud: worker finalizes when `RUN_TARGET_HOURS=72`, writes full dashboard JSON, sets `status=completed`.
+Cloud: collector sets `status=completed`, `ended_at`, creates `analysis-requests/<run_id>.json`, and exits. The **Analyzer Job** performs final DuckDB analysis and publishes dashboard JSON.
 
 Local:
 

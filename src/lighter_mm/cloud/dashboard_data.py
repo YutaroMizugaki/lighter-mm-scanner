@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from lighter_mm.analytics.aggregation import analyze_window, scored_to_records
+from lighter_mm.analytics.aggregation import AnalysisSources, analyze_range, analyze_window, scored_to_records
 from lighter_mm.config import Settings
 from lighter_mm.scoring import ScoredMarket
 from lighter_mm.storage.state import RunState
@@ -16,10 +16,9 @@ def collector_status_label(
     *,
     ok_minutes: float,
     warn_minutes: float,
-    analysis_error: str | None = None,
-    markets_analyzed: int = 0,
     degraded: bool = False,
 ) -> str:
+    """Collector health label (independent of analysis freshness)."""
     if state is None:
         return "ERROR"
     if state.status == "completed":
@@ -31,16 +30,11 @@ def collector_status_label(
         return "ERROR"
     try:
         ts = datetime.fromisoformat(flush)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=UTC)
     except ValueError:
         return "ERROR"
     age_min = (datetime.now(UTC) - ts).total_seconds() / 60.0
-    if (
-        state.status == "running"
-        and age_min <= ok_minutes
-        and markets_analyzed == 0
-        and state.samples_written > 0
-    ):
-        return "DEGRADED"
     if degraded and state.status == "running" and age_min <= ok_minutes:
         return "DEGRADED"
     if state.status == "running" and age_min <= ok_minutes:
@@ -48,6 +42,57 @@ def collector_status_label(
     if age_min <= warn_minutes:
         return "STALE"
     return "OFFLINE" if state.status == "running" else state.status.upper()
+
+
+def build_collector_status_payload(
+    state: RunState,
+    *,
+    settings: Settings,
+    ws_runtime: dict[str, Any] | None = None,
+    last_book_sample_at_ms: int | None = None,
+    last_book_row_at_ms: int | None = None,
+    trades_without_reference_mid: int = 0,
+    health_warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    """Collector-only health JSON (never writes ranking aggregates)."""
+    warnings = list(health_warnings or [])
+    warnings.extend(_ws_degraded(ws_runtime))
+    if last_book_sample_at_ms is not None:
+        age_s = (datetime.now(UTC).timestamp() * 1000 - last_book_sample_at_ms) / 1000.0
+        stale_threshold_s = max(settings.book_sample_interval_seconds * 3, 30)
+        if age_s > stale_threshold_s:
+            warnings.append(
+                f"Usable book samples stale: last sample {age_s:.0f}s ago "
+                f"(threshold {stale_threshold_s:.0f}s)."
+            )
+    degraded = bool(_ws_degraded(ws_runtime)) or any(
+        "stale" in w.lower() for w in warnings
+    )
+    status = collector_status_label(
+        state,
+        ok_minutes=settings.status_ok_minutes,
+        warn_minutes=settings.status_warn_minutes,
+        degraded=degraded,
+    )
+    return {
+        "run_id": state.run_id,
+        "status": status,
+        "started_at": state.started_at,
+        "ended_at": state.ended_at,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "last_successful_sync": state.last_successful_flush,
+        "samples_written": state.samples_written,
+        "trades_written": state.trades_written,
+        "markouts_written": state.markouts_written,
+        "last_trade_at": _ms_to_iso(state.last_trade_timestamp_ms),
+        "last_usable_book_sample_at": _ms_to_iso(last_book_sample_at_ms),
+        "last_book_row_at": _ms_to_iso(last_book_row_at_ms),
+        "trades_without_reference_mid": trades_without_reference_mid,
+        "ws": ws_runtime,
+        "health_warnings": warnings,
+        "git_sha": state.git_sha or settings.git_sha,
+        "collector_version": state.collector_version or settings.collector_version,
+    }
 
 
 def _ms_to_iso(ms: int | None) -> str | None:
@@ -77,15 +122,31 @@ def _ws_degraded(ws_runtime: dict[str, Any] | None) -> list[str]:
 def build_dashboard_payload(
     settings: Settings,
     *,
-    hours: float,
-    state: RunState | None,
+    hours: float | None = None,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    state: RunState | None = None,
+    sources: AnalysisSources | None = None,
+    analysis_result: dict[str, Any] | None = None,
     storage_estimate: dict[str, Any] | None = None,
     ws_runtime: dict[str, Any] | None = None,
     last_book_sample_at_ms: int | None = None,
     last_book_row_at_ms: int | None = None,
     trades_without_reference_mid: int = 0,
 ) -> dict[str, Any]:
-    result = analyze_window(settings, hours)
+    if analysis_result is None:
+        if start_ms is not None and end_ms is not None:
+            analysis_result = analyze_range(
+                settings,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                sources=sources,
+            )
+        else:
+            analysis_result = analyze_window(
+                settings, hours or 72.0, sources=sources
+            )
+    result = analysis_result
     scored: list[ScoredMarket] = result.get("scored") or []
     candidates = [s for s in scored if s.candidate]
     avoid = result.get("avoid") or []
@@ -95,33 +156,13 @@ def build_dashboard_payload(
     markets_discovered = len(state.markets) if state else 0
 
     health_warnings: list[str] = []
-    health_warnings.extend(_ws_degraded(ws_runtime))
-
-    usable_book_stale = False
-    if last_book_sample_at_ms is not None:
-        age_s = (datetime.now(UTC).timestamp() * 1000 - last_book_sample_at_ms) / 1000.0
-        stale_threshold_s = max(settings.book_sample_interval_seconds * 3, 30)
-        if age_s > stale_threshold_s:
-            usable_book_stale = True
-            health_warnings.append(
-                f"Usable book samples stale: last sample {age_s:.0f}s ago "
-                f"(threshold {stale_threshold_s:.0f}s)."
-            )
-
-    if trades_without_reference_mid > 0 and state and state.trades_written > 0:
-        ratio = trades_without_reference_mid / max(state.trades_written, 1)
-        if ratio > 0.1:
-            health_warnings.append(
-                f"High trades without reference mid: {trades_without_reference_mid} "
-                f"({ratio * 100:.1f}% of trades_written)."
-            )
 
     if analysis_error:
         health_warnings.append(str(analysis_error))
     if state and state.samples_written > 0 and markets_discovered > 0 and len(scored) == 0:
         health_warnings.append(
             f"discovered {markets_discovered} markets but analyzed 0 "
-            "(check local Parquet / hydrate after redeploy)"
+            "(check Parquet source paths / GCS mount)"
         )
 
     coverage_vals = [
@@ -156,31 +197,26 @@ def build_dashboard_payload(
             "market(s); possible trade aggregation inconsistency"
         )
 
-    degraded = bool(health_warnings) and (
-        usable_book_stale
-        or bool(_ws_degraded(ws_runtime))
-        or (coverage is not None and coverage < settings.min_coverage_pct)
-    )
-
-    status = collector_status_label(
-        state,
-        ok_minutes=settings.status_ok_minutes,
-        warn_minutes=settings.status_warn_minutes,
-        analysis_error=analysis_error,
-        markets_analyzed=len(scored),
-        degraded=degraded,
-    )
+    if analysis_error:
+        status = "ERROR"
+    elif not scored:
+        status = "DEGRADED"
+    else:
+        status = "OK"
 
     obs_hours = None
+    window_hours = result.get("hours") or hours or 72.0
     if state and state.started_at:
         try:
             started = datetime.fromisoformat(state.started_at)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
             obs_hours = (datetime.now(UTC) - started).total_seconds() / 3600.0
         except ValueError:
-            obs_hours = hours
+            obs_hours = window_hours
 
     top = candidates[0] if candidates else None
-    flush = state.last_successful_flush if state else None
+    generated_at = datetime.now(UTC).isoformat()
     last_trade_at = _ms_to_iso(state.last_trade_timestamp_ms if state else None)
     last_usable_book = _ms_to_iso(last_book_sample_at_ms)
     last_book_row = _ms_to_iso(last_book_row_at_ms)
@@ -191,14 +227,14 @@ def build_dashboard_payload(
         "run_id": state.run_id if state else None,
         "started_at": state.started_at if state else None,
         "observation_hours": obs_hours,
-        "observation_target_hours": state.observation_target_hours if state else hours,
+        "observation_target_hours": state.observation_target_hours if state else window_hours,
         "markets": len(scored),
         "markets_analyzed": len(scored),
         "markets_discovered": markets_discovered,
         "candidates": len(candidates),
         "coverage_pct": coverage,
-        "last_update": flush,
-        "last_successful_flush": flush,
+        "last_update": generated_at,
+        "last_successful_flush": state.last_successful_flush if state else None,
         "last_trade_at": last_trade_at,
         "last_book_sample_at": last_usable_book,
         "last_usable_book_sample_at": last_usable_book,
@@ -212,7 +248,7 @@ def build_dashboard_payload(
         "samples_written": state.samples_written if state else 0,
         "storage_estimate": storage_estimate,
         "ws": ws_runtime,
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": generated_at,
         "read_only": True,
         "disclaimer": (
             "READ-ONLY research. Displayed spread × trade count ≠ profit. "

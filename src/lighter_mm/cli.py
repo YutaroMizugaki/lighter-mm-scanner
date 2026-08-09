@@ -12,6 +12,7 @@ from rich.table import Table
 
 from lighter_mm import __version__
 from lighter_mm.analytics.aggregation import analyze_window, scored_to_records
+from lighter_mm.cloud.analyzer import run_cloud_analyze
 from lighter_mm.cloud.dashboard_data import build_dashboard_payload, collector_status_label
 from lighter_mm.cloud.estimate import estimate_storage
 from lighter_mm.collector import run_collector
@@ -87,6 +88,16 @@ def collect(
         f"env={settings.environment} REST {settings.rest_base_url}\nWS {settings.ws_url}"
     )
     asyncio.run(run_collector(settings, hours=hours))
+
+
+@app.command("cloud-analyze")
+def cloud_analyze() -> None:
+    """Cloud Run Job: analyze GCS-mounted Parquet and publish dashboard JSON."""
+    settings = _settings()
+    console.print(
+        f"[bold]lighter-mm analyzer[/bold] mount={settings.analyzer_mount_path}"
+    )
+    raise typer.Exit(run_cloud_analyze(settings))
 
 
 @app.command("status")

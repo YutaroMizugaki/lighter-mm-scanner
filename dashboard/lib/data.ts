@@ -1,3 +1,38 @@
+export type CollectorStatus = {
+  run_id: string;
+  status: string;
+  started_at: string;
+  ended_at?: string | null;
+  generated_at: string;
+  last_successful_sync: string | null;
+  samples_written: number;
+  trades_written: number;
+  markouts_written: number;
+  last_trade_at?: string | null;
+  last_usable_book_sample_at?: string | null;
+  last_book_row_at?: string | null;
+  trades_without_reference_mid?: number;
+  ws?: Overview["ws"];
+  health_warnings?: string[];
+  git_sha?: string | null;
+  collector_version?: string | null;
+};
+
+export type AnalysisStatus = {
+  status: string;
+  run_id: string;
+  generated_at: string;
+  error?: string;
+  last_successful_analysis_at?: string;
+  start_ms?: number;
+  end_ms?: number;
+  book_rows?: number;
+  trade_rows?: number;
+  markout_rows?: number;
+  markets_analyzed?: number;
+  candidates?: number;
+};
+
 export type Overview = {
   title: string;
   status: string;
@@ -112,6 +147,14 @@ export async function getOverviewResult(): Promise<FetchResult<Overview>> {
   return fetchJson<Overview>("latest.json");
 }
 
+export async function getCollectorStatusResult(): Promise<FetchResult<CollectorStatus>> {
+  return fetchJson<CollectorStatus>("collector_status.json");
+}
+
+export async function getAnalysisStatusResult(): Promise<FetchResult<AnalysisStatus>> {
+  return fetchJson<AnalysisStatus>("analysis_status.json");
+}
+
 export async function getMarketsResult(): Promise<
   FetchResult<{ markets: MarketRow[] }>
 > {
@@ -147,9 +190,46 @@ export function fmtJst(iso: string | null | undefined): string {
 }
 
 /**
- * Recompute status from collector flush age.
- * Uses last_successful_flush (alias: last_update), NOT generated_at alone —
- * a fresh generated_at with a stale flush still means the collector is OFFLINE.
+ * Recompute collector status from collector_status.json flush age.
+ */
+export function effectiveCollectorStatus(
+  collector: CollectorStatus,
+  okMinutes = 20,
+  warnMinutes = 40,
+): string {
+  const baked = collector.status || "ERROR";
+  if (baked === "COMPLETED" || baked === "ERROR") return baked;
+  const stamp = collector.last_successful_sync || collector.generated_at || null;
+  if (!stamp) return "ERROR";
+  const ageMin = (Date.now() - new Date(stamp).getTime()) / 60_000;
+  if (Number.isNaN(ageMin)) return "ERROR";
+  if (ageMin > warnMinutes) return "OFFLINE";
+  if (ageMin > okMinutes) return "STALE";
+  if (baked === "DEGRADED") return "DEGRADED";
+  return baked;
+}
+
+/**
+ * Analysis freshness from analysis_status.json (independent of collector).
+ */
+export function effectiveAnalysisStatus(
+  analysis: AnalysisStatus | null,
+  staleMinutes = 30,
+): { status: string; stale: boolean } {
+  if (!analysis) return { status: "UNKNOWN", stale: true };
+  if (analysis.status === "ERROR") return { status: "ERROR", stale: false };
+  const stamp = analysis.generated_at;
+  if (!stamp) return { status: analysis.status, stale: true };
+  const ageMin = (Date.now() - new Date(stamp).getTime()) / 60_000;
+  const stale = ageMin > staleMinutes;
+  if (stale && analysis.status === "OK") {
+    return { status: "ANALYSIS STALE", stale: true };
+  }
+  return { status: analysis.status, stale };
+}
+
+/**
+ * Recompute status from analysis latest.json generated_at (legacy overview).
  */
 export function effectiveStatus(
   overview: Overview,
@@ -175,10 +255,13 @@ export function effectiveStatus(
 
 export function statusHealthNote(status: string): string | null {
   if (status === "OFFLINE") {
-    return "Collector data has not been successfully refreshed for >40m.";
+    return "Collector sync has not succeeded for >40m.";
   }
   if (status === "STALE") {
-    return "Collector data is older than 20m.";
+    return "Collector sync is older than 20m.";
+  }
+  if (status === "ANALYSIS STALE") {
+    return "Analysis results are older than the expected cadence.";
   }
   return null;
 }

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 class RunState(BaseModel):
     run_id: str
     started_at: str
+    ended_at: str | None = None
     status: str = "running"  # running | completed | stopped | error
     observation_target_hours: float | None = None
     last_successful_flush: str | None = None

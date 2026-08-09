@@ -33,5 +33,5 @@ def test_home_page_detects_markets_fetch_failure() -> None:
 def test_effective_status_uses_flush_not_generated_at() -> None:
     src = DATA_TS.read_text(encoding="utf-8")
     assert "last_successful_flush" in src
-    assert "Collector data has not been successfully refreshed for >40m." in src
+    assert "Collector sync has not succeeded for >40m." in src
     assert "Public latest.json has not been refreshed" not in src

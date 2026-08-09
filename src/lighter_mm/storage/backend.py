@@ -27,8 +27,19 @@ class StorageBackend(ABC):
         """Writable local directory for hot Parquet / sqlite."""
 
     @abstractmethod
-    def upload_file(self, local_path: Path, remote_key: str, *, content_type: str | None = None) -> str:
-        """Upload a file; returns remote URI."""
+    def upload_file(
+        self,
+        local_path: Path,
+        remote_key: str,
+        *,
+        content_type: str | None = None,
+        if_generation_match: int | None = None,
+    ) -> str:
+        """Upload a file; returns remote URI.
+
+        When ``if_generation_match`` is 0, the upload must fail if the remote
+        object already exists (immutable Parquet parts).
+        """
 
     @abstractmethod
     def upload_json(self, remote_key: str, payload: dict[str, Any], *, public: bool = False) -> str:

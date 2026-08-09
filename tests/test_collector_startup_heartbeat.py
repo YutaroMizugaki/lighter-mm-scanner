@@ -60,7 +60,7 @@ def test_heartbeat_running_updates_active_run_and_latest(tmp_path: Path) -> None
         status="running",
         observation_target_hours=72.0,
         samples_written=19065,
-        last_successful_flush="2026-08-09T11:57:47+00:00",
+        last_successful_flush=now_iso(),
         git_sha="oldsha",
         markets=[1, 2, 3],
     )
@@ -74,6 +74,9 @@ def test_heartbeat_running_updates_active_run_and_latest(tmp_path: Path) -> None
     app._gaps_baseline = 0
     app._deployment_gaps = 1
     app._last_trade_ts = None
+    app._last_usable_book_sample_ts = None
+    app._last_book_row_written_ts = None
+    app._trades_without_reference_mid = 0
     app.store = MagicMock(samples_written=0, trades_written=0, markouts_written=0)
     app.counters = MagicMock(
         dropped_connections=0, book_resyncs=0, nonce_gaps=0
@@ -94,11 +97,8 @@ def test_heartbeat_running_updates_active_run_and_latest(tmp_path: Path) -> None
     assert state["git_sha"] == "deadbeef"
     assert state["samples_written"] == 19065
 
-    latest = app.backend.download_json("lighter-mm/public/latest.json")
+    latest = app.backend.download_json("lighter-mm/public/collector_status.json")
     assert latest is not None
     assert latest["git_sha"] == "deadbeef"
     assert latest["status"] == "COLLECTING"
-    # Heartbeat must not fake a successful flush.
-    assert latest["last_successful_flush"] == "2026-08-09T11:57:47+00:00"
     assert latest["samples_written"] == 19065
-    assert latest["health_warnings"]

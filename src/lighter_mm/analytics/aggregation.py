@@ -6,6 +6,7 @@ import logging
 import resource
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,11 +23,32 @@ from lighter_mm.scoring import (
 log = logging.getLogger(__name__)
 
 
-def _connect(data_dir: Path) -> duckdb.DuckDBPyConnection:
+@dataclass(frozen=True)
+class AnalysisSources:
+    """Parquet source directories for DuckDB aggregation."""
+
+    books: Path
+    trades: Path
+    markouts: Path
+
+
+def _default_sources(data_dir: Path) -> AnalysisSources:
+    return AnalysisSources(
+        books=data_dir / "book_samples",
+        trades=data_dir / "trades",
+        markouts=data_dir / "markouts",
+    )
+
+
+def _connect(
+    data_dir: Path,
+    *,
+    memory_limit: str | None = None,
+    threads: int | None = None,
+) -> duckdb.DuckDBPyConnection:
     con = duckdb.connect(database=":memory:")
-    # Cloud Run Worker Pool defaults to 1Gi — keep DuckDB modest.
-    con.execute("SET threads TO 2")
-    con.execute("SET memory_limit='512MB'")
+    con.execute(f"SET threads TO {threads or 2}")
+    con.execute(f"SET memory_limit='{memory_limit or '512MB'}'")
     return con
 
 
@@ -145,38 +167,59 @@ def _volatility_explain_plans(
     return plans
 
 
-def analyze_window(
+def analyze_range(
     settings: Settings,
-    hours: float,
     *,
+    start_ms: int,
+    end_ms: int,
+    sources: AnalysisSources | None = None,
     benchmark_profile: bool = False,
     explain_volatility: bool = False,
+    duckdb_memory_limit: str | None = None,
+    duckdb_threads: int | None = None,
 ) -> dict[str, Any]:
-    if hours <= 0:
+    """Aggregate Parquet over an explicit time window and source paths."""
+    if end_ms <= start_ms:
         return {
-            "hours": hours,
+            "hours": 0.0,
             "markets": [],
             "scored": [],
-            "error": "hours must be > 0 (use a positive lookback window)",
+            "error": "invalid analysis window (end_ms <= start_ms)",
         }
-    data_dir = settings.data_dir
-    con = _connect(data_dir)
+    src = sources or _default_sources(settings.data_dir)
+    con = _connect(
+        settings.data_dir,
+        memory_limit=duckdb_memory_limit,
+        threads=duckdb_threads,
+    )
+    hours = max((end_ms - start_ms) / 3_600_000.0, 0.001)
     t0 = time.monotonic()
-    now_ms = con.execute("SELECT CAST(epoch_ms(current_timestamp) AS BIGINT)").fetchone()[0]
-    start_ms = now_ms - int(hours * 3600 * 1000)
-    end_ms = now_ms
 
-    book_globs = _glob_patterns(data_dir / "book_samples")
-    trade_globs = _glob_patterns(data_dir / "trades")
-    markout_globs = _glob_patterns(data_dir / "markouts")
+    book_globs = _glob_patterns(src.books)
+    trade_globs = _glob_patterns(src.trades)
+    markout_globs = _glob_patterns(src.markouts)
 
     if not book_globs:
-        return {"hours": hours, "markets": [], "scored": [], "error": "no book_samples yet"}
+        return {
+            "hours": hours,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "markets": [],
+            "scored": [],
+            "error": "no book_samples yet",
+        }
 
     available_cols = _probe_parquet_columns(con, book_globs)
     book_cols = _book_projection(available_cols)
     if not _read_view(con, "book_raw", book_globs, book_cols, start_ms, end_ms):
-        return {"hours": hours, "markets": [], "scored": [], "error": "no book_samples yet"}
+        return {
+            "hours": hours,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "markets": [],
+            "scored": [],
+            "error": "no book_samples yet",
+        }
 
     # Dedupe book samples on (market_id, timestamp_ms) — restart/hydrate overlap defense.
     con.execute(
@@ -318,6 +361,39 @@ def analyze_window(
     if explain_volatility:
         result["volatility_explain"] = _volatility_explain_plans(con, settings)
     return result
+
+
+def analyze_window(
+    settings: Settings,
+    hours: float,
+    *,
+    sources: AnalysisSources | None = None,
+    benchmark_profile: bool = False,
+    explain_volatility: bool = False,
+    duckdb_memory_limit: str | None = None,
+    duckdb_threads: int | None = None,
+) -> dict[str, Any]:
+    """Backward-compatible lookback wrapper over ``analyze_range``."""
+    if hours <= 0:
+        return {
+            "hours": hours,
+            "markets": [],
+            "scored": [],
+            "error": "hours must be > 0 (use a positive lookback window)",
+        }
+    con = duckdb.connect(database=":memory:")
+    now_ms = con.execute("SELECT CAST(epoch_ms(current_timestamp) AS BIGINT)").fetchone()[0]
+    start_ms = now_ms - int(hours * 3600 * 1000)
+    return analyze_range(
+        settings,
+        start_ms=start_ms,
+        end_ms=now_ms,
+        sources=sources,
+        benchmark_profile=benchmark_profile,
+        explain_volatility=explain_volatility,
+        duckdb_memory_limit=duckdb_memory_limit,
+        duckdb_threads=duckdb_threads,
+    )
 
 
 def _aggregate_book_sql(
