@@ -21,10 +21,18 @@ def _connect(data_dir: Path) -> duckdb.DuckDBPyConnection:
 
 
 def _glob_or_none(path: Path) -> str | None:
-    matches = list(path.glob("date=*/*.parquet"))
-    if not matches:
-        return None
-    return str(path / "date=*/*.parquet")
+    """Locate Parquet parts under hive partitions.
+
+    Writers use ``date=YYYY-MM-DD/hour=HH/*.parquet``. An older flat layout
+    ``date=YYYY-MM-DD/*.parquet`` is still accepted for local/dev data.
+    """
+    nested = list(path.glob("date=*/hour=*/*.parquet"))
+    if nested:
+        return str(path / "date=*/hour=*/*.parquet")
+    flat = list(path.glob("date=*/*.parquet"))
+    if flat:
+        return str(path / "date=*/*.parquet")
+    return None
 
 
 def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
