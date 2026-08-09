@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from lighter_mm.config import Settings, build_storage_backend
 from lighter_mm.storage.gcs_backend import GCSStorageBackend
 
 
@@ -63,3 +64,20 @@ def test_parquet_stays_on_private_bucket(mock_client_cls: MagicMock, tmp_path: P
     backend.upload_file(path, "lighter-mm/runs/r1/trades/x.parquet")
     private_blob.upload_from_filename.assert_called_once()
     public_bucket.blob.assert_not_called()
+
+
+@patch("google.cloud.storage.Client")
+def test_build_storage_backend_reads_unprefixed_public_env(
+    mock_client_cls: MagicMock, tmp_path: Path, monkeypatch
+) -> None:
+    mock_client_cls.return_value = MagicMock()
+    monkeypatch.setenv("ENVIRONMENT", "cloud")
+    monkeypatch.setenv("GCS_BUCKET", "priv-bucket")
+    monkeypatch.setenv("GCS_PUBLIC_BUCKET", "pub-bucket")
+    monkeypatch.setenv("GCP_PROJECT_ID", "demo")
+    monkeypatch.setenv("TMP_DIR", str(tmp_path))
+    # Simulate Settings missing the field while process env has it.
+    settings = Settings(environment="cloud", gcs_bucket="priv-bucket", gcs_public_bucket=None)
+    backend = build_storage_backend(settings)
+    assert isinstance(backend, GCSStorageBackend)
+    assert backend.public_bucket_name == "pub-bucket"
