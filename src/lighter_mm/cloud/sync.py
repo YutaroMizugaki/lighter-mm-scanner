@@ -10,6 +10,15 @@ from lighter_mm.storage.backend import StorageBackend
 
 log = logging.getLogger(__name__)
 
+# Local hot-path dataset names ↔ durable remote names.
+LOCAL_TO_REMOTE = {
+    "book_samples": "books",
+    "trades": "trades",
+    "markouts": "markouts",
+    "aggregates": "aggregates",
+}
+REMOTE_TO_LOCAL = {remote: local for local, remote in LOCAL_TO_REMOTE.items()}
+
 
 class DurableSync:
     def __init__(
@@ -18,10 +27,12 @@ class DurableSync:
         *,
         run_id: str,
         gcs_prefix: str = "lighter-mm",
+        public_prefix: str | None = None,
     ) -> None:
         self.backend = backend
         self.run_id = run_id
         self.gcs_prefix = gcs_prefix.rstrip("/")
+        self.public_prefix = (public_prefix or f"{self.gcs_prefix}/public").rstrip("/")
         self._uploaded: set[str] = set()
         self.bytes_uploaded = 0
 
@@ -39,14 +50,27 @@ class DurableSync:
 
     def public_key(self, name: str) -> str:
         # public aggregates live outside run for stable dashboard URLs
-        return f"{self.gcs_prefix}/public/{name}"
+        return f"{self.public_prefix}/{name.lstrip('/')}"
 
     def remote_for_local(self, local_path: Path, data_root: Path) -> str:
         rel = local_path.relative_to(data_root).as_posix()
-        # Normalize dataset folders: book_samples -> books
-        rel = rel.replace("book_samples/", "books/", 1)
-        # Inject hour=HH when filename contains YYYYMMDD_HH
+        for local_name, remote_name in LOCAL_TO_REMOTE.items():
+            prefix = f"{local_name}/"
+            if rel.startswith(prefix):
+                rel = f"{remote_name}/" + rel[len(prefix) :]
+                break
         return f"{self.run_prefix()}/{rel}"
+
+    def local_for_remote(self, remote_key: str, data_root: Path) -> Path | None:
+        prefix = f"{self.run_prefix()}/"
+        if not remote_key.startswith(prefix):
+            return None
+        rel = remote_key[len(prefix) :]
+        for remote_name, local_name in REMOTE_TO_LOCAL.items():
+            remote_prefix = f"{remote_name}/"
+            if rel.startswith(remote_prefix):
+                return data_root / local_name / rel[len(remote_prefix) :]
+        return None
 
     def upload_new_parquets(self, data_root: Path) -> list[str]:
         uploaded: list[str] = []
@@ -64,6 +88,37 @@ class DurableSync:
                 extra={"event": "parquet_flushed", "path": remote, "bytes": path.stat().st_size},
             )
         return uploaded
+
+    def hydrate_run_parquets(self, data_root: Path) -> list[str]:
+        """Download durable Parquet for this run into the local hot path.
+
+        Required after Cloud Run restarts because ``/tmp`` is ephemeral while
+        analysis still reads local ``book_samples/`` (mapped from remote ``books/``).
+        """
+        restored: list[str] = []
+        prefix = f"{self.run_prefix()}/"
+        for remote_key in self.backend.list_keys(prefix):
+            if not remote_key.endswith(".parquet"):
+                continue
+            local_path = self.local_for_remote(remote_key, data_root)
+            if local_path is None:
+                continue
+            local_key = str(local_path)
+            if local_path.exists():
+                self._uploaded.add(local_key)
+                continue
+            raw = self.backend.download_bytes(remote_key)
+            if raw is None:
+                continue
+            local_path.parent.mkdir(parents=True, exist_ok=True)
+            local_path.write_bytes(raw)
+            self._uploaded.add(local_key)
+            restored.append(remote_key)
+            log.info(
+                "parquet_hydrated_local",
+                extra={"event": "parquet_hydrated", "path": remote_key, "bytes": len(raw)},
+            )
+        return restored
 
     @staticmethod
     def _iter_parquets(data_root: Path) -> Iterable[Path]:

@@ -40,9 +40,12 @@ class CollectorApp:
         resume: bool = True,
     ) -> None:
         self.settings = settings
-        # CLI --hours overrides RUN_TARGET_HOURS; None from CLI means use settings
+        # CLI --hours overrides RUN_TARGET_HOURS; None from CLI means use settings.
+        # hours<=0 means continuous (matches CLI help / RUN_TARGET_HOURS semantics).
         if hours is None:
             self.hours = settings.hours_or_none()
+        elif hours <= 0:
+            self.hours = None
         else:
             self.hours = hours
         self.resume = resume
@@ -76,8 +79,16 @@ class CollectorApp:
 
         self.run_id, self.state, resumed = self._resolve_run()
         self.sync = DurableSync(
-            self.backend, run_id=self.run_id, gcs_prefix=settings.gcs_prefix
+            self.backend,
+            run_id=self.run_id,
+            gcs_prefix=settings.gcs_prefix,
+            public_prefix=settings.gcs_public_prefix,
         )
+        # Preserve cumulative counters across Cloud Run restarts (/tmp is wiped).
+        self._samples_baseline = int(self.state.samples_written or 0) if resumed else 0
+        self._trades_baseline = int(self.state.trades_written or 0) if resumed else 0
+        self._markouts_baseline = int(self.state.markouts_written or 0) if resumed else 0
+        self.sync.bytes_uploaded = int(self.state.bytes_uploaded or 0) if resumed else 0
         self.lock = LeaderLock(
             self.backend, self.sync.lock_key(), holder_id=self.holder_id, lease_seconds=120
         )
@@ -151,6 +162,18 @@ class CollectorApp:
         ):
             log.error("another collector holds the leader lock; exiting")
             return
+
+        if self._resumed:
+            restored = await asyncio.to_thread(
+                self.sync.hydrate_run_parquets, self.settings.data_dir
+            )
+            log_event(
+                log,
+                "parquet_hydrated",
+                f"hydrated {len(restored)} parquet objects from durable storage",
+                run_id=self.run_id,
+                detail=str(len(restored)),
+            )
 
         self.meta.start_run(self.run_id, self.hours)
         markets = await self.discovery.fetch_perp_markets(active_only=True)
@@ -278,9 +301,9 @@ class CollectorApp:
             )
 
     def _write_state(self) -> None:
-        self.state.samples_written = self.store.samples_written
-        self.state.trades_written = self.store.trades_written
-        self.state.markouts_written = self.store.markouts_written
+        self.state.samples_written = self._samples_baseline + self.store.samples_written
+        self.state.trades_written = self._trades_baseline + self.store.trades_written
+        self.state.markouts_written = self._markouts_baseline + self.store.markouts_written
         self.state.dropped_connections = self.counters.dropped_connections
         self.state.book_resyncs = self.counters.book_resyncs
         self.state.nonce_gaps = self.counters.nonce_gaps

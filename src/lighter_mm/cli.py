@@ -131,11 +131,38 @@ def generate_dashboard_data(
         )
         if raw:
             state = RunState.model_validate(raw)
+    if hours <= 0:
+        console.print("[red]hours must be > 0[/red]")
+        raise typer.Exit(2)
+    # Prefer durable Parquet when generating outside a live collector process.
+    from lighter_mm.cloud.sync import DurableSync
+
+    if state is not None:
+        sync = DurableSync(
+            backend,
+            run_id=state.run_id,
+            gcs_prefix=settings.gcs_prefix,
+            public_prefix=settings.gcs_public_prefix,
+        )
+        settings.data_dir = backend.local_data_dir()
+        ensure_dirs(settings)
+        restored = sync.hydrate_run_parquets(settings.data_dir)
+        if restored:
+            console.print(f"Hydrated {len(restored)} parquet objects for run {state.run_id}")
     payload = build_dashboard_payload(settings, hours=hours, state=state)
+    if payload.get("analysis_error"):
+        console.print(f"[yellow]analysis warning: {payload['analysis_error']}[/yellow]")
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "latest.json").write_text(json.dumps(payload["latest"], indent=2), encoding="utf-8")
     (out_dir / "markets.json").write_text(
-        json.dumps({"markets": payload["markets"]}, indent=2), encoding="utf-8"
+        json.dumps(
+            {
+                "markets": payload["markets"],
+                "generated_at": payload["latest"]["generated_at"],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
     )
     (out_dir / "candidates.json").write_text(
         json.dumps({"candidates": payload["candidates"]}, indent=2), encoding="utf-8"
@@ -144,12 +171,24 @@ def generate_dashboard_data(
     mdir.mkdir(exist_ok=True)
     for sym, detail in payload["market_details"].items():
         (mdir / f"{sym}.json").write_text(json.dumps(detail, indent=2), encoding="utf-8")
-    # Also publish through backend public prefix
+    # Also publish through backend public prefix (same keys as collector)
     prefix = settings.gcs_public_prefix.rstrip("/")
     backend.upload_json(f"{prefix}/latest.json", payload["latest"], public=True)
     backend.upload_json(
-        f"{prefix}/markets.json", {"markets": payload["markets"]}, public=True
+        f"{prefix}/markets.json",
+        {
+            "markets": payload["markets"],
+            "generated_at": payload["latest"]["generated_at"],
+        },
+        public=True,
     )
+    backend.upload_json(
+        f"{prefix}/candidates.json",
+        {"candidates": payload["candidates"]},
+        public=True,
+    )
+    for sym, detail in list(payload["market_details"].items())[:80]:
+        backend.upload_json(f"{prefix}/market/{sym}.json", detail, public=True)
     console.print(f"Wrote dashboard JSON to {out_dir} and storage public prefix")
 
 
@@ -213,6 +252,9 @@ def rank(
     """Rank markets by MM Opportunity Score."""
     settings = _settings()
     result = analyze_window(settings, hours)
+    if result.get("error"):
+        console.print(f"[red]{result['error']}[/red]")
+        raise typer.Exit(1)
     scored = result.get("scored") or []
     console.print(f"Analyzed {len(scored)} markets over {hours}h")
     console.print("\n[bold]MM CANDIDATES[/bold]")

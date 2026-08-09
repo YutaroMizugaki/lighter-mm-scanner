@@ -40,7 +40,7 @@ nav { display: flex; gap: 1rem; flex-wrap: wrap; color: var(--muted); font-size:
 .kpi .label { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; }
 .kpi .value { font-size: 1.15rem; font-weight: 700; margin-top: .2rem; }
 .status-COLLECTING, .status-COMPLETED { color: var(--ok); }
-.status-STALE { color: var(--warn); }
+.status-STALE, .status-DEGRADED { color: var(--warn); }
 .status-OFFLINE, .status-ERROR { color: var(--bad); }
 table { width: 100%; border-collapse: collapse; font-size: .85rem; }
 th, td { padding: .45rem .4rem; border-bottom: 1px solid var(--line); text-align: right; }

@@ -78,6 +78,10 @@ steps:
           echo "ERROR: _GCS_BUCKET substitution is required" >&2
           exit 1
         fi
+        if [[ -z "${_GCS_PUBLIC_BUCKET}" ]]; then
+          echo "ERROR: _GCS_PUBLIC_BUCKET substitution is required for dashboard JSON" >&2
+          exit 1
+        fi
         # Note: bash vars must use $$ so Cloud Build does not treat them as substitutions.
         SA_FLAGS=()
         if [[ -n "${_SERVICE_ACCOUNT}" ]]; then
