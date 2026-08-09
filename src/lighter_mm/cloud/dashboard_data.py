@@ -211,7 +211,16 @@ def build_dashboard_payload(
             started = datetime.fromisoformat(state.started_at)
             if started.tzinfo is None:
                 started = started.replace(tzinfo=UTC)
-            obs_hours = (datetime.now(UTC) - started).total_seconds() / 3600.0
+            if end_ms is not None:
+                end_dt = datetime.fromtimestamp(end_ms / 1000.0, tz=UTC)
+                obs_hours = (end_dt - started).total_seconds() / 3600.0
+            elif state.status == "completed" and state.ended_at:
+                ended = datetime.fromisoformat(state.ended_at)
+                if ended.tzinfo is None:
+                    ended = ended.replace(tzinfo=UTC)
+                obs_hours = (ended - started).total_seconds() / 3600.0
+            else:
+                obs_hours = (datetime.now(UTC) - started).total_seconds() / 3600.0
         except ValueError:
             obs_hours = window_hours
 

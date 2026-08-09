@@ -13,6 +13,10 @@ from lighter_mm.storage.backend import StorageBackend, VersionedJson
 log = logging.getLogger(__name__)
 
 
+class LostLeadershipError(Exception):
+    """Raised when a process no longer holds the leader lock."""
+
+
 @dataclass
 class LockInfo:
     holder_id: str

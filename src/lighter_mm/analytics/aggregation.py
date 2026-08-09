@@ -513,7 +513,7 @@ def _aggregate_book_sql(
     activity_agg AS (
         SELECT
             market_id,
-            MAX(book_update_age_ms) / 1000.0 AS latest_book_update_age_seconds,
+            arg_max(book_update_age_ms, timestamp_ms) / 1000.0 AS latest_book_update_age_seconds,
             quantile_cont(book_update_age_ms / 1000.0, 0.95) AS p95_book_update_age_seconds
         FROM book_deduped
         WHERE book_update_age_ms IS NOT NULL

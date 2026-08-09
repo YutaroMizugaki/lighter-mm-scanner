@@ -289,6 +289,13 @@ Cloud Run Worker Pool @ 1 vCPU / 1Gi, always-on, is the main compute cost. Keep 
 | Dashboard empty | public URL + analyzer publishes `latest.json`; CORS not required for simple GET from Next server |
 | Coverage gaps | expected during deploys; shown as STALE/OFFLINE + deployment_gaps |
 | **Dashboard Last Analysis stops moving** | Scheduler + Analyzer job (see below) |
+| **Coverage looks artificially low** | Analyzer caps analysis at `last_successful_flush`; check collector sync |
+| **Poison final analysis request** | After 3 failures request status=`failed`; incremental analysis resumes |
+
+### Dashboard health labels
+
+- **Last Sync** — from `collector_status.json` (`last_successful_sync`)
+- **Last Analysis** — from `analysis_status.json` (`last_successful_analysis_at`)
 
 ### Dashboard Last Analysis stops moving
 

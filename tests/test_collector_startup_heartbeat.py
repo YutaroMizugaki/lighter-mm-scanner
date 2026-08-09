@@ -82,6 +82,9 @@ def test_heartbeat_running_updates_active_run_and_latest(tmp_path: Path) -> None
         dropped_connections=0, book_resyncs=0, nonce_gaps=0
     )
     app._ws = None
+    app._lost_leadership = False
+    app.lock = MagicMock()
+    app.lock.renew.return_value = True
 
     app._heartbeat_running("leader elected; starting collector")
 

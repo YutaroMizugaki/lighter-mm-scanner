@@ -67,6 +67,8 @@ class Settings(BaseSettings):
     duckdb_memory_limit: str = "1GiB"
     duckdb_threads: int = Field(default=2, ge=1)
     analysis_stale_minutes: float = Field(default=30.0, ge=5.0)
+    max_final_analysis_attempts: int = Field(default=3, ge=1)
+    sqlite_dq_flush_seconds: float = Field(default=60.0, ge=5.0)
 
     # 0 => continuous; >0 => stop after N hours (cloud deploy sets 72)
     run_target_hours: float = Field(default=0.0)

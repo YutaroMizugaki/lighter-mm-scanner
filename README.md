@@ -84,7 +84,8 @@ Lighter → Collector Worker Pool → immutable Parquet → Private GCS
 - **Resources:** 2 CPU / 2 GiB (configurable via `_ANALYZER_CPU` / `_ANALYZER_MEMORY`)
 - **Schedule:** `*/15 * * * *` (Cloud Scheduler → Cloud Run Job)
 - **GCS mount:** `/mnt/lighter-mm` (read-only)
-- **Publishes:** `latest.json`, `markets.json`, `candidates.json`, `market/*.json`, `analysis_status.json`
+- **Publishes:** `current.json` + `generations/{id}/*` (and legacy `latest.json` mirror), `analysis_status.json`
+- **Analysis window:** end time is capped at `state.last_successful_flush` (durable GCS watermark), never execution time
 - **Manual run:** `gcloud run jobs execute lighter-mm-analyzer --region=...`
 
 ### Public JSON roles
@@ -92,8 +93,9 @@ Lighter → Collector Worker Pool → immutable Parquet → Private GCS
 | File | Writer | Purpose |
 |------|--------|---------|
 | `collector_status.json` | Collector | WS/sync health, samples written |
-| `analysis_status.json` | Analyzer | Last analysis OK/ERROR, row counts |
-| `latest.json` | Analyzer | Ranked overview for dashboard |
+| `analysis_status.json` | Analyzer | Last analysis OK/ERROR, row counts, durable watermark |
+| `current.json` | Analyzer | Pointer to generation-consistent dashboard bundle |
+| `latest.json` | Analyzer | Ranked overview for dashboard (legacy mirror) |
 | `markets.json` / `candidates.json` | Analyzer | Tables and candidate list |
 
 ```bash
