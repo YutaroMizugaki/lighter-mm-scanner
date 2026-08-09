@@ -23,6 +23,21 @@ from lighter_mm.logging_setup import log_event
 from lighter_mm.models import MarketStatsSnapshot, RuntimeCounters, TradeEvent
 from lighter_mm.orderbook.book import LocalOrderBook
 from lighter_mm.rest.markets import MarketDiscovery
+from lighter_mm.runtime.collector_durability import (
+    build_active_run_pointer,
+    build_final_analysis_request_payload,
+    project_collector_counters,
+)
+from lighter_mm.runtime.run_lifecycle import (
+    build_minimal_resumed_state,
+    build_new_run_state,
+    remaining_observation_seconds,
+)
+from lighter_mm.runtime.sampling import (
+    build_book_sample_row,
+    build_dq_update,
+    build_live_metric,
+)
 from lighter_mm.storage.lock import LeaderLock, LostLeadershipError, wait_for_leadership
 from lighter_mm.storage.parquet_store import ParquetStore
 from lighter_mm.storage.sqlite_meta import SqliteMeta
@@ -150,13 +165,13 @@ class CollectorApp:
                 # Fall back to local sqlite
                 existing = self.meta.get_active_run()
                 if existing and existing.get("run_id") == run_id:
-                    state = RunState(
+                    state = build_new_run_state(
                         run_id=run_id,
                         started_at=existing.get("started_at") or now_iso(),
-                        status="running",
                         observation_target_hours=self.hours,
                         collector_version=self.settings.collector_version,
                         git_sha=self.settings.git_sha,
+                        holder_id=self.holder_id,
                     )
                     return run_id, state, True
                 # Fail closed: never mint a new run_id while a running pointer
@@ -166,10 +181,9 @@ class CollectorApp:
                     "active_run pointer for %s has no state.json; reconstructing minimal state",
                     run_id,
                 )
-                state = RunState(
+                state = build_minimal_resumed_state(
                     run_id=run_id,
                     started_at=str(started),
-                    status="running",
                     observation_target_hours=self.hours,
                     collector_version=self.settings.collector_version,
                     git_sha=self.settings.git_sha,
@@ -178,10 +192,9 @@ class CollectorApp:
                 return run_id, state, True
 
         run_id = uuid.uuid4().hex[:12]
-        state = RunState(
+        state = build_new_run_state(
             run_id=run_id,
             started_at=now_iso(),
-            status="running",
             observation_target_hours=self.hours,
             collector_version=self.settings.collector_version,
             git_sha=self.settings.git_sha,
@@ -308,16 +321,7 @@ class CollectorApp:
 
     def _remaining_observation_seconds(self) -> float | None:
         """Seconds left until observation_target_hours from state.started_at."""
-        if self.hours is None:
-            return None
-        try:
-            started_at = datetime.fromisoformat(self.state.started_at)
-            if started_at.tzinfo is None:
-                started_at = started_at.replace(tzinfo=UTC)
-            elapsed = (datetime.now(UTC) - started_at).total_seconds()
-        except ValueError:
-            elapsed = 0.0
-        return self.hours * 3600.0 - elapsed
+        return remaining_observation_seconds(self.state.started_at, self.hours)
 
     async def _watch_deadline(self, deadline: float | None) -> None:
         if deadline is None:
@@ -363,13 +367,12 @@ class CollectorApp:
                 self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
                 self.backend.upload_json(
                     self.sync.active_pointer_key(),
-                    {
-                        "run_id": self.run_id,
-                        "status": "completed",
-                        "updated_at": now_iso(),
-                        "git_sha": self.settings.git_sha,
-                        "shutdown_reason": "completed",
-                    },
+                    build_active_run_pointer(
+                        run_id=self.run_id,
+                        status="completed",
+                        git_sha=self.settings.git_sha,
+                        shutdown_reason="completed",
+                    ),
                 )
                 self._create_final_analysis_request()
             else:
@@ -379,13 +382,12 @@ class CollectorApp:
                 self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
                 self.backend.upload_json(
                     self.sync.active_pointer_key(),
-                    {
-                        "run_id": self.run_id,
-                        "status": "running",
-                        "updated_at": now_iso(),
-                        "git_sha": self.settings.git_sha,
-                        "shutdown_reason": "preempted_or_signal",
-                    },
+                    build_active_run_pointer(
+                        run_id=self.run_id,
+                        status="running",
+                        git_sha=self.settings.git_sha,
+                        shutdown_reason="preempted_or_signal",
+                    ),
                 )
             if not self._lost_leadership:
                 self._publish_collector_status()
@@ -415,18 +417,20 @@ class CollectorApp:
             )
 
     def _write_state(self) -> None:
-        self.state.samples_written = self._samples_baseline + self.store.samples_written
-        self.state.trades_written = self._trades_baseline + self.store.trades_written
-        self.state.markouts_written = self._markouts_baseline + self.store.markouts_written
-        self.state.dropped_connections = self.counters.dropped_connections
-        self.state.book_resyncs = self.counters.book_resyncs
-        self.state.nonce_gaps = self.counters.nonce_gaps
-        self.state.deployment_gaps = self._deployment_gaps
-        self.state.last_trade_timestamp_ms = self._last_trade_ts
-        self.state.bytes_uploaded = self.sync.bytes_uploaded
-        self.state.holder_id = self.holder_id
-        self.state.git_sha = self.settings.git_sha
-        self.state.touch()
+        project_collector_counters(
+            self.state,
+            samples_written=self._samples_baseline + self.store.samples_written,
+            trades_written=self._trades_baseline + self.store.trades_written,
+            markouts_written=self._markouts_baseline + self.store.markouts_written,
+            dropped_connections=self.counters.dropped_connections,
+            book_resyncs=self.counters.book_resyncs,
+            nonce_gaps=self.counters.nonce_gaps,
+            deployment_gaps=self._deployment_gaps,
+            last_trade_timestamp_ms=self._last_trade_ts,
+            bytes_uploaded=self.sync.bytes_uploaded,
+            holder_id=self.holder_id,
+            git_sha=self.settings.git_sha,
+        )
 
     async def _persist_state(self, *, flush_upload: bool = False) -> None:
         if getattr(self, "_lost_leadership", False):
@@ -439,12 +443,11 @@ class CollectorApp:
             self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
             self.backend.upload_json(
                 self.sync.active_pointer_key(),
-                {
-                    "run_id": self.run_id,
-                    "status": self.state.status,
-                    "updated_at": now_iso(),
-                    "git_sha": self.settings.git_sha,
-                },
+                build_active_run_pointer(
+                    run_id=self.run_id,
+                    status=self.state.status,
+                    git_sha=self.settings.git_sha,
+                ),
             )
 
     def _create_final_analysis_request(self) -> None:
@@ -456,15 +459,7 @@ class CollectorApp:
             return
         self.backend.upload_json(
             key,
-            {
-                "run_id": self.run_id,
-                "type": "final",
-                "status": "pending",
-                "requested_at": now_iso(),
-                "attempts": 0,
-                "last_attempt_at": None,
-                "last_error": None,
-            },
+            build_final_analysis_request_payload(run_id=self.run_id),
         )
         log_event(
             log,
@@ -516,12 +511,11 @@ class CollectorApp:
         self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
         self.backend.upload_json(
             self.sync.active_pointer_key(),
-            {
-                "run_id": self.run_id,
-                "status": self.state.status,
-                "updated_at": flush_at,
-                "git_sha": self.settings.git_sha,
-            },
+            build_active_run_pointer(
+                run_id=self.run_id,
+                status=self.state.status,
+                git_sha=self.settings.git_sha,
+            ),
         )
         self._publish_collector_status()
 
@@ -530,18 +524,16 @@ class CollectorApp:
         if getattr(self, "_lost_leadership", False):
             return
         self._write_state()
-        now = now_iso()
         self._require_leadership(phase="heartbeat upload")
         self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
         self.backend.upload_json(
             self.sync.active_pointer_key(),
-            {
-                "run_id": self.run_id,
-                "status": "running",
-                "updated_at": now,
-                "git_sha": self.settings.git_sha,
-                "note": note,
-            },
+            build_active_run_pointer(
+                run_id=self.run_id,
+                status="running",
+                git_sha=self.settings.git_sha,
+                note=note,
+            ),
         )
         try:
             self._publish_collector_status()
@@ -734,46 +726,12 @@ class CollectorApp:
                 if metrics.is_usable:
                     ready += 1
                 stats = self._ws.stats_cache.get(mid)
-                row: dict[str, Any] = {
-                    "timestamp_ms": metrics.timestamp_ms,
-                    "market_id": mid,
-                    "symbol": symbol,
-                    "best_bid": metrics.best_bid,
-                    "best_ask": metrics.best_ask,
-                    "mid": metrics.mid,
-                    "spread_absolute": metrics.spread_absolute,
-                    "spread_bps": metrics.spread_bps,
-                    "best_bid_size_base": metrics.best_bid_size_base,
-                    "best_ask_size_base": metrics.best_ask_size_base,
-                    "best_bid_size_usd": metrics.best_bid_size_usd,
-                    "best_ask_size_usd": metrics.best_ask_size_usd,
-                    "is_stale": metrics.is_stale,
-                    "is_usable": metrics.is_usable,
-                    "is_inactive": metrics.is_inactive,
-                    "book_update_age_ms": metrics.book_update_age_ms,
-                    "nonce": metrics.nonce,
-                    "index_price": float(stats.index_price) if stats and stats.index_price else None,
-                    "mark_price": float(stats.mark_price) if stats and stats.mark_price else None,
-                    "stats_mid_price": float(stats.mid_price) if stats and stats.mid_price else None,
-                    "open_interest": float(stats.open_interest)
-                    if stats and stats.open_interest
-                    else None,
-                    "last_trade_price": float(stats.last_trade_price)
-                    if stats and stats.last_trade_price
-                    else None,
-                    "current_funding_rate": float(stats.current_funding_rate)
-                    if stats and stats.current_funding_rate is not None
-                    else None,
-                    "funding_rate": float(stats.funding_rate)
-                    if stats and stats.funding_rate is not None
-                    else None,
-                    "daily_base_token_volume": stats.daily_base_token_volume if stats else None,
-                    "daily_quote_token_volume": stats.daily_quote_token_volume if stats else None,
-                    "daily_price_low": stats.daily_price_low if stats else None,
-                    "daily_price_high": stats.daily_price_high if stats else None,
-                    "daily_price_change": stats.daily_price_change if stats else None,
-                }
-                row.update(metrics.depths)
+                row = build_book_sample_row(
+                    market_id=mid,
+                    symbol=symbol,
+                    metrics=metrics,
+                    stats=stats,
+                )
                 self.store.write_book(row)
                 self._sample_counts[mid] += 1
                 self._last_book_row_written_ts = sample_timestamp_ms
@@ -782,24 +740,17 @@ class CollectorApp:
                     self.mid_histories[mid].add(sample_timestamp_ms, metrics.mid)
                 tpm = self.activity.trades_per_minute(mid, sample_timestamp_ms)
                 m5 = list(self.recent_markout_5s[mid])
-                self.live_metrics[mid] = {
-                    "symbol": symbol,
-                    "spread_bps": metrics.spread_bps,
-                    "depth_10bps": metrics.depths.get("two_sided_depth_10bps_usd"),
-                    "tpm": tpm,
-                    "markout_5s": (sum(m5) / len(m5)) if m5 else None,
-                    "is_stale": metrics.is_inactive,
-                    "is_usable": metrics.is_usable,
-                }
+                self.live_metrics[mid] = build_live_metric(
+                    symbol=symbol,
+                    metrics=metrics,
+                    tpm=tpm,
+                    markout_5s=(sum(m5) / len(m5)) if m5 else None,
+                )
                 dq_rows.append(
-                    (
+                    build_dq_update(
                         mid,
-                        {
-                            "actual_samples": self._sample_counts[mid],
-                            "book_resync_count": book.resync_count,
-                            "nonce_gap_count": book.nonce_gap_count,
-                            "stale_book_count": book.stale_count,
-                        },
+                        actual_samples=self._sample_counts[mid],
+                        book=book,
                     )
                 )
             self._pending_dq_rows.extend(dq_rows)
