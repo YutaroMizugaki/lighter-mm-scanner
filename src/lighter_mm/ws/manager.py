@@ -25,6 +25,17 @@ OnTrade = Callable[[TradeEvent, str], Awaitable[None] | None]
 OnStats = Callable[[MarketStatsSnapshot], Awaitable[None] | None]
 
 
+def _normalize_ws_items(value: object) -> list[dict]:
+    """Normalize WS trade / stats batch payloads into a list of dicts."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, list):
+        return [x for x in value if isinstance(x, dict)]
+    return []
+
+
 @dataclass
 class ShardPlan:
     shard_id: int
@@ -51,6 +62,23 @@ class WsRuntimeStats:
     total_shards: int = 0
     subscribed_channels: int = 0
     seen_trade_ids: int = 0
+    subscription_errors: int = 0
+    trade_parse_errors: int = 0
+    last_ws_error: str | None = None
+
+    def public_dict(self) -> dict:
+        """Safe subset for public dashboard health (no payloads / secrets)."""
+        return {
+            "connected_shards": self.connected_shards,
+            "total_shards": self.total_shards,
+            "subscribed_channels": self.subscribed_channels,
+            "dropped_connections": self.dropped_connections,
+            "subscription_errors": self.subscription_errors,
+            "trade_parse_errors": self.trade_parse_errors,
+            "book_resyncs": self.book_resyncs,
+            "nonce_gaps": self.nonce_gaps,
+            "last_ws_error": self.last_ws_error,
+        }
 
 
 @dataclass
@@ -100,7 +128,16 @@ class WsManager:
         self._stop.clear()
         shards = self.plan_shards(self.markets.keys())
         self.runtime.total_shards = len(shards)
+        # Planned channel count (stable across reconnects; not a cumulative counter).
+        self.runtime.subscribed_channels = sum(len(s.channels()) for s in shards)
         for shard in shards:
+            n_chans = len(shard.channels())
+            if n_chans > self.settings.max_subscriptions_per_connection:
+                raise RuntimeError(
+                    f"shard {shard.shard_id} has {n_chans} channels; "
+                    f"exceeds max_subscriptions_per_connection="
+                    f"{self.settings.max_subscriptions_per_connection}"
+                )
             self._tasks.append(asyncio.create_task(self._run_shard(shard), name=f"ws-{shard.shard_id}"))
 
     async def stop(self) -> None:
@@ -210,7 +247,6 @@ class WsManager:
             if self._stop.is_set():
                 return
             await self._send(ws, {"type": "subscribe", "channel": channel})
-            self.runtime.subscribed_channels += 1
             if i % 10 == 0:
                 await asyncio.sleep(0.05)
             else:
@@ -249,6 +285,22 @@ class WsManager:
             await self._send(ws, {"type": "pong"})
             return
         if mtype == "connected":
+            return
+
+        # Explicit Lighter error / failed replies only — unknown types are ignored
+        # (schema evolves; do not treat every unfamiliar message as an error).
+        if isinstance(mtype, str) and mtype in ("error", "failed"):
+            err_text = str(
+                msg.get("error")
+                or msg.get("message")
+                or msg.get("msg")
+                or msg
+            )
+            self.runtime.subscription_errors += 1
+            self.runtime.last_ws_error = err_text[:500]
+            log.warning(
+                "Lighter websocket error (shard=%s): %s", shard.shard_id, err_text
+            )
             return
 
         if mtype in ("subscribed/order_book", "update/order_book"):
@@ -309,15 +361,22 @@ class WsManager:
             if market_id is not None and market_id in self.markets
             else str(market_id)
         )
-        batches = []
-        if msg.get("trades"):
-            batches.extend(msg["trades"])
-        if msg.get("liquidation_trades"):
-            batches.extend(msg["liquidation_trades"])
+        batches: list[dict] = []
+        batches.extend(_normalize_ws_items(msg.get("trades")))
+        batches.extend(_normalize_ws_items(msg.get("liquidation_trades")))
         for raw in batches:
             try:
                 trade = TradeEvent.from_ws(raw)
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                self.runtime.trade_parse_errors += 1
+                if self.runtime.trade_parse_errors <= 5 or (
+                    self.runtime.trade_parse_errors % 100 == 0
+                ):
+                    log.warning(
+                        "failed to parse trade payload: %s payload=%r",
+                        exc,
+                        raw,
+                    )
                 continue
             if trade.trade_id in self._trade_id_set:
                 continue

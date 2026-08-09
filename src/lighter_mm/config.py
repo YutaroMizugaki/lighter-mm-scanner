@@ -39,7 +39,9 @@ class Settings(BaseSettings):
     market_refresh_seconds: int = Field(default=3600, ge=60)
     stale_book_seconds: float = Field(default=180.0, ge=5.0)
 
-    max_subscriptions_per_connection: int = Field(default=450, ge=1, le=500)
+    # Lighter caps subscriptions per WS connection; keep headroom under 100
+    # for market_stats/all and any future channels.
+    max_subscriptions_per_connection: int = Field(default=95, ge=1, le=100)
     max_client_messages_per_minute: int = Field(default=150, ge=1, le=200)
     max_inflight_messages: int = Field(default=40, ge=1, le=50)
 
@@ -120,6 +122,10 @@ class Settings(BaseSettings):
             "structured_logging": ("STRUCTURED_LOGGING", "LIGHTER_MM_STRUCTURED_LOGGING"),
             "data_dir": ("DATA_DIR", "LIGHTER_MM_DATA_DIR"),
             "tmp_dir": ("TMP_DIR", "LIGHTER_MM_TMP_DIR"),
+            "max_subscriptions_per_connection": (
+                "MAX_SUBSCRIPTIONS_PER_CONNECTION",
+                "LIGHTER_MM_MAX_SUBSCRIPTIONS_PER_CONNECTION",
+            ),
         }
         for field, names in mapping.items():
             if field not in data or data.get(field) in (None, ""):

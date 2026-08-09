@@ -11,11 +11,25 @@ export type Overview = {
   candidates: number;
   coverage_pct: number | null;
   last_update: string | null;
+  last_successful_flush?: string | null;
+  last_trade_at?: string | null;
+  last_book_sample_at?: string | null;
   git_sha: string | null;
   collector_version: string | null;
   analysis_error?: string | null;
   health_warnings?: string[];
   samples_written?: number;
+  ws?: {
+    connected_shards?: number;
+    total_shards?: number;
+    subscribed_channels?: number;
+    dropped_connections?: number;
+    subscription_errors?: number;
+    trade_parse_errors?: number;
+    book_resyncs?: number;
+    nonce_gaps?: number;
+    last_ws_error?: string | null;
+  } | null;
   top_candidate: {
     symbol: string;
     score: number;
@@ -39,6 +53,8 @@ export type MarketRow = {
   pct_time_spread_ge_5bps: number | null;
   median_two_sided_depth_10bps_usd: number | null;
   trades_per_minute_median: number | null;
+  trades_per_minute_mean: number | null;
+  total_trade_count: number | null;
   maker_markout_5s_median_bps: number | null;
   maker_markout_30s_median_bps: number | null;
   current_funding_rate: number | null;
@@ -91,8 +107,15 @@ export async function getOverviewResult(): Promise<FetchResult<Overview>> {
   return fetchJson<Overview>("latest.json");
 }
 
+export async function getMarketsResult(): Promise<
+  FetchResult<{ markets: MarketRow[] }>
+> {
+  return fetchJson<{ markets: MarketRow[] }>("markets.json");
+}
+
+/** Compatibility helper — prefer getMarketsResult() when failure must surface. */
 export async function getMarkets(): Promise<MarketRow[]> {
-  const result = await fetchJson<{ markets: MarketRow[] }>("markets.json");
+  const result = await getMarketsResult();
   return result.ok ? result.data.markets ?? [] : [];
 }
 
@@ -108,7 +131,21 @@ export function fmt(n: number | null | undefined, digits = 2, signed = false): s
   return n > 0 ? `+${body}` : body;
 }
 
-/** Recompute status from JSON age — baked COLLECTING lies when publish stalls. */
+/** Format an ISO timestamp in Japan Standard Time with an explicit JST suffix. */
+export function fmtJst(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return (
+    d.toLocaleString("ja-JP", { timeZone: "Asia/Tokyo" }) + " JST"
+  );
+}
+
+/**
+ * Recompute status from collector flush age.
+ * Uses last_successful_flush (alias: last_update), NOT generated_at alone —
+ * a fresh generated_at with a stale flush still means the collector is OFFLINE.
+ */
 export function effectiveStatus(
   overview: Overview,
   okMinutes = 20,
@@ -116,16 +153,9 @@ export function effectiveStatus(
 ): string {
   const baked = overview.status || "ERROR";
   if (baked === "COMPLETED" || baked === "ERROR") return baked;
-  // Prefer the fresher of last_update / generated_at. A stalled
-  // last_successful_flush previously forced OFFLINE even while generated_at
-  // (and markets) kept advancing every sync.
-  const stamps = [overview.last_update, overview.generated_at].filter(
-    (x): x is string => Boolean(x),
-  );
-  if (!stamps.length) return "ERROR";
-  const ageMin = Math.min(
-    ...stamps.map((s) => (Date.now() - new Date(s).getTime()) / 60_000),
-  );
+  const stamp = overview.last_successful_flush || overview.last_update || null;
+  if (!stamp) return "ERROR";
+  const ageMin = (Date.now() - new Date(stamp).getTime()) / 60_000;
   if (Number.isNaN(ageMin)) return "ERROR";
   const analyzed = overview.markets_analyzed ?? overview.markets ?? 0;
   const samples = overview.samples_written ?? 0;
@@ -133,7 +163,17 @@ export function effectiveStatus(
   if (ageMin > okMinutes) return "STALE";
   if (baked === "DEGRADED") return "DEGRADED";
   if (analyzed === 0 && samples > 0) return "DEGRADED";
-  // Fresh publish with markets: trust COLLECTING even if baked status lagged.
+  // Fresh flush with markets: trust COLLECTING even if baked status lagged.
   if (analyzed > 0 && (baked === "OFFLINE" || baked === "STALE")) return "COLLECTING";
   return baked;
+}
+
+export function statusHealthNote(status: string): string | null {
+  if (status === "OFFLINE") {
+    return "Collector data has not been successfully refreshed for >40m.";
+  }
+  if (status === "STALE") {
+    return "Collector data is older than 20m.";
+  }
+  return null;
 }

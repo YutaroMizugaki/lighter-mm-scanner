@@ -36,8 +36,16 @@ export default async function MarketDetailPage({
           <div className="value">${fmt(m.median_two_sided_depth_10bps_usd, 0)}</div>
         </div>
         <div className="kpi">
-          <div className="label">Trades/min</div>
+          <div className="label">TPM median</div>
           <div className="value">{fmt(m.trades_per_minute_median)}</div>
+        </div>
+        <div className="kpi">
+          <div className="label">TPM avg</div>
+          <div className="value">{fmt(m.trades_per_minute_mean)}</div>
+        </div>
+        <div className="kpi">
+          <div className="label">Trades</div>
+          <div className="value">{fmt(m.total_trade_count, 0)}</div>
         </div>
         <div className="kpi">
           <div className="label">Markout 5s</div>

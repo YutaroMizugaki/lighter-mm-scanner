@@ -7,7 +7,9 @@ import { fmt } from "@/lib/data";
 
 export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
   const [q, setQ] = useState("");
-  const [sort, setSort] = useState<"score" | "spread" | "tpm" | "m5">("score");
+  const [sort, setSort] = useState<"score" | "spread" | "tpm" | "tpm_avg" | "m5">(
+    "score",
+  );
   const [candidatesOnly, setCandidatesOnly] = useState(false);
 
   const rows = useMemo(() => {
@@ -18,23 +20,14 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
       xs = xs.filter((m) => m.symbol.toLowerCase().includes(qq));
     }
     xs.sort((a, b) => {
-      const av =
-        sort === "score"
-          ? a.score
-          : sort === "spread"
-            ? a.median_spread_bps || 0
-            : sort === "tpm"
-              ? a.trades_per_minute_median || 0
-              : a.maker_markout_5s_median_bps || 0;
-      const bv =
-        sort === "score"
-          ? b.score
-          : sort === "spread"
-            ? b.median_spread_bps || 0
-            : sort === "tpm"
-              ? b.trades_per_minute_median || 0
-              : b.maker_markout_5s_median_bps || 0;
-      return bv - av;
+      const pick = (m: MarketRow) => {
+        if (sort === "score") return m.score;
+        if (sort === "spread") return m.median_spread_bps || 0;
+        if (sort === "tpm") return m.trades_per_minute_median || 0;
+        if (sort === "tpm_avg") return m.trades_per_minute_mean || 0;
+        return m.maker_markout_5s_median_bps || 0;
+      };
+      return pick(b) - pick(a);
     });
     return xs;
   }, [markets, q, sort, candidatesOnly]);
@@ -51,7 +44,8 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
         <select value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
           <option value="score">Sort: Score</option>
           <option value="spread">Sort: Spread</option>
-          <option value="tpm">Sort: Trades/min</option>
+          <option value="tpm">Sort: TPM median</option>
+          <option value="tpm_avg">Sort: TPM avg</option>
           <option value="m5">Sort: Markout 5s</option>
         </select>
         <label className="muted">
@@ -73,7 +67,9 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
               <th>Score</th>
               <th>Spread</th>
               <th>Depth10</th>
-              <th>TPM</th>
+              <th>TPM median</th>
+              <th>TPM avg</th>
+              <th>Trades</th>
               <th>M5</th>
               <th>M30</th>
               <th>Coverage</th>
@@ -93,6 +89,8 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
                 <td>{fmt(m.median_spread_bps)}</td>
                 <td>{fmt(m.median_two_sided_depth_10bps_usd, 0)}</td>
                 <td>{fmt(m.trades_per_minute_median)}</td>
+                <td>{fmt(m.trades_per_minute_mean)}</td>
+                <td>{fmt(m.total_trade_count, 0)}</td>
                 <td>{fmt(m.maker_markout_5s_median_bps, 2, true)}</td>
                 <td>{fmt(m.maker_markout_30s_median_bps, 2, true)}</td>
                 <td>{fmt(m.data_coverage_pct, 1)}</td>
