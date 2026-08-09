@@ -438,6 +438,7 @@ class CollectorApp:
             else min(hours, max(elapsed, 0.1))
         )
         public_ok = False
+        prev_flush = self.state.last_successful_flush
         try:
             from lighter_mm.cloud.estimate import estimate_storage
 
@@ -446,9 +447,15 @@ class CollectorApp:
                 or _dir_size(self.settings.data_dir),
                 elapsed_hours=max(elapsed, 1 / 60),
             )
+            # Advance flush before building the overview so baked status/last_update
+            # reflect this publish (otherwise latest.json stays OFFLINE forever while
+            # generated_at moves — detail-upload failures used to block the flush).
+            flush_at = now_iso()
+            self.state.last_successful_flush = flush_at
             payload = build_dashboard_payload(
                 self.settings, hours=window, state=self.state, storage_estimate=est
             )
+            # Core dashboard JSON — this alone must count as a successful flush.
             self.backend.upload_json(
                 self.sync.public_key("latest.json"), payload["latest"], public=True
             )
@@ -462,22 +469,37 @@ class CollectorApp:
                 {"candidates": payload["candidates"]},
                 public=True,
             )
-            # Detail pages are linked from the full markets table — upload all.
-            for sym, detail in payload["market_details"].items():
-                self.backend.upload_json(
-                    self.sync.public_key(f"market/{sym}.json"), detail, public=True
-                )
-            # Also keep a copy under the run
             self.backend.upload_json(
                 f"{self.sync.run_prefix()}/reports/latest.json", payload["latest"]
             )
-            self.state.last_analysis_at = now_iso()
+            self.state.last_analysis_at = flush_at
             public_ok = True
             log_event(log, "analysis_completed", "dashboard JSON refreshed", run_id=self.run_id)
+
+            # Per-market details are best-effort. A single market/{sym}.json failure
+            # must not roll back last_successful_flush / mark the collector OFFLINE.
+            detail_failures = 0
+            for sym, detail in payload["market_details"].items():
+                try:
+                    self.backend.upload_json(
+                        self.sync.public_key(f"market/{sym}.json"), detail, public=True
+                    )
+                except Exception as detail_exc:  # noqa: BLE001
+                    detail_failures += 1
+                    log.warning(
+                        "market detail upload failed for %s: %s", sym, detail_exc
+                    )
+            if detail_failures:
+                log.warning(
+                    "market detail uploads: %s failed of %s",
+                    detail_failures,
+                    len(payload["market_details"]),
+                )
         except Exception as exc:  # noqa: BLE001
             log.warning("analysis/dashboard generation failed: %s", exc)
-            # Surface public-mirror failure in durable state (do not pretend flush is green).
-            self.state.last_analysis_at = None
+            if not public_ok:
+                self.state.last_successful_flush = prev_flush
+                self.state.last_analysis_at = None
             # Best-effort: still move the public latest.json clock so the UI does
             # not stay forever COLLECTING on a frozen object from a prior revision.
             try:
@@ -485,8 +507,6 @@ class CollectorApp:
             except Exception as pub_exc:  # noqa: BLE001
                 log.warning("public failure-status publish failed: %s", pub_exc)
 
-        if public_ok:
-            self.state.last_successful_flush = now_iso()
         self._write_state()
         self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
         self.backend.upload_json(

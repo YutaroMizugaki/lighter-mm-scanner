@@ -116,9 +116,16 @@ export function effectiveStatus(
 ): string {
   const baked = overview.status || "ERROR";
   if (baked === "COMPLETED" || baked === "ERROR") return baked;
-  const stamp = overview.last_update || overview.generated_at;
-  if (!stamp) return "ERROR";
-  const ageMin = (Date.now() - new Date(stamp).getTime()) / 60_000;
+  // Prefer the fresher of last_update / generated_at. A stalled
+  // last_successful_flush previously forced OFFLINE even while generated_at
+  // (and markets) kept advancing every sync.
+  const stamps = [overview.last_update, overview.generated_at].filter(
+    (x): x is string => Boolean(x),
+  );
+  if (!stamps.length) return "ERROR";
+  const ageMin = Math.min(
+    ...stamps.map((s) => (Date.now() - new Date(s).getTime()) / 60_000),
+  );
   if (Number.isNaN(ageMin)) return "ERROR";
   const analyzed = overview.markets_analyzed ?? overview.markets ?? 0;
   const samples = overview.samples_written ?? 0;
@@ -126,5 +133,7 @@ export function effectiveStatus(
   if (ageMin > okMinutes) return "STALE";
   if (baked === "DEGRADED") return "DEGRADED";
   if (analyzed === 0 && samples > 0) return "DEGRADED";
+  // Fresh publish with markets: trust COLLECTING even if baked status lagged.
+  if (analyzed > 0 && (baked === "OFFLINE" || baked === "STALE")) return "COLLECTING";
   return baked;
 }
