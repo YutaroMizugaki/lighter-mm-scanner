@@ -22,6 +22,7 @@ substitutions:
   _ANALYZER_MEMORY: 2Gi
   _ANALYZER_SCHEDULE: "*/15 * * * *"
   _ANALYZER_MOUNT_PATH: /mnt/lighter-mm
+  _SCHEDULER_SERVICE_ACCOUNT: ""
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -136,7 +137,48 @@ steps:
           "$${SA_FLAGS[@]}"
     waitFor: ["push"]
 
-  # STEP 8 — Cloud Scheduler for periodic analyzer runs
+  # STEP 8 — ensure required APIs (idempotent; safe on every deploy)
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: enable-apis
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        gcloud services enable \
+          run.googleapis.com \
+          cloudscheduler.googleapis.com \
+          cloudbuild.googleapis.com \
+          artifactregistry.googleapis.com \
+          storage.googleapis.com \
+          iam.googleapis.com \
+          --project="$PROJECT_ID"
+    waitFor: ["push"]
+
+  # STEP 9 — grant Scheduler SA permission to invoke Analyzer Job
+  - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    id: grant-scheduler-invoker
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        SCHEDULER_SA="${_SCHEDULER_SERVICE_ACCOUNT}"
+        if [[ -z "$$SCHEDULER_SA" ]]; then
+          SCHEDULER_SA="${_SERVICE_ACCOUNT}"
+        fi
+        if [[ -z "$$SCHEDULER_SA" ]]; then
+          echo "ERROR: _SCHEDULER_SERVICE_ACCOUNT or _SERVICE_ACCOUNT required for Scheduler" >&2
+          exit 1
+        fi
+        gcloud run jobs add-iam-policy-binding "${_ANALYZER_JOB}" \
+          --project="$PROJECT_ID" \
+          --region="${_REGION}" \
+          --member="serviceAccount:$$SCHEDULER_SA" \
+          --role="roles/run.invoker"
+    waitFor: ["deploy-analyzer", "enable-apis"]
+
+  # STEP 10 — Cloud Scheduler for periodic analyzer runs (Cloud Run Jobs v2 API)
   - name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
     id: deploy-analyzer-scheduler
     entrypoint: bash
@@ -144,13 +186,13 @@ steps:
       - -c
       - |
         set -euo pipefail
-        JOB_URI="https://${_REGION}-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/$PROJECT_ID/jobs/${_ANALYZER_JOB}:run"
-        SA_EMAIL="${_SERVICE_ACCOUNT}"
-        if [[ -z "$$SA_EMAIL" ]]; then
-          SA_EMAIL="$$(gcloud iam service-accounts list --project="$PROJECT_ID" --filter='displayName:Compute Engine default' --format='value(email)' | head -1)"
+        JOB_URI="https://run.googleapis.com/v2/projects/$PROJECT_ID/locations/${_REGION}/jobs/${_ANALYZER_JOB}:run"
+        SCHEDULER_SA="${_SCHEDULER_SERVICE_ACCOUNT}"
+        if [[ -z "$$SCHEDULER_SA" ]]; then
+          SCHEDULER_SA="${_SERVICE_ACCOUNT}"
         fi
-        if [[ -z "$$SA_EMAIL" ]]; then
-          echo "ERROR: _SERVICE_ACCOUNT required for Cloud Scheduler OIDC" >&2
+        if [[ -z "$$SCHEDULER_SA" ]]; then
+          echo "ERROR: _SCHEDULER_SERVICE_ACCOUNT or _SERVICE_ACCOUNT required for Cloud Scheduler OAuth" >&2
           exit 1
         fi
         if gcloud scheduler jobs describe "lighter-mm-analyzer-schedule" \
@@ -161,7 +203,7 @@ steps:
             --schedule="${_ANALYZER_SCHEDULE}" \
             --uri="$$JOB_URI" \
             --http-method=POST \
-            --oauth-service-account-email="$$SA_EMAIL" \
+            --oauth-service-account-email="$$SCHEDULER_SA" \
             --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
         else
           gcloud scheduler jobs create http "lighter-mm-analyzer-schedule" \
@@ -170,10 +212,10 @@ steps:
             --schedule="${_ANALYZER_SCHEDULE}" \
             --uri="$$JOB_URI" \
             --http-method=POST \
-            --oauth-service-account-email="$$SA_EMAIL" \
+            --oauth-service-account-email="$$SCHEDULER_SA" \
             --oauth-token-scope="https://www.googleapis.com/auth/cloud-platform"
         fi
-    waitFor: ["deploy-analyzer"]
+    waitFor: ["grant-scheduler-invoker"]
 
 images:
   - ${_REGION}-docker.pkg.dev/$PROJECT_ID/${_AR_REPO}/collector:$COMMIT_SHA

@@ -1,0 +1,117 @@
+"""Dashboard collector vs analysis health separation (logic + source checks)."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+DATA_TS = ROOT / "dashboard" / "lib" / "data.ts"
+HOME_PAGE = ROOT / "dashboard" / "app" / "page.tsx"
+
+
+def _iso(dt: datetime) -> str:
+    return dt.isoformat().replace("+00:00", "Z")
+
+
+def _effective_collector_status(
+    last_sync: str | None,
+    baked: str = "COLLECTING",
+    ok_minutes: float = 20,
+    warn_minutes: float = 40,
+) -> str:
+    """Mirror dashboard/lib/data.ts effectiveCollectorStatus."""
+    if baked in ("COMPLETED", "ERROR"):
+        return baked
+    if not last_sync:
+        return "ERROR"
+    age_min = (datetime.now(UTC) - datetime.fromisoformat(last_sync.replace("Z", "+00:00"))).total_seconds() / 60
+    if age_min > warn_minutes:
+        return "OFFLINE"
+    if age_min > ok_minutes:
+        return "STALE"
+    if baked == "DEGRADED":
+        return "DEGRADED"
+    return baked
+
+
+def _effective_analysis_status(
+    status: str | None,
+    generated_at: str | None,
+    last_ok: str | None = None,
+    stale_minutes: float = 30,
+) -> str:
+    """Mirror dashboard/lib/data.ts effectiveAnalysisStatus."""
+    if status is None:
+        return "UNKNOWN"
+    if status == "ERROR":
+        return "ERROR"
+    if status == "RUNNING":
+        return "RUNNING"
+    stamp = last_ok or generated_at
+    if not stamp:
+        return status
+    age_min = (
+        datetime.now(UTC) - datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    ).total_seconds() / 60
+    stale = age_min > stale_minutes
+    if stale and status == "OK":
+        return "STALE"
+    if status == "OK":
+        return "OK"
+    return status
+
+
+# Test A — Collector fresh / Analyzer fresh → COLLECTING + OK
+def test_collector_fresh_analyzer_fresh() -> None:
+    now = datetime.now(UTC)
+    sync = _iso(now - timedelta(minutes=5))
+    analysis_ts = _iso(now - timedelta(minutes=10))
+    assert _effective_collector_status(sync) == "COLLECTING"
+    assert _effective_analysis_status("OK", analysis_ts, analysis_ts) == "OK"
+
+
+# Test B — Collector fresh / Analyzer >30m stale → COLLECTING + STALE
+def test_collector_fresh_analyzer_stale() -> None:
+    now = datetime.now(UTC)
+    sync = _iso(now - timedelta(minutes=5))
+    analysis_ts = _iso(now - timedelta(minutes=45))
+    assert _effective_collector_status(sync) == "COLLECTING"
+    assert _effective_analysis_status("OK", analysis_ts, analysis_ts) == "STALE"
+
+
+# Test C — Collector fresh / Analyzer ERROR
+def test_collector_fresh_analyzer_error() -> None:
+    now = datetime.now(UTC)
+    sync = _iso(now - timedelta(minutes=5))
+    assert _effective_collector_status(sync) == "COLLECTING"
+    assert _effective_analysis_status("ERROR", _iso(now), None) == "ERROR"
+
+
+# Test D — Analyzer stale does not make Collector OFFLINE
+def test_analyzer_stale_does_not_offline_collector() -> None:
+    now = datetime.now(UTC)
+    sync = _iso(now - timedelta(minutes=5))
+    analysis_ts = _iso(now - timedelta(hours=2))
+    assert _effective_collector_status(sync) == "COLLECTING"
+    assert _effective_analysis_status("OK", analysis_ts, analysis_ts) == "STALE"
+
+
+# Test E/F/G — UI labels in source
+def test_dashboard_labels_last_analysis_and_last_sync() -> None:
+    home = HOME_PAGE.read_text(encoding="utf-8")
+    data = DATA_TS.read_text(encoding="utf-8")
+    assert "Last Analysis" in home
+    assert "Last Sync" in home
+    assert "Last Update" not in home
+    assert "analysisDisplayTimestamp" in data
+    assert "last_successful_sync" in data
+
+
+def test_dashboard_no_last_update_label() -> None:
+    home = HOME_PAGE.read_text(encoding="utf-8")
+    assert "Last Update" not in home
+
+
+def test_analysis_unknown_when_status_missing() -> None:
+    assert _effective_analysis_status(None, None) == "UNKNOWN"

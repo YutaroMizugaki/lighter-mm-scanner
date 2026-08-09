@@ -99,6 +99,11 @@ Lighter → Collector Worker Pool → immutable Parquet → Private GCS
 ```bash
 # Local / manual analyzer (hydrates Parquet for dev)
 uv run lighter-mm cloud-analyze
+
+# GCP manual analyzer + scheduler smoke
+gcloud run jobs execute lighter-mm-analyzer --region=asia-northeast1 --wait
+gcloud scheduler jobs run lighter-mm-analyzer-schedule --location=asia-northeast1
+gcloud run jobs executions list --job=lighter-mm-analyzer --region=asia-northeast1 --limit=3
 ```
 
 ### Cost safety

@@ -90,7 +90,9 @@ def _load_run_state(backend, sync: DurableSync) -> RunState | None:
 def _last_successful_analysis_at(backend, sync: DurableSync) -> str | None:
     status = backend.download_json(sync.public_key("analysis_status.json"))
     if status and status.get("status") == "OK":
-        return status.get("generated_at")
+        return status.get("last_successful_analysis_at") or status.get("generated_at")
+    if status and status.get("last_successful_analysis_at"):
+        return status.get("last_successful_analysis_at")
     marker = backend.download_json(sync.final_analysis_marker_key())
     if marker:
         return marker.get("analysis_at")
@@ -106,6 +108,8 @@ def _publish_analysis_status(
     generated_at: str,
     error: str | None = None,
     last_successful_analysis_at: str | None = None,
+    started_at: str | None = None,
+    duration_seconds: float | None = None,
     start_ms: int | None = None,
     end_ms: int | None = None,
     book_rows: int = 0,
@@ -119,9 +123,12 @@ def _publish_analysis_status(
         "run_id": run_id,
         "generated_at": generated_at,
     }
+    if started_at:
+        payload["started_at"] = started_at
     if status == "OK":
         payload.update(
             {
+                "last_successful_analysis_at": last_successful_analysis_at or generated_at,
                 "start_ms": start_ms,
                 "end_ms": end_ms,
                 "book_rows": book_rows,
@@ -131,6 +138,10 @@ def _publish_analysis_status(
                 "candidates": candidates,
             }
         )
+        if duration_seconds is not None:
+            payload["duration_seconds"] = duration_seconds
+    elif status == "RUNNING":
+        pass
     else:
         payload["error"] = error
         if last_successful_analysis_at:
@@ -201,10 +212,27 @@ def run_cloud_analyze(settings: Settings) -> int:
     renew_thread.start()
 
     execution_start_ms = int(time.time() * 1000)
-    generated_at = now_iso()
+    execution_start = time.time()
+    started_at = now_iso()
+    generated_at = started_at
     last_ok = _last_successful_analysis_at(backend, sync)
 
     try:
+        _publish_analysis_status(
+            backend,
+            sync,
+            status="RUNNING",
+            run_id=run_id,
+            generated_at=generated_at,
+            started_at=started_at,
+        )
+        log.info(
+            "analysis_started run_id=%s type=%s last_successful_analysis_at=%s",
+            run_id,
+            request_type,
+            last_ok,
+        )
+
         state = _load_run_state(backend, sync)
         if state is None:
             raise RuntimeError(f"run state missing for {run_id}")
@@ -244,12 +272,17 @@ def run_cloud_analyze(settings: Settings) -> int:
 
         scored = result.get("scored") or []
         candidates = [s for s in scored if s.candidate]
+        completed_at = now_iso()
+        duration_seconds = time.time() - execution_start
         _publish_analysis_status(
             backend,
             sync,
             status="OK",
             run_id=run_id,
-            generated_at=generated_at,
+            generated_at=completed_at,
+            last_successful_analysis_at=completed_at,
+            started_at=started_at,
+            duration_seconds=duration_seconds,
             start_ms=start_ms,
             end_ms=end_ms,
             book_rows=int(result.get("book_row_count") or 0),
@@ -282,20 +315,31 @@ def run_cloud_analyze(settings: Settings) -> int:
             )
 
         log.info(
-            "analysis completed run_id=%s markets=%s candidates=%s",
+            "analysis_completed run_id=%s markets=%s candidates=%s book_rows=%s "
+            "duration_seconds=%.1f",
             run_id,
             len(scored),
             len(candidates),
+            int(result.get("book_row_count") or 0),
+            duration_seconds,
         )
         return 0
     except Exception as exc:  # noqa: BLE001
-        log.exception("analysis failed: %s", exc)
+        failed_at = now_iso()
+        duration_seconds = time.time() - execution_start
+        log.exception(
+            "analysis_failed run_id=%s error=%s duration_seconds=%.1f",
+            run_id,
+            exc,
+            duration_seconds,
+        )
         _publish_analysis_status(
             backend,
             sync,
             status="ERROR",
             run_id=run_id,
-            generated_at=generated_at,
+            generated_at=failed_at,
+            started_at=started_at,
             error=str(exc),
             last_successful_analysis_at=last_ok,
         )

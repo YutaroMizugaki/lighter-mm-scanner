@@ -19,11 +19,13 @@ export type CollectorStatus = {
 };
 
 export type AnalysisStatus = {
-  status: string;
-  run_id: string;
+  status: "RUNNING" | "OK" | "ERROR" | string;
+  run_id: string | null;
   generated_at: string;
-  error?: string;
-  last_successful_analysis_at?: string;
+  started_at?: string | null;
+  error?: string | null;
+  last_successful_analysis_at?: string | null;
+  duration_seconds?: number | null;
   start_ms?: number;
   end_ms?: number;
   book_rows?: number;
@@ -218,14 +220,28 @@ export function effectiveAnalysisStatus(
 ): { status: string; stale: boolean } {
   if (!analysis) return { status: "UNKNOWN", stale: true };
   if (analysis.status === "ERROR") return { status: "ERROR", stale: false };
-  const stamp = analysis.generated_at;
+  if (analysis.status === "RUNNING") return { status: "RUNNING", stale: false };
+  const stamp =
+    analysis.last_successful_analysis_at || analysis.generated_at || null;
   if (!stamp) return { status: analysis.status, stale: true };
   const ageMin = (Date.now() - new Date(stamp).getTime()) / 60_000;
   const stale = ageMin > staleMinutes;
   if (stale && analysis.status === "OK") {
-    return { status: "ANALYSIS STALE", stale: true };
+    return { status: "STALE", stale: true };
   }
+  if (analysis.status === "OK") return { status: "OK", stale: false };
   return { status: analysis.status, stale };
+}
+
+/** Timestamp to display for last successful analysis (OK or preserved after ERROR). */
+export function analysisDisplayTimestamp(
+  analysis: AnalysisStatus | null,
+): string | null {
+  if (!analysis) return null;
+  return (
+    analysis.last_successful_analysis_at ||
+    (analysis.status === "OK" ? analysis.generated_at : null)
+  );
 }
 
 /**
@@ -253,15 +269,27 @@ export function effectiveStatus(
   return baked;
 }
 
-export function statusHealthNote(status: string): string | null {
-  if (status === "OFFLINE") {
-    return "Collector sync has not succeeded for >40m.";
+export function statusHealthNote(
+  status: string,
+  scope: "collector" | "analysis" = "collector",
+): string | null {
+  if (scope === "collector") {
+    if (status === "OFFLINE") {
+      return "Collector sync has not succeeded for >40m.";
+    }
+    if (status === "STALE") {
+      return "Collector sync is older than 20m.";
+    }
+    return null;
+  }
+  if (status === "ERROR") {
+    return "Analyzer run failed — see analysis_status.json error.";
   }
   if (status === "STALE") {
-    return "Collector sync is older than 20m.";
+    return "Analysis results are older than 30m (expected cadence: 15m).";
   }
-  if (status === "ANALYSIS STALE") {
-    return "Analysis results are older than the expected cadence.";
+  if (status === "UNKNOWN") {
+    return "analysis_status.json missing or unreadable.";
   }
   return null;
 }

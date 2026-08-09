@@ -1,7 +1,7 @@
 import {
+  analysisDisplayTimestamp,
   effectiveAnalysisStatus,
   effectiveCollectorStatus,
-  effectiveStatus,
   fmt,
   fmtJst,
   getAnalysisStatusResult,
@@ -44,7 +44,7 @@ export default async function HomePage() {
         <h2>{missing ? "No latest.json yet" : "Failed to load latest.json"}</h2>
         <p className="muted">
           {missing
-            ? "Waiting for the collector to publish dashboard aggregates. Check Cloud Logging / "
+            ? "Waiting for the analyzer to publish dashboard aggregates. Check Cloud Logging / "
             : "Could not fetch public dashboard JSON. "}
           {!missing && (
             <>
@@ -54,7 +54,7 @@ export default async function HomePage() {
           )}
           {missing && (
             <>
-              <code>lighter-mm run-status</code>.
+              <code>lighter-mm run-status</code> or trigger the analyzer job manually.
             </>
           )}
         </p>
@@ -63,13 +63,12 @@ export default async function HomePage() {
   }
 
   const overview = overviewResult.data;
-  const collectorStatus = collectorResult.ok
-    ? effectiveCollectorStatus(collectorResult.data)
+  const collectorData = collectorResult.ok ? collectorResult.data : null;
+  const collectorStatus = collectorData
+    ? effectiveCollectorStatus(collectorData)
     : null;
-  const analysisFreshness = analysisStatusResult.ok
-    ? effectiveAnalysisStatus(analysisStatusResult.data)
-    : effectiveAnalysisStatus(null);
-  const status = effectiveStatus(overview);
+  const analysisData = analysisStatusResult.ok ? analysisStatusResult.data : null;
+  const analysisFreshness = effectiveAnalysisStatus(analysisData);
   const markets = marketsResult.ok ? marketsResult.data.markets ?? [] : [];
   const marketsFetchFailed = !marketsResult.ok;
 
@@ -85,30 +84,43 @@ export default async function HomePage() {
     .slice(0, 12);
   const discovered = overview.markets_discovered;
   const analyzed = overview.markets_analyzed ?? overview.markets;
-  const staleNote = statusHealthNote(status);
-  const collectorNote = collectorStatus ? statusHealthNote(collectorStatus) : null;
-  const analysisNote = statusHealthNote(analysisFreshness.status);
-  const flushAt = overview.last_successful_flush || overview.last_update;
-  const collectorSyncAt = collectorResult.ok
-    ? collectorResult.data.last_successful_sync
+  const collectorNote = collectorStatus
+    ? statusHealthNote(collectorStatus, "collector")
     : null;
+  const analysisNote = statusHealthNote(analysisFreshness.status, "analysis");
+  const collectorSyncAt = collectorData?.last_successful_sync ?? null;
+  const lastAnalysisAt = analysisDisplayTimestamp(analysisData);
+  const analysisError = analysisData?.status === "ERROR" ? analysisData.error : null;
   const ws = overview.ws;
+
+  const showHealthBanner =
+    collectorStatus === "DEGRADED" ||
+    collectorStatus === "STALE" ||
+    collectorStatus === "OFFLINE" ||
+    analysisFreshness.status === "ERROR" ||
+    analysisFreshness.status === "STALE" ||
+    analysisFreshness.status === "UNKNOWN" ||
+    healthWarnings.length > 0 ||
+    analysisError ||
+    collectorNote ||
+    analysisNote ||
+    marketsFetchFailed;
 
   return (
     <>
-      {(status === "DEGRADED" ||
-        status === "STALE" ||
-        status === "OFFLINE" ||
-        healthWarnings.length > 0 ||
-        overview.analysis_error ||
-        staleNote ||
-        marketsFetchFailed) && (
+      {showHealthBanner && (
         <section className="note">
           <strong>Data health:</strong>{" "}
-          {overview.analysis_error ||
+          {analysisError ||
             healthWarnings[0] ||
-            staleNote ||
-            "Collector flush is fresh but analysis is empty."}
+            analysisNote ||
+            collectorNote ||
+            "Check collector and analyzer status."}
+          {analysisError && lastAnalysisAt && (
+            <p className="muted" style={{ marginTop: "0.4rem", fontSize: "0.85rem" }}>
+              Last successful analysis: {fmtJst(lastAnalysisAt)}
+            </p>
+          )}
           {marketsFetchFailed && (
             <p className="muted" style={{ marginTop: "0.4rem", fontSize: "0.85rem" }}>
               Dashboard data fetch failed. {marketsResult.error}
@@ -121,17 +133,12 @@ export default async function HomePage() {
               ))}
             </ul>
           )}
-          {staleNote && healthWarnings[0] !== staleNote && !overview.analysis_error && (
-            <p className="muted" style={{ marginTop: "0.4rem" }}>
-              {staleNote}
-            </p>
-          )}
-          {collectorNote && (
+          {collectorNote && !analysisError && (
             <p className="muted" style={{ marginTop: "0.4rem" }}>
               Collector: {collectorNote}
             </p>
           )}
-          {analysisNote && (
+          {analysisNote && !analysisError && (
             <p className="muted" style={{ marginTop: "0.4rem" }}>
               Analysis: {analysisNote}
             </p>
@@ -145,22 +152,20 @@ export default async function HomePage() {
             <div className={`value status-${collectorStatus || "UNKNOWN"}`}>
               {collectorStatus || "UNKNOWN"}
             </div>
-            {collectorSyncAt && (
-              <div className="muted" style={{ fontSize: "0.8rem" }}>
-                sync {fmtJst(collectorSyncAt)}
-              </div>
-            )}
+            <div className="label" style={{ marginTop: "0.5rem" }}>Last Sync</div>
+            <div className="muted" style={{ fontSize: "0.85rem" }}>
+              {fmtJst(collectorSyncAt)}
+            </div>
           </div>
           <div className="kpi">
             <div className="label">Analysis</div>
             <div className={`value status-${analysisFreshness.status}`}>
               {analysisFreshness.status}
             </div>
-            {analysisStatusResult.ok && (
-              <div className="muted" style={{ fontSize: "0.8rem" }}>
-                {fmtJst(analysisStatusResult.data.generated_at)}
-              </div>
-            )}
+            <div className="label" style={{ marginTop: "0.5rem" }}>Last Analysis</div>
+            <div className="muted" style={{ fontSize: "0.85rem" }}>
+              {fmtJst(lastAnalysisAt)}
+            </div>
           </div>
           <div className="kpi">
             <div className="label">Run</div>
@@ -183,12 +188,6 @@ export default async function HomePage() {
             <div className="label">Coverage</div>
             <div className="value">
               {overview.coverage_pct != null ? `${overview.coverage_pct.toFixed(1)}%` : "—"}
-            </div>
-          </div>
-          <div className="kpi">
-            <div className="label">Last Update</div>
-            <div className="value" style={{ fontSize: "0.95rem" }}>
-              {fmtJst(flushAt)}
             </div>
           </div>
         </div>
