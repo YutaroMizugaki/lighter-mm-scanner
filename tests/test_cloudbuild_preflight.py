@@ -6,6 +6,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLOUDBUILD = ROOT / "cloudbuild.yaml"
+AUDIT_LIB = ROOT / "scripts" / "gcp_audit_lib.sh"
+DOCTOR = ROOT / "scripts" / "gcp_doctor.sh"
 
 
 def test_cloudbuild_has_no_enable_apis_step() -> None:
@@ -39,13 +41,42 @@ def test_bootstrap_script_exists() -> None:
     assert preflight.exists()
     assert "gcloud services enable" in bootstrap.read_text(encoding="utf-8")
     preflight_text = preflight.read_text(encoding="utf-8")
-    assert "fail_api_not_enabled" in preflight_text
-    # Preflight may echo enable guidance, but must not execute services enable itself.
+    assert "gcp_audit_lib.sh" in preflight_text
+    # Preflight must remain read-only — no services enable execution.
     assert not any(
         line.strip().startswith("gcloud services enable")
         for line in preflight_text.splitlines()
         if not line.lstrip().startswith("echo")
     )
+
+
+def test_gcp_doctor_script_exists() -> None:
+    assert DOCTOR.exists()
+    assert AUDIT_LIB.exists()
+    doctor_text = DOCTOR.read_text(encoding="utf-8")
+    assert "gcp_audit_lib.sh" in doctor_text
+    assert "--from-trigger" in doctor_text
+    assert "SAFE TO RETRY CLOUD BUILD" in doctor_text
+
+
+def test_gcp_audit_lib_covers_deploy_prerequisites() -> None:
+    lib = AUDIT_LIB.read_text(encoding="utf-8")
+    for api in (
+        "run.googleapis.com",
+        "cloudscheduler.googleapis.com",
+        "artifactregistry.googleapis.com",
+        "storage.googleapis.com",
+    ):
+        assert api in lib
+    for role in (
+        "roles/run.admin",
+        "roles/iam.serviceAccountUser",
+        "roles/artifactregistry.writer",
+        "roles/cloudscheduler.admin",
+    ):
+        assert role in lib
+    assert "audit_check_scheduler_deploy_prereqs" in lib
+    assert "audit_check_cloud_build_iam" in lib
 
 
 def test_cloudbuild_automap_substitutions_enabled() -> None:
@@ -57,6 +88,8 @@ def test_cloudbuild_preflight_maps_project_id_to_env() -> None:
     text = CLOUDBUILD.read_text(encoding="utf-8")
     preflight_block = text[text.index("id: preflight") : text.index("id: deploy\n")]
     assert "PROJECT_ID=$PROJECT_ID" in preflight_block
+    assert "_WORKER_POOL=${_WORKER_POOL}" in preflight_block
+    assert "_ANALYZER_JOB=${_ANALYZER_JOB}" in preflight_block
 
 
 def test_preflight_script_validates_required_env_vars() -> None:
@@ -72,9 +105,9 @@ def test_preflight_script_validates_required_env_vars() -> None:
         assert f': "${{{var}:?' in preflight, f"missing validation for {var}"
 
 
-def test_preflight_api_failure_shows_enable_commands() -> None:
+def test_preflight_failure_shows_remediation_commands() -> None:
     preflight = (ROOT / "scripts" / "cloudbuild_preflight.sh").read_text(encoding="utf-8")
-    assert "fail_api_not_enabled" in preflight
-    assert "gcloud services enable" in preflight
-    assert "bootstrap_gcp.sh" in preflight
-    assert "After the API is enabled, retry the Cloud Build." in preflight
+    lib = AUDIT_LIB.read_text(encoding="utf-8")
+    assert "audit_print_failure_help" in preflight
+    assert "bootstrap_gcp.sh" in lib
+    assert "gcloud projects add-iam-policy-binding" in lib
