@@ -89,6 +89,18 @@ class CollectorApp:
         self._trades_baseline = int(self.state.trades_written or 0) if resumed else 0
         self._markouts_baseline = int(self.state.markouts_written or 0) if resumed else 0
         self.sync.bytes_uploaded = int(self.state.bytes_uploaded or 0) if resumed else 0
+        self._last_trade_ts = (
+            int(self.state.last_trade_timestamp_ms)
+            if resumed and self.state.last_trade_timestamp_ms is not None
+            else None
+        )
+        # WS runtime counters are process-local; keep durable totals as baselines.
+        self._drops_baseline = int(self.state.dropped_connections or 0) if resumed else 0
+        self._resyncs_baseline = int(self.state.book_resyncs or 0) if resumed else 0
+        self._gaps_baseline = int(self.state.nonce_gaps or 0) if resumed else 0
+        self.counters.dropped_connections = self._drops_baseline
+        self.counters.book_resyncs = self._resyncs_baseline
+        self.counters.nonce_gaps = self._gaps_baseline
         self.lock = LeaderLock(
             self.backend, self.sync.lock_key(), holder_id=self.holder_id, lease_seconds=120
         )
@@ -129,6 +141,23 @@ class CollectorApp:
                         git_sha=self.settings.git_sha,
                     )
                     return run_id, state, True
+                # Fail closed: never mint a new run_id while a running pointer
+                # exists — that orphans prior GCS parquet and resets the 72h clock.
+                started = active.get("started_at") or active.get("updated_at") or now_iso()
+                log.warning(
+                    "active_run pointer for %s has no state.json; reconstructing minimal state",
+                    run_id,
+                )
+                state = RunState(
+                    run_id=run_id,
+                    started_at=str(started),
+                    status="running",
+                    observation_target_hours=self.hours,
+                    collector_version=self.settings.collector_version,
+                    git_sha=self.settings.git_sha,
+                    holder_id=self.holder_id,
+                )
+                return run_id, state, True
 
         run_id = uuid.uuid4().hex[:12]
         state = RunState(
@@ -400,7 +429,14 @@ class CollectorApp:
             elapsed = max((datetime.now(UTC) - started).total_seconds() / 3600.0, 0.05)
         except ValueError:
             elapsed = 1.0
-        window = hours if final and self.hours else min(hours, max(elapsed, 0.1))
+        # Use the full target window only when the observation truly completed.
+        # SIGTERM/deploy also calls final=True; analyzing a 72h window at hour 5
+        # collapses coverage and wipes candidates until the next mid-run sync.
+        window = (
+            hours
+            if final and self._completed and self.hours
+            else min(hours, max(elapsed, 0.1))
+        )
         public_ok = False
         try:
             from lighter_mm.cloud.estimate import estimate_storage
@@ -521,7 +557,9 @@ class CollectorApp:
     async def _on_book(self, market_id: int, book: LocalOrderBook, _kind: str) -> None:
         mid = book.mid()
         if mid is not None:
-            self.mid_histories[market_id].add(utc_ms(), float(mid))
+            # Prefer exchange/book timestamp so markout horizons align with trade.ts
+            ts = book.last_message_at_ms or utc_ms()
+            self.mid_histories[market_id].add(ts, float(mid))
 
     async def _on_trade(self, trade: TradeEvent, symbol: str) -> None:
         hist = self.mid_histories.get(trade.market_id)
@@ -640,7 +678,9 @@ class CollectorApp:
             self.counters.samples_written = self.store.samples_written
             if self._ws:
                 prev_drops = self.counters.dropped_connections
-                self.counters.dropped_connections = self._ws.runtime.dropped_connections
+                self.counters.dropped_connections = (
+                    self._drops_baseline + self._ws.runtime.dropped_connections
+                )
                 if self.counters.dropped_connections > prev_drops:
                     log_event(
                         log,
@@ -649,12 +689,16 @@ class CollectorApp:
                         run_id=self.run_id,
                         detail=str(self.counters.dropped_connections),
                     )
-                if self._ws.runtime.book_resyncs > self.counters.book_resyncs:
+                prev_resyncs = self.counters.book_resyncs
+                self.counters.book_resyncs = (
+                    self._resyncs_baseline + self._ws.runtime.book_resyncs
+                )
+                if self.counters.book_resyncs > prev_resyncs:
                     log_event(log, "book_resync", "book resync", run_id=self.run_id)
-                if self._ws.runtime.nonce_gaps > self.counters.nonce_gaps:
+                prev_gaps = self.counters.nonce_gaps
+                self.counters.nonce_gaps = self._gaps_baseline + self._ws.runtime.nonce_gaps
+                if self.counters.nonce_gaps > prev_gaps:
                     log_event(log, "nonce_gap", "nonce gap", run_id=self.run_id)
-                self.counters.book_resyncs = self._ws.runtime.book_resyncs
-                self.counters.nonce_gaps = self._ws.runtime.nonce_gaps
                 self.counters.client_messages_sent = self._ws.runtime.client_messages_sent
                 self.counters.ws_ok = self._ws.runtime.connected_shards > 0
 

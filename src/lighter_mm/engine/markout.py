@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from lighter_mm.engine.mid_history import MidHistory
 from lighter_mm.models import TradeEvent
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -36,6 +39,7 @@ class MarkoutEngine:
         self.on_markout = on_markout
         self._pending: deque[PendingMarkout] = deque()
         self.max_pending = max_pending
+        self.dropped_pending = 0
 
     def on_trade(
         self,
@@ -48,7 +52,15 @@ class MarkoutEngine:
         if reference_mid is None or reference_mid <= 0:
             return
         if len(self._pending) >= self.max_pending:
-            self._pending.popleft()
+            dropped = self._pending.popleft()
+            # Visible so adverse-selection undercount is not silent on busy names.
+            log.warning(
+                "markout pending cap reached; dropped trade_id=%s market=%s remaining=%s",
+                dropped.trade.trade_id,
+                dropped.trade.market_id,
+                sorted(dropped.remaining),
+            )
+            self.dropped_pending += 1
         self._pending.append(
             PendingMarkout(
                 trade=trade,

@@ -59,6 +59,17 @@ def test_nonce_gap_triggers_false() -> None:
     assert book.synced is False
 
 
+def test_missing_begin_nonce_rejects_delta() -> None:
+    book = LocalOrderBook(market_id=0, symbol="ETH")
+    book.apply_snapshot(
+        {"nonce": 100, "begin_nonce": 0, "asks": [{"price": "1", "size": "1"}], "bids": []}
+    )
+    ok = book.apply_delta({"nonce": 110, "asks": [{"price": "1", "size": "2"}], "bids": []})
+    assert ok is False
+    assert book.synced is False
+    assert book.asks[__import__("decimal").Decimal("1")] == __import__("decimal").Decimal("1")
+
+
 def test_resync_clears_book() -> None:
     book = LocalOrderBook(market_id=0, symbol="ETH")
     book.apply_snapshot(
