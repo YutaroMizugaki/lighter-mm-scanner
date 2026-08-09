@@ -35,6 +35,8 @@ def test_public_json_mirrored_to_public_bucket(mock_client_cls: MagicMock, tmp_p
 
     private_blob.upload_from_string.assert_called_once()
     public_blob.upload_from_string.assert_called_once()
+    assert private_blob.cache_control == "public, max-age=60, must-revalidate"
+    assert public_blob.cache_control == "public, max-age=60, must-revalidate"
     assert backend.public_https_url("lighter-mm/public/latest.json").endswith(
         "/pub-bucket/lighter-mm/public/latest.json"
     )
