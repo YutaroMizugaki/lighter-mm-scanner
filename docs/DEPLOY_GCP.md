@@ -61,29 +61,29 @@ gcloud artifacts repositories create lighter-mm \
 
 ## 4) GCS buckets
 
-Use **two buckets** (recommended):
+Use **two buckets** (required for Vercel):
 
-1. Private raw data
-2. Public aggregates for the dashboard (JSON only)
+1. Private raw data (`GCS_BUCKET`) — keep **Public access prevention** on; never `allUsers`
+2. Public aggregates only (`GCS_PUBLIC_BUCKET`) — dashboard JSON; `allUsers` objectViewer OK
+
+> GCP does **not** allow IAM conditions on `allUsers`. Do not try to publish only a
+> prefix of the private bucket; use a separate public bucket instead.
 
 ```bash
 export PRIVATE_BUCKET="${PROJECT_ID}-lighter-mm"
 export PUBLIC_BUCKET="${PROJECT_ID}-lighter-mm-public"
 
-gcloud storage buckets create "gs://${PRIVATE_BUCKET}" --location="$REGION" --uniform-bucket-level-access
+gcloud storage buckets create "gs://${PRIVATE_BUCKET}" --location="$REGION" --uniform-bucket-level-access --public-access-prevention
 gcloud storage buckets create "gs://${PUBLIC_BUCKET}" --location="$REGION" --uniform-bucket-level-access
 
-# Public read for aggregate JSON only
+# Public read for aggregate JSON bucket only (no conditions — whole bucket is public JSON)
 gcloud storage buckets add-iam-policy-binding "gs://${PUBLIC_BUCKET}" \
   --member=allUsers \
   --role=roles/storage.objectViewer
 ```
 
-For MVP simplicity the collector can write public objects under
-`gs://$PRIVATE_BUCKET/lighter-mm/public/` and you can either:
-
-- grant public objectViewer on that bucket (only if you never put secrets/raw there), or
-- set `GCS_BUCKET` to the private bucket and keep raw under `runs/` while making `public/` objects public via IAM conditions / separate bucket.
+Collector writes raw Parquet to the private bucket and mirrors `lighter-mm/public/*.json`
+to `GCS_PUBLIC_BUCKET` when that env is set.
 
 **Do not make raw `trades/` / `books/` publicly readable.**
 
@@ -96,8 +96,12 @@ gcloud iam service-accounts create lighter-mm-collector \
 
 export COLLECTOR_SA="lighter-mm-collector@${PROJECT_ID}.iam.gserviceaccount.com"
 
-# Object admin on private bucket (read/write run data + state)
+# Object admin on private + public buckets (raw + dashboard JSON)
 gcloud storage buckets add-iam-policy-binding "gs://${PRIVATE_BUCKET}" \
+  --member="serviceAccount:${COLLECTOR_SA}" \
+  --role=roles/storage.objectAdmin
+
+gcloud storage buckets add-iam-policy-binding "gs://${PUBLIC_BUCKET}" \
   --member="serviceAccount:${COLLECTOR_SA}" \
   --role=roles/storage.objectAdmin
 
@@ -136,6 +140,7 @@ Console path (recommended for private repos):
      - `_AR_REPO=lighter-mm`
      - `_WORKER_POOL=lighter-mm-collector`
      - `_GCS_BUCKET=<PRIVATE_BUCKET>`
+     - `_GCS_PUBLIC_BUCKET=<PUBLIC_BUCKET>`
      - `_SERVICE_ACCOUNT=<COLLECTOR_SA>`
      - `_CPU=1`
      - `_MEMORY=1Gi`
@@ -161,7 +166,7 @@ gcloud run worker-pools deploy lighter-mm-collector \
   --memory=1Gi \
   --instances=1 \
   --service-account="$COLLECTOR_SA" \
-  --set-env-vars="ENVIRONMENT=cloud,GCS_BUCKET=${PRIVATE_BUCKET},GCP_PROJECT_ID=${PROJECT_ID},GCP_REGION=${REGION},RUN_TARGET_HOURS=72,STRUCTURED_LOGGING=true,LIGHTER_MM_NO_DASHBOARD=1"
+  --set-env-vars="ENVIRONMENT=cloud,GCS_BUCKET=${PRIVATE_BUCKET},GCS_PUBLIC_BUCKET=${PUBLIC_BUCKET},GCP_PROJECT_ID=${PROJECT_ID},GCP_REGION=${REGION},RUN_TARGET_HOURS=72,STRUCTURED_LOGGING=true,LIGHTER_MM_NO_DASHBOARD=1"
 ```
 
 ## 8) Verify collector
@@ -186,7 +191,7 @@ gcloud run worker-pools deploy lighter-mm-collector \
   --image="${REGION}-docker.pkg.dev/${PROJECT_ID}/lighter-mm/collector:latest" \
   --cpu=1 --memory=1Gi --instances=1 \
   --service-account="$COLLECTOR_SA" \
-  --set-env-vars="ENVIRONMENT=cloud,GCS_BUCKET=${PRIVATE_BUCKET},GCP_PROJECT_ID=${PROJECT_ID},RUN_TARGET_HOURS=72,STRUCTURED_LOGGING=true,LIGHTER_MM_NO_DASHBOARD=1"
+  --set-env-vars="ENVIRONMENT=cloud,GCS_BUCKET=${PRIVATE_BUCKET},GCS_PUBLIC_BUCKET=${PUBLIC_BUCKET},GCP_PROJECT_ID=${PROJECT_ID},RUN_TARGET_HOURS=72,STRUCTURED_LOGGING=true,LIGHTER_MM_NO_DASHBOARD=1"
 
 # Confirm same run_id continues
 gcloud storage cat "gs://${PRIVATE_BUCKET}/lighter-mm/state/active_run.json"
@@ -200,7 +205,7 @@ Order books are always rebuilt from fresh Lighter snapshots after restart (never
 2. Root Directory: `dashboard`
 3. Framework: Next.js
 4. Env:
-   - `NEXT_PUBLIC_DATA_BASE_URL=https://storage.googleapis.com/<BUCKET>/lighter-mm/public`
+   - `NEXT_PUBLIC_DATA_BASE_URL=https://storage.googleapis.com/<PUBLIC_BUCKET>/lighter-mm/public`
 5. Production branch: `main` (PR → Preview)
 
 Collector deploy is independent of Vercel build success.

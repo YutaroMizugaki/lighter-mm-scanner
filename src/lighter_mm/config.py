@@ -60,6 +60,8 @@ class Settings(BaseSettings):
     gcp_project_id: str | None = None
     gcp_region: str = "asia-northeast1"
     gcs_bucket: str | None = None
+    # Optional separate bucket for dashboard JSON (allUsers objectViewer, no raw data).
+    gcs_public_bucket: str | None = None
     gcs_prefix: str = "lighter-mm"
     gcs_public_prefix: str = "lighter-mm/public"
 
@@ -113,6 +115,7 @@ class Settings(BaseSettings):
             "gcp_project_id": ("GCP_PROJECT_ID", "LIGHTER_MM_GCP_PROJECT_ID"),
             "gcp_region": ("GCP_REGION", "LIGHTER_MM_GCP_REGION"),
             "gcs_bucket": ("GCS_BUCKET", "LIGHTER_MM_GCS_BUCKET"),
+            "gcs_public_bucket": ("GCS_PUBLIC_BUCKET", "LIGHTER_MM_GCS_PUBLIC_BUCKET"),
             "git_sha": ("GIT_SHA", "LIGHTER_MM_GIT_SHA", "COMMIT_SHA"),
             "structured_logging": ("STRUCTURED_LOGGING", "LIGHTER_MM_STRUCTURED_LOGGING"),
             "data_dir": ("DATA_DIR", "LIGHTER_MM_DATA_DIR"),
@@ -172,5 +175,6 @@ def build_storage_backend(settings: Settings):
             local_root=local_root,
             project_id=settings.gcp_project_id,
             make_public_prefix=settings.gcs_public_prefix.rstrip("/") + "/",
+            public_bucket_name=settings.gcs_public_bucket,
         )
     return LocalStorageBackend(settings.data_dir)

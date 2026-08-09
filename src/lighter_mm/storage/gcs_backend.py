@@ -20,15 +20,20 @@ class GCSStorageBackend(StorageBackend):
         local_root: Path,
         project_id: str | None = None,
         make_public_prefix: str | None = "lighter-mm/public/",
+        public_bucket_name: str | None = None,
     ) -> None:
         from google.cloud import storage  # lazy import
 
         self.bucket_name = bucket_name
+        self.public_bucket_name = public_bucket_name or None
         self.local_root = local_root
         self.local_root.mkdir(parents=True, exist_ok=True)
         self.make_public_prefix = make_public_prefix
         self._client = storage.Client(project=project_id)
         self._bucket = self._client.bucket(bucket_name)
+        self._public_bucket = (
+            self._client.bucket(public_bucket_name) if public_bucket_name else None
+        )
 
     def local_data_dir(self) -> Path:
         return self.local_root
@@ -36,17 +41,31 @@ class GCSStorageBackend(StorageBackend):
     def upload_file(self, local_path: Path, remote_key: str, *, content_type: str | None = None) -> str:
         blob = self._bucket.blob(remote_key)
         blob.upload_from_filename(str(local_path), content_type=content_type)
-        self._maybe_public(blob, remote_key)
+        # Raw parquet / files stay on the private bucket only.
         uri = self.uri_for(remote_key)
         log.info("gcs_uploaded %s", uri, extra={"event": "gcs_uploaded", "path": remote_key})
         return uri
 
     def upload_json(self, remote_key: str, payload: dict[str, Any], *, public: bool = False) -> str:
-        blob = self._bucket.blob(remote_key)
         data = json.dumps(payload, indent=2, default=str)
+        blob = self._bucket.blob(remote_key)
         blob.upload_from_string(data, content_type="application/json")
-        if public or (self.make_public_prefix and remote_key.startswith(self.make_public_prefix)):
-            self._try_make_public(blob)
+
+        want_public = public or (
+            self.make_public_prefix is not None and remote_key.startswith(self.make_public_prefix)
+        )
+        if want_public:
+            if self._public_bucket is not None:
+                pub = self._public_bucket.blob(remote_key)
+                pub.upload_from_string(data, content_type="application/json")
+                log.info(
+                    "gcs_public_uploaded %s",
+                    f"gs://{self.public_bucket_name}/{remote_key}",
+                    extra={"event": "gcs_uploaded", "path": remote_key},
+                )
+            else:
+                self._try_make_public(blob)
+
         uri = self.uri_for(remote_key)
         log.info("gcs_uploaded %s", uri, extra={"event": "gcs_uploaded", "path": remote_key})
         return uri
@@ -73,11 +92,8 @@ class GCSStorageBackend(StorageBackend):
         return f"gs://{self.bucket_name}/{remote_key}"
 
     def public_https_url(self, remote_key: str) -> str:
-        return f"https://storage.googleapis.com/{self.bucket_name}/{remote_key}"
-
-    def _maybe_public(self, blob: Any, remote_key: str) -> None:
-        if self.make_public_prefix and remote_key.startswith(self.make_public_prefix):
-            self._try_make_public(blob)
+        bucket = self.public_bucket_name or self.bucket_name
+        return f"https://storage.googleapis.com/{bucket}/{remote_key}"
 
     @staticmethod
     def _try_make_public(blob: Any) -> None:
@@ -85,7 +101,7 @@ class GCSStorageBackend(StorageBackend):
             blob.make_public()
         except Exception as exc:  # noqa: BLE001 — uniform bucket-level access may block ACL
             log.warning(
-                "make_public skipped for %s (%s); use IAM on public prefix/bucket instead",
+                "make_public skipped for %s (%s); set GCS_PUBLIC_BUCKET instead",
                 blob.name,
                 exc,
             )
