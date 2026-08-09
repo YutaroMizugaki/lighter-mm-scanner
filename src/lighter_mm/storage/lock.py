@@ -22,11 +22,9 @@ class LockInfo:
 
 
 class LeaderLock:
-    """Best-effort lease lock stored as JSON via StorageBackend.
+    """Lease lock stored as JSON via StorageBackend.
 
-    Uses create-if-absent + expiry. Renew periodically. Not a perfect
-    distributed lock, but sufficient to avoid dual collectors with
-    Worker Pool `--instances=1` plus deploy overlap.
+    Uses GCS generation preconditions when available (compare-and-swap).
     """
 
     def __init__(
@@ -41,6 +39,16 @@ class LeaderLock:
         self.lock_key = lock_key
         self.holder_id = holder_id or uuid.uuid4().hex
         self.lease_seconds = lease_seconds
+        self._generation: int | None = None
+
+    def _lock_payload(self, run_id: str, git_sha: str | None) -> dict:
+        info = LockInfo(
+            holder_id=self.holder_id,
+            run_id=run_id,
+            expires_at=(datetime.now(UTC) + timedelta(seconds=self.lease_seconds)).isoformat(),
+            git_sha=git_sha,
+        )
+        return info.__dict__
 
     def acquire(self, run_id: str, git_sha: str | None = None) -> bool:
         now = datetime.now(UTC)
@@ -55,39 +63,41 @@ class LeaderLock:
                     extra={"event": "leader_lock_busy"},
                 )
                 return False
-        info = LockInfo(
-            holder_id=self.holder_id,
-            run_id=run_id,
-            expires_at=(now + timedelta(seconds=self.lease_seconds)).isoformat(),
-            git_sha=git_sha,
+        payload = self._lock_payload(run_id, git_sha)
+        gen_match = 0 if not existing else None
+        ok = self.backend.compare_and_swap_json(
+            self.lock_key, payload, if_generation_match=gen_match
         )
-        self.backend.upload_json(self.lock_key, info.__dict__)
-        # Verify we won (simple compare-after-write)
-        verify = self.backend.download_json(self.lock_key)
-        ok = bool(verify and verify.get("holder_id") == self.holder_id)
+        if not ok:
+            # Fallback: non-atomic path for local backend
+            self.backend.upload_json(self.lock_key, payload)
+            verify = self.backend.download_json(self.lock_key)
+            ok = bool(verify and verify.get("holder_id") == self.holder_id)
         if ok:
-            log.info("leader lock acquired", extra={"event": "leader_lock_acquired", "run_id": run_id})
+            log.info(
+                "leader lock acquired",
+                extra={"event": "leader_lock_acquired", "run_id": run_id},
+            )
         return ok
 
     def renew(self, run_id: str, git_sha: str | None = None) -> bool:
         existing = self.backend.download_json(self.lock_key)
         if not existing or existing.get("holder_id") != self.holder_id:
             return self.acquire(run_id, git_sha=git_sha)
-        existing["expires_at"] = (
-            datetime.now(UTC) + timedelta(seconds=self.lease_seconds)
-        ).isoformat()
-        existing["run_id"] = run_id
-        if git_sha:
-            existing["git_sha"] = git_sha
-        self.backend.upload_json(self.lock_key, existing)
-        return True
+        payload = self._lock_payload(run_id, git_sha)
+        ok = self.backend.compare_and_swap_json(self.lock_key, payload)
+        if not ok:
+            self.backend.upload_json(self.lock_key, payload)
+            verify = self.backend.download_json(self.lock_key)
+            ok = bool(verify and verify.get("holder_id") == self.holder_id)
+        return ok
 
     def release(self) -> None:
         existing = self.backend.download_json(self.lock_key)
         if existing and existing.get("holder_id") == self.holder_id:
-            # Expire immediately
             existing["expires_at"] = datetime.now(UTC).isoformat()
             existing["released"] = True
+            self.backend.compare_and_swap_json(self.lock_key, existing)
             self.backend.upload_json(self.lock_key, existing)
             log.info("leader lock released", extra={"event": "leader_lock_released"})
 

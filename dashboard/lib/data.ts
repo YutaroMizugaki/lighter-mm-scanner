@@ -14,6 +14,9 @@ export type Overview = {
   last_successful_flush?: string | null;
   last_trade_at?: string | null;
   last_book_sample_at?: string | null;
+  last_usable_book_sample_at?: string | null;
+  last_book_row_at?: string | null;
+  trades_without_reference_mid?: number;
   git_sha: string | null;
   collector_version: string | null;
   analysis_error?: string | null;
@@ -22,6 +25,8 @@ export type Overview = {
   ws?: {
     connected_shards?: number;
     total_shards?: number;
+    planned_channels?: number;
+    acked_channels?: number;
     subscribed_channels?: number;
     dropped_connections?: number;
     subscription_errors?: number;

@@ -29,6 +29,9 @@ class CandidateThresholds:
     min_trades_per_hour: float = 30.0
     min_two_sided_depth_10bps_usd: float = 200.0
     min_median_spread_bps: float = 1.0
+    min_markout_samples_5s: int = 20
+    min_markout_samples_30s: int = 20
+    min_median_trades_per_minute: float | None = None
     min_markout_5s_median_bps: float = -5.0
     min_markout_30s_median_bps: float = -15.0
 
@@ -167,6 +170,22 @@ def score_markets(
     if not rows:
         return []
 
+    activity_median = [r.get("trades_per_minute_median") for r in rows]
+    activity_mean = [r.get("trades_per_minute_mean") for r in rows]
+    # Blend mean (70%) + median (30%) for cross-sectional activity rank.
+    activity_blend: list[float | None] = []
+    for i in range(len(rows)):
+        m = activity_mean[i]
+        med = activity_median[i]
+        if m is not None and med is not None:
+            activity_blend.append(0.7 * float(m) + 0.3 * float(med))
+        elif m is not None:
+            activity_blend.append(float(m))
+        elif med is not None:
+            activity_blend.append(float(med))
+        else:
+            activity_blend.append(None)
+
     spreads = [r.get("median_spread_bps") for r in rows]
     # Prefer moderate spreads: score distance from 0 but cap extreme wide spreads
     spread_for_rank = []
@@ -177,7 +196,7 @@ def score_markets(
             # diminishing returns above 20bp
             spread_for_rank.append(min(float(s), 20.0))
 
-    activity = [r.get("trades_per_minute_median") for r in rows]
+    activity = activity_blend
     depth = [r.get("median_two_sided_depth_10bps_usd") for r in rows]
     markout = [r.get("maker_markout_5s_median_bps") for r in rows]
     persistence = [r.get("pct_time_spread_ge_5bps") for r in rows]
@@ -245,19 +264,32 @@ def score_markets(
 
         score = max(0.0, min(100.0, score))
 
-        tpm = float(row.get("trades_per_minute_median") or 0.0)
-        min_tpm = thresholds.min_trades_per_hour / 60.0
-        # Missing markouts must not pass — that treated "no adverse-selection
-        # evidence yet" as a free candidate pass for thin/new markets.
+        tpm_median = float(row.get("trades_per_minute_median") or 0.0)
+        tpm_mean = float(row.get("trades_per_minute_mean") or 0.0)
+        hours_obs = max(row.get("observation_hours") or 1.0, 0.01)
+        trades_per_hour = (row.get("total_trade_count") or 0) / hours_obs
+        trades_per_hour_from_mean = tpm_mean * 60.0
+        activity_ok = (
+            trades_per_hour >= thresholds.min_trades_per_hour
+            or trades_per_hour_from_mean >= thresholds.min_trades_per_hour
+        )
+        if thresholds.min_median_trades_per_minute is not None:
+            activity_ok = activity_ok and tpm_median >= thresholds.min_median_trades_per_minute
+
+        m5_count = int(row.get("markout_5s_count") or 0)
+        m30_count = int(row.get("markout_30s_count") or 0)
+
         candidate = (
             cov >= thresholds.min_coverage_pct
-            and tpm >= min_tpm
+            and activity_ok
             and d10 >= thresholds.min_two_sided_depth_10bps_usd
             and (row.get("median_spread_bps") or 0) >= thresholds.min_median_spread_bps
             and m5 is not None
             and m5 >= thresholds.min_markout_5s_median_bps
             and m30 is not None
             and m30 >= thresholds.min_markout_30s_median_bps
+            and m5_count >= thresholds.min_markout_samples_5s
+            and m30_count >= thresholds.min_markout_samples_30s
         )
         # Also require activity percentile not bottom 20% among peers when enough markets
         if len(rows) >= 10 and pr_act < 20:

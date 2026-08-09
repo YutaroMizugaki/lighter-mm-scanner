@@ -8,6 +8,9 @@ from dataclasses import dataclass, field
 
 from lighter_mm.models import TradeEvent, TradeType
 
+# Rolling TPM window — prune timestamps older than this.
+TPM_RETENTION_SECONDS = 120
+
 
 @dataclass
 class MinuteBucket:
@@ -55,7 +58,7 @@ class TradeActivityTracker:
     def __init__(self) -> None:
         self._buckets: dict[int, dict[int, MinuteBucket]] = defaultdict(dict)
         self._last_ts: dict[int, int] = {}
-        self._recent_tpm: dict[int, deque[int]] = defaultdict(lambda: deque(maxlen=60))
+        self._recent_tpm: dict[int, deque[int]] = defaultdict(deque)
 
     def on_trade(self, trade: TradeEvent) -> MinuteBucket:
         minute = (trade.timestamp_ms // 60_000) * 60_000
@@ -70,7 +73,6 @@ class TradeActivityTracker:
             return bucket
 
         if trade.type != TradeType.TRADE:
-            # deleverage / market-settlement tracked as liquidation-like specials
             bucket.liquidation_count += 1
             bucket.liquidation_volume_usd += float(trade.usd_amount)
             return bucket
@@ -91,10 +93,19 @@ class TradeActivityTracker:
         if prev is not None and trade.timestamp_ms >= prev:
             bucket.intertrade_ms.append(float(trade.timestamp_ms - prev))
         self._last_ts[trade.market_id] = trade.timestamp_ms
-        self._recent_tpm[trade.market_id].append(trade.timestamp_ms)
+        q = self._recent_tpm[trade.market_id]
+        q.append(trade.timestamp_ms)
+        self._prune_tpm(trade.market_id, trade.timestamp_ms)
         return bucket
 
+    def _prune_tpm(self, market_id: int, now_ms: int) -> None:
+        cutoff = now_ms - TPM_RETENTION_SECONDS * 1000
+        q = self._recent_tpm[market_id]
+        while q and q[0] < cutoff:
+            q.popleft()
+
     def trades_per_minute(self, market_id: int, now_ms: int, window_s: int = 60) -> float:
+        self._prune_tpm(market_id, now_ms)
         cutoff = now_ms - window_s * 1000
         xs = [t for t in self._recent_tpm[market_id] if t >= cutoff]
         return len(xs) * (60.0 / window_s)

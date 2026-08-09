@@ -60,7 +60,9 @@ class WsRuntimeStats:
     client_messages_sent: int = 0
     connected_shards: int = 0
     total_shards: int = 0
-    subscribed_channels: int = 0
+    planned_channels: int = 0
+    acked_channels: int = 0
+    subscribed_channels: int = 0  # compat alias for acked_channels
     seen_trade_ids: int = 0
     subscription_errors: int = 0
     trade_parse_errors: int = 0
@@ -71,7 +73,9 @@ class WsRuntimeStats:
         return {
             "connected_shards": self.connected_shards,
             "total_shards": self.total_shards,
-            "subscribed_channels": self.subscribed_channels,
+            "planned_channels": self.planned_channels,
+            "acked_channels": self.acked_channels,
+            "subscribed_channels": self.acked_channels,
             "dropped_connections": self.dropped_connections,
             "subscription_errors": self.subscription_errors,
             "trade_parse_errors": self.trade_parse_errors,
@@ -79,6 +83,16 @@ class WsRuntimeStats:
             "nonce_gaps": self.nonce_gaps,
             "last_ws_error": self.last_ws_error,
         }
+
+    @property
+    def ws_healthy(self) -> bool:
+        if self.total_shards <= 0:
+            return False
+        return (
+            self.connected_shards == self.total_shards
+            and self.acked_channels == self.planned_channels
+            and self.planned_channels > 0
+        )
 
 
 @dataclass
@@ -100,6 +114,7 @@ class WsManager:
         self._resync_queues: dict[int, asyncio.Queue[int]] = {}
         self._tasks: list[asyncio.Task] = []
         self._shard_conns: dict[int, ClientConnection | None] = {}
+        self._shard_acked: dict[int, set[str]] = {}
         for mid, meta in self.markets.items():
             self.books.setdefault(mid, LocalOrderBook(market_id=mid, symbol=meta.symbol))
 
@@ -128,8 +143,10 @@ class WsManager:
         self._stop.clear()
         shards = self.plan_shards(self.markets.keys())
         self.runtime.total_shards = len(shards)
-        # Planned channel count (stable across reconnects; not a cumulative counter).
-        self.runtime.subscribed_channels = sum(len(s.channels()) for s in shards)
+        self.runtime.planned_channels = sum(len(s.channels()) for s in shards)
+        self.runtime.acked_channels = 0
+        self.runtime.subscribed_channels = 0
+        self._shard_acked = {s.shard_id: set() for s in shards}
         for shard in shards:
             n_chans = len(shard.channels())
             if n_chans > self.settings.max_subscriptions_per_connection:
@@ -170,6 +187,16 @@ class WsManager:
         await self.stop()
         await self.start()
 
+    def _sync_acked_channels(self) -> None:
+        self.runtime.acked_channels = sum(len(s) for s in self._shard_acked.values())
+        self.runtime.subscribed_channels = self.runtime.acked_channels
+
+    def _record_subscription_ack(self, shard_id: int, channel: str) -> None:
+        if not channel:
+            return
+        self._shard_acked.setdefault(shard_id, set()).add(channel)
+        self._sync_acked_channels()
+
     async def _send(self, ws: ClientConnection, payload: dict) -> None:
         await self._msg_bucket.acquire(1)
         await ws.send(json.dumps(payload))
@@ -196,6 +223,8 @@ class WsManager:
                     max_queue=4096,
                 ) as ws:
                     self._shard_conns[shard.shard_id] = ws
+                    self._shard_acked[shard.shard_id] = set()
+                    self._sync_acked_channels()
                     self.runtime.connected_shards = sum(
                         1 for c in self._shard_conns.values() if c is not None
                     )
@@ -225,6 +254,8 @@ class WsManager:
                         resync_task.cancel()
                         await asyncio.gather(sub_task, resync_task, return_exceptions=True)
                         self._shard_conns[shard.shard_id] = None
+                        self._shard_acked[shard.shard_id] = set()
+                        self._sync_acked_channels()
                         self.runtime.connected_shards = sum(
                             1 for c in self._shard_conns.values() if c is not None
                         )
@@ -295,6 +326,10 @@ class WsManager:
             return
         if mtype == "connected":
             return
+
+        if isinstance(mtype, str) and mtype.startswith("subscribed/"):
+            channel = str(msg.get("channel") or "")
+            self._record_subscription_ack(shard.shard_id, channel)
 
         # Explicit Lighter error / failed replies only — unknown types are ignored
         # (schema evolves; do not treat every unfamiliar message as an error).

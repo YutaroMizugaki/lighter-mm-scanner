@@ -39,3 +39,15 @@ class StorageBackend(ABC):
     @abstractmethod
     def uri_for(self, remote_key: str) -> str:
         pass
+
+    def compare_and_swap_json(
+        self,
+        remote_key: str,
+        payload: dict[str, Any],
+        *,
+        if_generation_match: int | None = None,
+    ) -> bool:
+        """Atomic JSON upload when supported; default falls back to upload + verify."""
+        self.upload_json(remote_key, payload)
+        verify = self.download_json(remote_key)
+        return bool(verify == payload)

@@ -12,6 +12,9 @@ from lighter_mm.models import TradeEvent
 
 log = logging.getLogger(__name__)
 
+# Wait for forward order-book sample before falling back to before-mid.
+FORWARD_WAIT_MS = 2500
+
 
 @dataclass
 class PendingMarkout:
@@ -34,11 +37,13 @@ class MarkoutEngine:
         horizons: list[int],
         on_markout: Callable[[dict], None],
         max_pending: int = 200_000,
+        forward_wait_ms: int = FORWARD_WAIT_MS,
     ) -> None:
         self.horizons = sorted(horizons)
         self.on_markout = on_markout
         self._pending: deque[PendingMarkout] = deque()
         self.max_pending = max_pending
+        self.forward_wait_ms = forward_wait_ms
         self.dropped_pending = 0
 
     def on_trade(
@@ -53,7 +58,6 @@ class MarkoutEngine:
             return
         if len(self._pending) >= self.max_pending:
             dropped = self._pending.popleft()
-            # Visible so adverse-selection undercount is not silent on busy names.
             log.warning(
                 "markout pending cap reached; dropped trade_id=%s market=%s remaining=%s",
                 dropped.trade.trade_id,
@@ -85,15 +89,14 @@ class MarkoutEngine:
                 target = item.trade.timestamp_ms + h * 1000
                 if now_ms < target:
                     continue
-                future = hist.mid_at(target, tolerance_ms=2500)
-                if future is None:
-                    # Give up after long wait past horizon
+                future_mid = self._resolve_future_mid(hist, target, now_ms)
+                if future_mid is None:
                     if now_ms > target + 10_000:
                         done_horizons.append(h)
                     continue
                 bps = self.compute_markout_bps(
                     trade_price=float(item.trade.price),
-                    future_mid=future,
+                    future_mid=future_mid,
                     reference_mid=item.reference_mid,
                     is_maker_ask=item.trade.is_maker_ask,
                 )
@@ -106,7 +109,7 @@ class MarkoutEngine:
                         "horizon_s": h,
                         "trade_price": float(item.trade.price),
                         "reference_mid": item.reference_mid,
-                        "future_mid": future,
+                        "future_mid": future_mid,
                         "maker_markout_bps": bps,
                         "is_maker_ask": item.trade.is_maker_ask,
                     }
@@ -119,6 +122,20 @@ class MarkoutEngine:
                 keep.append(item)
         self._pending = keep
         return resolved
+
+    def _resolve_future_mid(
+        self, hist: MidHistory, target_ms: int, now_ms: int
+    ) -> float | None:
+        """Resolve future mid with forward-wait before before-fallback."""
+        tolerance_ms = self.forward_wait_ms
+        if now_ms <= target_ms + self.forward_wait_ms:
+            # In forward-wait window: only accept at-or-after samples.
+            return hist.mid_at_or_after(target_ms, tolerance_ms=tolerance_ms)
+        # Past forward-wait: try forward first, then allow before fallback.
+        forward = hist.mid_at_or_after(target_ms, tolerance_ms=tolerance_ms)
+        if forward is not None:
+            return forward
+        return hist.mid_at_or_before(target_ms, tolerance_ms=tolerance_ms)
 
     @staticmethod
     def compute_markout_bps(

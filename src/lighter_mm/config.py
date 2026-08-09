@@ -87,6 +87,9 @@ class Settings(BaseSettings):
     min_trades_per_hour: float = 30.0
     min_two_sided_depth_10bps_usd: float = 200.0
     min_median_spread_bps: float = 1.0
+    min_markout_samples_5s: int = 20
+    min_markout_samples_30s: int = 20
+    min_median_trades_per_minute: float | None = None
 
     dashboard_refresh_seconds: float = 2.0
     dashboard_top_n: int = 10
