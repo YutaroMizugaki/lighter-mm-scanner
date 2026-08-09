@@ -28,6 +28,7 @@ substitutions:
 
 options:
   logging: CLOUD_LOGGING_ONLY
+  automapSubstitutions: true
 
 steps:
   # STEP 1 — install
