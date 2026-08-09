@@ -40,6 +40,7 @@ class LeaderLock:
         self.lock_key = lock_key
         self.holder_id = holder_id or uuid.uuid4().hex
         self.lease_seconds = lease_seconds
+        self.cas_conflicts = 0
 
     def _lock_payload(self, run_id: str, git_sha: str | None) -> dict:
         info = LockInfo(
@@ -74,6 +75,12 @@ class LeaderLock:
         ok = self.backend.compare_and_swap_json(
             self.lock_key, payload, if_generation_match=gen_match
         )
+        if not ok:
+            self.cas_conflicts += 1
+            log.debug(
+                "leader lock CAS conflict on acquire",
+                extra={"event": "leader_lock_cas_conflict", "run_id": run_id},
+            )
         if ok:
             log.info(
                 "leader lock acquired",
@@ -88,9 +95,16 @@ class LeaderLock:
         if current.generation is None:
             return False
         payload = self._lock_payload(run_id, git_sha)
-        return self.backend.compare_and_swap_json(
+        ok = self.backend.compare_and_swap_json(
             self.lock_key, payload, if_generation_match=int(current.generation)
         )
+        if not ok:
+            self.cas_conflicts += 1
+            log.debug(
+                "leader lock CAS conflict on renew",
+                extra={"event": "leader_lock_cas_conflict", "run_id": run_id},
+            )
+        return ok
 
     def release(self) -> None:
         current = self.backend.download_json_with_generation(self.lock_key)

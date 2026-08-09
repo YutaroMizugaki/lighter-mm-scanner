@@ -90,6 +90,7 @@ class Settings(BaseSettings):
     min_markout_samples_5s: int = 20
     min_markout_samples_30s: int = 20
     min_median_trades_per_minute: float | None = None
+    min_observation_hours_for_candidate: float = Field(default=1.0, ge=0.0)
 
     dashboard_refresh_seconds: float = 2.0
     dashboard_top_n: int = 10

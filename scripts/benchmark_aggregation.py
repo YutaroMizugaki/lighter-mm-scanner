@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import resource
 import sys
 import time
@@ -58,28 +59,54 @@ def _write_synthetic(data_dir: Path, *, markets: int, rows_per_market: int) -> i
 
 
 def main() -> None:
-    data_dir = Path("/tmp/lighter-mm-bench")
+    parser = argparse.ArgumentParser(description="Benchmark DuckDB aggregation pipeline")
+    parser.add_argument("--markets", type=int, default=50, help="Number of synthetic markets")
+    parser.add_argument(
+        "--rows-per-market",
+        type=int,
+        default=400,
+        help="Book sample rows per market (default ~20k total at 50x400)",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=Path,
+        default=Path("/tmp/lighter-mm-bench"),
+        help="Working directory for synthetic parquet + reports",
+    )
+    parser.add_argument(
+        "--rss-limit-mb",
+        type=float,
+        default=800.0,
+        help="Exit with error if peak RSS exceeds this (0 disables)",
+    )
+    args = parser.parse_args()
+
+    data_dir: Path = args.data_dir
     data_dir.mkdir(parents=True, exist_ok=True)
     (data_dir / "book_samples").mkdir(exist_ok=True)
 
-    markets = 50
-    rows_per_market = 400  # scaled down; ~20k rows total
+    markets = args.markets
+    rows_per_market = args.rows_per_market
     total = _write_synthetic(data_dir, markets=markets, rows_per_market=rows_per_market)
 
     settings = Settings(data_dir=data_dir, reports_dir=data_dir / "reports")
-    # Use window that includes synthetic data timestamps
     t0 = time.monotonic()
     result = analyze_window(settings, hours=1.0)
     elapsed = time.monotonic() - t0
     rss = _peak_rss_mb()
+    rows_per_second = total / elapsed if elapsed > 0 else 0.0
 
-    print(f"rows={total} markets={len(result.get('markets', []))}")
-    print(f"elapsed_s={elapsed:.3f} peak_rss_mb={rss:.1f}")
+    print(f"rows={total}")
+    print(f"markets={markets}")
+    print(f"rows_per_market={rows_per_market}")
+    print(f"elapsed_s={elapsed:.3f}")
+    print(f"peak_rss_mb={rss:.1f}")
     print(f"book_row_count={result.get('book_row_count')}")
+    print(f"rows_per_second={rows_per_second:.0f}")
     if result.get("error"):
         raise SystemExit(f"analysis error: {result['error']}")
-    if rss > 800:
-        raise SystemExit(f"peak RSS too high: {rss:.1f} MB")
+    if args.rss_limit_mb > 0 and rss > args.rss_limit_mb:
+        raise SystemExit(f"peak RSS too high: {rss:.1f} MB (limit {args.rss_limit_mb:.0f})")
 
 
 if __name__ == "__main__":

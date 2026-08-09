@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+import math
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
-from lighter_mm.analytics.aggregation import analyze_window
+from lighter_mm.analytics.aggregation import _trade_stats, analyze_window
 from lighter_mm.config import Settings
 from lighter_mm.engine.mid_history import MidHistory
+from lighter_mm.engine.reference_mid import reference_mid_for_trade
 from lighter_mm.scoring import CandidateThresholds, score_markets
 from lighter_mm.storage.backend import VersionedJson
 from lighter_mm.storage.lock import LeaderLock
@@ -73,6 +78,7 @@ class _MockAtomicBackend:
         self.generation: int | None = None
         self.upload_json_calls = 0
         self.cas_calls = 0
+        self.mutate_before_next_cas: Callable[[], None] | None = None
 
     def download_json_with_generation(self, _key: str) -> VersionedJson:
         return VersionedJson(self.payload, self.generation)
@@ -81,6 +87,9 @@ class _MockAtomicBackend:
         self, _key: str, payload: dict, *, if_generation_match: int
     ) -> bool:
         self.cas_calls += 1
+        if self.mutate_before_next_cas is not None:
+            self.mutate_before_next_cas()
+            self.mutate_before_next_cas = None
         if if_generation_match == 0:
             if self.payload is not None:
                 return False
@@ -93,6 +102,39 @@ class _MockAtomicBackend:
     def upload_json(self, *_a, **_k) -> str:
         self.upload_json_calls += 1
         return "mock://"
+
+
+def _candidate_row(**overrides) -> dict:
+    row = {
+        "market_id": 1,
+        "symbol": "TEST",
+        "observation_hours": 2.0,
+        "analysis_window_hours": 72.0,
+        "data_coverage_pct": 95.0,
+        "trades_per_minute_mean": 1.0,
+        "trades_per_minute_median": 0.5,
+        "total_trade_count": 120,
+        "median_two_sided_depth_10bps_usd": 800.0,
+        "median_spread_bps": 3.0,
+        "maker_markout_5s_median_bps": 1.0,
+        "maker_markout_30s_median_bps": 0.5,
+        "markout_5s_count": 50,
+        "markout_30s_count": 50,
+        "pct_time_spread_ge_5bps": 0.5,
+    }
+    row.update(overrides)
+    return row
+
+
+def _activity_candidate_row(observation_seconds: float, trade_count: int = 1) -> dict:
+    obs_hours = observation_seconds / 3600.0
+    tpm_mean = trade_count / max(observation_seconds / 60.0, 1.0 / 60.0)
+    return _candidate_row(
+        observation_hours=obs_hours,
+        total_trade_count=trade_count,
+        trades_per_minute_mean=tpm_mean,
+        trades_per_minute_median=0.0,
+    )
 
 
 def test_volatility_same_price_multi_origin(tmp_path: Path) -> None:
@@ -115,8 +157,20 @@ def test_volatility_same_price_multi_origin(tmp_path: Path) -> None:
     store.close()
     result = analyze_window(settings, hours=1.0)
     market = result["markets"][0]
+
+    # Each book row is an independent origin; 5 of 6 have a valid +5s future sample.
+    assert market.get("volatility_5s_sample_count") == 5
+
+    expected_moves = []
+    for i in range(len(series) - 1):
+        _t0, mid0 = series[i]
+        t1, mid1 = series[i + 1]
+        if t1 - _t0 == 5000:
+            expected_moves.append(abs(math.log(mid1 / mid0)) * 10000.0)
+    expected_p50 = sorted(expected_moves)[len(expected_moves) // 2]
     p5 = market.get("p50_abs_mid_move_5s_bps")
-    assert p5 is not None and p5 > 0
+    assert p5 == pytest.approx(expected_p50, rel=1e-3)
+    assert p5 != pytest.approx(0.0)
 
 
 def test_gcs_cas_race_loser_cannot_overwrite() -> None:
@@ -131,43 +185,128 @@ def test_gcs_cas_race_loser_cannot_overwrite() -> None:
     assert backend.generation == gen_after_a
 
 
+def test_acquire_same_expired_generation_race() -> None:
+    """Both contenders read the same expired lock at generation=N; only one CAS wins."""
+    backend = _MockAtomicBackend()
+    backend.payload = {
+        "holder_id": "old",
+        "run_id": "old",
+        "expires_at": (datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+    }
+    backend.generation = 5
+
+    a = LeaderLock(backend, "lock.json", holder_id="a", lease_seconds=60)
+    b = LeaderLock(backend, "lock.json", holder_id="b", lease_seconds=60)
+
+    assert a.acquire("run1") is True
+    assert backend.payload["holder_id"] == "a"
+    assert backend.generation == 6
+    assert b.acquire("run1") is False
+    assert backend.payload["holder_id"] == "a"
+    assert backend.upload_json_calls == 0
+
+
 def test_renew_generation_conflict_returns_false() -> None:
+    """Renew fails on generation conflict while holder_id stays the same."""
     backend = _MockAtomicBackend()
     lock = LeaderLock(backend, "lock.json", holder_id="a", lease_seconds=60)
     assert lock.acquire("run1") is True
-    backend.payload = {
-        "holder_id": "other",
-        "run_id": "runX",
-        "expires_at": (datetime.now(UTC) + timedelta(hours=1)).isoformat(),
-    }
-    backend.generation = 999
+    read_gen = backend.generation
+    assert read_gen is not None
+
+    def bump_generation() -> None:
+        backend.generation = int(backend.generation or 0) + 1
+
+    backend.mutate_before_next_cas = bump_generation
     assert lock.renew("run1") is False
     assert backend.upload_json_calls == 0
+    assert backend.payload is not None
+    assert backend.payload["holder_id"] == "a"
+    assert lock.cas_conflicts == 1
 
 
 def test_reference_mid_rejects_future_sample() -> None:
     hist = MidHistory()
     hist.add(1005, 101.0)
-    pt = hist.nearest_at_or_before(1000)
-    ref = pt.mid if pt and 0 <= 1000 - pt.ts_ms <= 3000 else None
-    assert ref is None
+    assert reference_mid_for_trade(hist, 1000) is None
 
 
 def test_reference_mid_accepts_recent_past_sample() -> None:
     hist = MidHistory()
     hist.add(999, 100.5)
-    pt = hist.nearest_at_or_before(1000)
-    assert pt is not None
-    assert 0 <= 1000 - pt.ts_ms <= 3000
-    assert pt.mid == 100.5
+    assert reference_mid_for_trade(hist, 1000) == 100.5
 
 
 def test_reference_mid_rejects_stale_past_sample() -> None:
     hist = MidHistory()
     hist.add(5000, 100.0)
-    pt = hist.nearest_at_or_before(10000)
-    ref = pt.mid if pt and 0 <= 10000 - pt.ts_ms <= 3000 else None
-    assert ref is None
+    assert reference_mid_for_trade(hist, 10000) is None
+
+
+def test_reference_mid_accepts_exact_timestamp() -> None:
+    hist = MidHistory()
+    hist.add(1000, 100.25)
+    assert reference_mid_for_trade(hist, 1000) == 100.25
+
+
+def test_tpm_mean_uses_fractional_observation_seconds() -> None:
+    df = pl.DataFrame(
+        {
+            "market_id": [1],
+            "timestamp_ms": [1_000],
+            "usd_amount": [1.0],
+            "type": ["trade"],
+        }
+    )
+    stats = _trade_stats(df, 1, observation_seconds=150.0)
+    assert stats["trades_per_minute_mean"] == pytest.approx(0.4, rel=1e-6)
+    assert stats["trades_per_minute_mean"] != pytest.approx(0.5)
+
+
+def test_tpm_150s_boundary_activity_fail() -> None:
+    row = _activity_candidate_row(150.0, trade_count=1)
+    trades_per_hour = row["total_trade_count"] / row["observation_hours"]
+    assert trades_per_hour == pytest.approx(24.0, rel=1e-3)
+    scored = score_markets([row], thresholds=CandidateThresholds(min_trades_per_hour=30.0))
+    assert scored[0].candidate is False
+
+
+def test_tpm_120s_boundary_activity_pass() -> None:
+    row = _activity_candidate_row(120.0, trade_count=1)
+    trades_per_hour = row["total_trade_count"] / row["observation_hours"]
+    assert trades_per_hour == pytest.approx(30.0, rel=1e-3)
+    scored = score_markets(
+        [row],
+        thresholds=CandidateThresholds(
+            min_trades_per_hour=30.0,
+            min_observation_hours=0.01,
+        ),
+    )
+    assert scored[0].candidate is True
+
+
+def test_tpm_119s_boundary_activity_pass() -> None:
+    row = _activity_candidate_row(119.0, trade_count=1)
+    trades_per_hour = row["total_trade_count"] / row["observation_hours"]
+    assert trades_per_hour == pytest.approx(30.25, rel=1e-2)
+    scored = score_markets(
+        [row],
+        thresholds=CandidateThresholds(
+            min_trades_per_hour=30.0,
+            min_observation_hours=0.01,
+        ),
+    )
+    assert scored[0].candidate is True
+
+
+def test_short_observation_blocks_candidate_despite_strong_metrics() -> None:
+    row = _candidate_row(
+        observation_hours=10.0 / 60.0,
+        total_trade_count=1,
+        trades_per_minute_mean=6.0,
+    )
+    scored = score_markets([row], thresholds=CandidateThresholds(min_observation_hours=1.0))
+    assert scored[0].candidate is False
 
 
 def test_coverage_counts_stale_first_period(tmp_path: Path) -> None:

@@ -32,6 +32,7 @@ class CandidateThresholds:
     min_markout_samples_5s: int = 20
     min_markout_samples_30s: int = 20
     min_median_trades_per_minute: float | None = None
+    min_observation_hours: float = 1.0
     min_markout_5s_median_bps: float = -5.0
     min_markout_30s_median_bps: float = -15.0
 
@@ -278,10 +279,13 @@ def score_markets(
 
         m5_count = int(row.get("markout_5s_count") or 0)
         m30_count = int(row.get("markout_30s_count") or 0)
+        obs_hours = max(row.get("observation_hours") or 0.0, 0.0)
+        observation_ok = obs_hours >= thresholds.min_observation_hours
 
         candidate = (
             cov >= thresholds.min_coverage_pct
             and activity_ok
+            and observation_ok
             and d10 >= thresholds.min_two_sided_depth_10bps_usd
             and (row.get("median_spread_bps") or 0) >= thresholds.min_median_spread_bps
             and m5 is not None

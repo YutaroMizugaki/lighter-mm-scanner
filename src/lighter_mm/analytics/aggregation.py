@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any
@@ -225,6 +226,7 @@ def analyze_window(settings: Settings, hours: float) -> dict[str, Any]:
         min_markout_samples_5s=settings.min_markout_samples_5s,
         min_markout_samples_30s=settings.min_markout_samples_30s,
         min_median_trades_per_minute=settings.min_median_trades_per_minute,
+        min_observation_hours=settings.min_observation_hours_for_candidate,
     )
     scored = score_markets(rows, thresholds=thresholds)
     log.info(
@@ -497,6 +499,7 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
             WHERE mid1 IS NOT NULL AND mid0 > 0
         )
         SELECT market_id,
+            COUNT(*) AS sample_count,
             quantile_cont(move_bps, 0.5) AS p50,
             quantile_cont(move_bps, 0.90) AS p90,
             quantile_cont(move_bps, 0.95) AS p95
@@ -504,9 +507,10 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
         GROUP BY market_id
         """
         for row in con.execute(sql).fetchall():
-            mid, p50, p90, p95 = row
+            mid, sample_count, p50, p90, p95 = row
             out.setdefault(int(mid), {})
             out[int(mid)].update({
+                f"volatility_{label}_sample_count": int(sample_count or 0),
                 f"p50_abs_mid_move_{label}_bps": p50,
                 f"p90_abs_mid_move_{label}_bps": p90,
                 f"p95_abs_mid_move_{label}_bps": p95,
@@ -589,10 +593,11 @@ def _aggregate_trades_sql(
         mid, tc, vol, med_size, inter_ms, cnts, active_minutes, obs_s = row
         tc = int(tc or 0)
         obs_s = float(obs_s or 0)
-        effective_minutes = max(1, int(obs_s / 60.0)) if obs_s > 0 else 1
-        tpm_mean = float(tc) / float(effective_minutes)
+        effective_minutes_float = max(obs_s / 60.0, 1.0 / 60.0)
+        tpm_mean = float(tc) / effective_minutes_float
+        minute_slots = max(1, math.ceil(obs_s / 60.0)) if obs_s > 0 else 1
         cnt_list = [float(c) for c in (cnts or [])]
-        zeros = max(0, effective_minutes - int(active_minutes or 0))
+        zeros = max(0, minute_slots - int(active_minutes or 0))
         padded = cnt_list + [0.0] * zeros
         out[int(mid)] = {
             "total_trade_count": tc,
@@ -748,7 +753,13 @@ def _spread_persistence(book, thresholds):  # noqa: ANN001
     return out
 
 
-def _trade_stats(trade_df, market_id: int, *, window_minutes: int = 1):  # noqa: ANN001
+def _trade_stats(
+    trade_df,
+    market_id: int,
+    *,
+    window_minutes: int = 1,
+    observation_seconds: float | None = None,
+):  # noqa: ANN001
     """Legacy wrapper for unit tests."""
     import polars as pl
 
@@ -758,6 +769,7 @@ def _trade_stats(trade_df, market_id: int, *, window_minutes: int = 1):  # noqa:
         trade_df = trade_df.with_columns(pl.arange(0, trade_df.height).alias("trade_id"))
     if "symbol" not in trade_df.columns:
         trade_df = trade_df.with_columns(pl.lit("TEST").alias("symbol"))
+    obs_s = float(observation_seconds) if observation_seconds is not None else float(window_minutes * 60)
     con = duckdb.connect(":memory:")
     con.register("trade_raw", trade_df)
     con.execute(
@@ -769,7 +781,7 @@ def _trade_stats(trade_df, market_id: int, *, window_minutes: int = 1):  # noqa:
             MIN(timestamp_ms) AS first_observed_ms,
             MIN(timestamp_ms) AS effective_start_ms,
             MAX(timestamp_ms) AS effective_end_ms,
-            {float(window_minutes * 60)}::DOUBLE AS market_observation_seconds
+            {obs_s}::DOUBLE AS market_observation_seconds
         FROM trade_raw
         GROUP BY market_id
         """
