@@ -9,7 +9,6 @@ from pathlib import Path
 
 import polars as pl
 import pyarrow.parquet as pq
-from tests.conftest import enrich_book_row
 
 from lighter_mm.analytics.aggregation import _trade_stats
 from lighter_mm.collector import CollectorApp
@@ -21,6 +20,7 @@ from lighter_mm.scoring import CandidateThresholds, score_markets
 from lighter_mm.storage.parquet_store import ParquetStore
 from lighter_mm.storage.state import RunState
 from lighter_mm.ws.manager import WsManager
+from tests.helpers import enrich_book_row
 
 
 def _book_row(ts: int, market_id: int = 1) -> dict:

@@ -8,7 +8,6 @@ from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from tests.conftest import enrich_book_row
 
 from lighter_mm.analytics.aggregation import analyze_window
 from lighter_mm.cloud.analyzer import run_cloud_analyze
@@ -22,6 +21,7 @@ from lighter_mm.storage.parquet_validation import (
     validate_parquet_file,
 )
 from lighter_mm.storage.state import RunState, now_iso
+from tests.helpers import enrich_book_row
 
 
 def _book_row(ts: int) -> dict:

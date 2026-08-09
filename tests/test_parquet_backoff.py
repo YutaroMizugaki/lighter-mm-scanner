@@ -5,10 +5,9 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from tests.conftest import enrich_book_row
-
 from lighter_mm.storage.parquet_store import ParquetStore
 from lighter_mm.util import backoff_delay
+from tests.helpers import enrich_book_row
 
 
 def test_backoff_increases_with_jitter_cap() -> None:

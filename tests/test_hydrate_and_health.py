@@ -5,8 +5,6 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from tests.conftest import enrich_book_row
-
 from lighter_mm.analytics.aggregation import _glob_patterns, analyze_window
 from lighter_mm.cloud.dashboard_data import build_dashboard_payload, collector_status_label
 from lighter_mm.cloud.sync import DurableSync
@@ -14,6 +12,7 @@ from lighter_mm.config import Settings
 from lighter_mm.storage.local_backend import LocalStorageBackend
 from lighter_mm.storage.parquet_store import ParquetStore
 from lighter_mm.storage.state import RunState, now_iso
+from tests.helpers import enrich_book_row
 
 
 def _book_row(ts: int, *, stale: bool = False) -> dict:

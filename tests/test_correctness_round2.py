@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from tests.conftest import enrich_book_row
 
 from lighter_mm.analytics import aggregation as agg_mod
 from lighter_mm.analytics.aggregation import analyze_window
@@ -23,6 +22,7 @@ from lighter_mm.scoring import CandidateThresholds, score_markets
 from lighter_mm.storage.parquet_store import ParquetStore
 from lighter_mm.storage.state import RunState, now_iso
 from lighter_mm.ws.manager import WsManager, WsRuntimeStats
+from tests.helpers import enrich_book_row
 
 
 def _book_row(ts: int, *, stale: bool = False, market_id: int = 1) -> dict:

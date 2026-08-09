@@ -13,7 +13,6 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from tests.conftest import enrich_book_row
 
 from lighter_mm.analytics.aggregation import _trade_stats, analyze_window
 from lighter_mm.config import Settings
@@ -23,6 +22,7 @@ from lighter_mm.scoring import CandidateThresholds, score_markets
 from lighter_mm.storage.backend import VersionedJson
 from lighter_mm.storage.lock import LeaderLock
 from lighter_mm.storage.parquet_store import ParquetStore
+from tests.helpers import enrich_book_row
 
 
 def _book_row(
