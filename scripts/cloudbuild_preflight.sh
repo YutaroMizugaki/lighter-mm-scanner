@@ -17,6 +17,11 @@ GCS_PUBLIC_BUCKET="${_GCS_PUBLIC_BUCKET}"
 SERVICE_ACCOUNT="${_SERVICE_ACCOUNT}"
 SCHEDULER_SA="${_SCHEDULER_SERVICE_ACCOUNT:-${SERVICE_ACCOUNT}}"
 
+PROJECT_ID="${PROJECT_ID:-$(gcloud config get-value project 2>/dev/null || true)}"
+if [[ -z "${PROJECT_ID}" || "${PROJECT_ID}" == "(unset)" ]]; then
+  fail "PROJECT_ID is not set (Cloud Build should pass PROJECT_ID to preflight)"
+fi
+
 [[ -n "${GCS_BUCKET}" ]] || fail "_GCS_BUCKET substitution is required"
 [[ -n "${GCS_PUBLIC_BUCKET}" ]] || fail "_GCS_PUBLIC_BUCKET substitution is required"
 [[ -n "${SERVICE_ACCOUNT}" ]] || fail "_SERVICE_ACCOUNT substitution is required"

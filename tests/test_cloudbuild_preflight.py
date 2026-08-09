@@ -39,3 +39,10 @@ def test_bootstrap_script_exists() -> None:
     assert preflight.exists()
     assert "gcloud services enable" in bootstrap.read_text(encoding="utf-8")
     assert "gcloud services enable" not in preflight.read_text(encoding="utf-8")
+
+
+def test_cloudbuild_preflight_passes_project_id() -> None:
+    text = CLOUDBUILD.read_text(encoding="utf-8")
+    assert "PROJECT_ID=$PROJECT_ID" in text
+    preflight = (ROOT / "scripts" / "cloudbuild_preflight.sh").read_text(encoding="utf-8")
+    assert 'PROJECT_ID="${PROJECT_ID:-' in preflight
