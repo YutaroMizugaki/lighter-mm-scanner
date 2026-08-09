@@ -154,7 +154,7 @@ def _aggregate_markets(
         persistence = _spread_persistence(b, settings.spread_thresholds_bps)
         vol = _volatility_from_mids(b)
 
-        tstats = _trade_stats(trade_df, mid)
+        tstats = _trade_stats(trade_df, mid, window_minutes=max(1, int(hours * 60)))
         mstats = _markout_stats(markout_df, mid)
 
         last = b.sort("timestamp_ms").tail(1)
@@ -295,45 +295,49 @@ def _volatility_from_mids(book: pl.DataFrame) -> dict[str, Any]:
     return out
 
 
-def _trade_stats(trade_df: pl.DataFrame, market_id: int) -> dict[str, Any]:
+def _trade_stats(
+    trade_df: pl.DataFrame, market_id: int, *, window_minutes: int = 1
+) -> dict[str, Any]:
+    """Trade activity over the observation window.
+
+    Mean/median/p90 TPM include zero-trade minutes. Counting only active minutes
+    previously inflated sparse markets toward ~1.0 TPM and let them pass
+    ``min_trades_per_hour`` candidacy filters incorrectly.
+    """
+    empty = {
+        "total_trade_count": 0,
+        "trades_per_minute_mean": 0.0,
+        "trades_per_minute_median": 0.0,
+        "trades_per_minute_p90": 0.0,
+        "total_quote_volume": 0.0,
+        "median_trade_size_usd": None,
+        "median_intertrade_ms": None,
+    }
+    n_minutes = max(1, int(window_minutes))
     if trade_df.is_empty():
-        return {
-            "total_trade_count": 0,
-            "trades_per_minute_mean": 0.0,
-            "trades_per_minute_median": 0.0,
-            "trades_per_minute_p90": 0.0,
-            "total_quote_volume": 0.0,
-            "median_trade_size_usd": None,
-            "median_intertrade_ms": None,
-        }
+        return empty
     t = trade_df.filter(
         (pl.col("market_id") == market_id) & (pl.col("type") == "trade")
     ).sort("timestamp_ms")
     if t.is_empty():
-        return {
-            "total_trade_count": 0,
-            "trades_per_minute_mean": 0.0,
-            "trades_per_minute_median": 0.0,
-            "trades_per_minute_p90": 0.0,
-            "total_quote_volume": 0.0,
-            "median_trade_size_usd": None,
-            "median_intertrade_ms": None,
-        }
-    # per-minute counts
+        return empty
+    # per-minute counts (active minutes only), then pad zeros to wall-clock window
     minutes = (
         t.with_columns((pl.col("timestamp_ms") // 60_000).alias("minute"))
         .group_by("minute")
         .agg(pl.len().alias("cnt"), pl.col("usd_amount").sum().alias("vol"))
     )
-    cnts = minutes["cnt"].to_list()
+    cnts = [float(c) for c in minutes["cnt"].to_list()]
+    zeros = max(0, n_minutes - len(cnts))
+    padded = cnts + [0.0] * zeros
     ts = t["timestamp_ms"].to_list()
     inter = [float(ts[i] - ts[i - 1]) for i in range(1, len(ts)) if ts[i] >= ts[i - 1]]
     sizes = [float(x) for x in t["usd_amount"].drop_nulls().to_list()]
     return {
         "total_trade_count": t.height,
-        "trades_per_minute_mean": (sum(cnts) / len(cnts)) if cnts else 0.0,
-        "trades_per_minute_median": percentile([float(c) for c in cnts], 50) or 0.0,
-        "trades_per_minute_p90": percentile([float(c) for c in cnts], 90) or 0.0,
+        "trades_per_minute_mean": float(t.height) / float(n_minutes),
+        "trades_per_minute_median": percentile(padded, 50) or 0.0,
+        "trades_per_minute_p90": percentile(padded, 90) or 0.0,
         "total_quote_volume": float(t["usd_amount"].sum()),
         "median_trade_size_usd": percentile(sizes, 50),
         "median_intertrade_ms": percentile(inter, 50),

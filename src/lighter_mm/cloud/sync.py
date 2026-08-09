@@ -72,9 +72,20 @@ class DurableSync:
                 return data_root / local_name / rel[len(remote_prefix) :]
         return None
 
-    def upload_new_parquets(self, data_root: Path) -> list[str]:
+    def upload_new_parquets(
+        self, data_root: Path, paths: Iterable[Path] | None = None
+    ) -> list[str]:
+        """Upload closed Parquet parts.
+
+        Prefer an explicit ``paths`` list from ``ParquetStore.take_closed_paths()``
+        so in-progress writers opened after rotation are never uploaded mid-write.
+        When ``paths`` is omitted, falls back to scanning the tree (CLI / hydrate).
+        """
         uploaded: list[str] = []
-        for path in self._iter_parquets(data_root):
+        candidates = list(paths) if paths is not None else list(self._iter_parquets(data_root))
+        for path in candidates:
+            if not path.exists() or not path.is_file():
+                continue
             key = str(path)
             if key in self._uploaded:
                 continue

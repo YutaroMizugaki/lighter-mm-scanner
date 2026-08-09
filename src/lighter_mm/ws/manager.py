@@ -268,8 +268,14 @@ class WsManager:
             self.books[market_id] = book
         ob = msg.get("order_book") or {}
         recv = int(msg.get("timestamp") or utc_ms())
-        if is_snapshot or not book.synced:
+        if is_snapshot:
             book.apply_snapshot(ob, recv_ms=recv)
+        elif not book.synced:
+            # After disconnect / nonce gap the book is cleared. Deltas are partial
+            # level updates — applying them as a snapshot would replace the full
+            # book with a hollow one and mark synced=True. Drop until a real
+            # subscribed/order_book snapshot arrives.
+            return
         else:
             ok = book.apply_delta(ob, recv_ms=recv)
             if not ok:

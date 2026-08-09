@@ -161,7 +161,7 @@ class CollectorApp:
             poll_s=5.0,
         ):
             log.error("another collector holds the leader lock; exiting")
-            return
+            raise SystemExit(1)
 
         if self._resumed:
             restored = await asyncio.to_thread(
@@ -197,6 +197,15 @@ class CollectorApp:
             collector_version=self.settings.collector_version,
         )
 
+        # Deadline is wall-clock from the original run started_at (not process uptime),
+        # so Cloud Run redeploys cannot reset a 72h observation window.
+        remaining_s = self._remaining_observation_seconds()
+        if self.hours is not None and remaining_s is not None and remaining_s <= 0:
+            log.info("observation target already reached; writing final dashboard")
+            self._completed = True
+            await self.shutdown()
+            return
+
         self._ws = WsManager(
             settings=self.settings,
             markets=dict(self.discovery.markets),
@@ -215,7 +224,11 @@ class CollectorApp:
             log.info("non-TTY / NO_DASHBOARD; Rich live dashboard disabled")
 
         started = asyncio.get_running_loop().time()
-        deadline = None if self.hours is None else started + self.hours * 3600.0
+        deadline = (
+            None
+            if remaining_s is None
+            else started + max(remaining_s, 0.0)
+        )
         await self._persist_state(flush_upload=True)
 
         try:
@@ -241,11 +254,31 @@ class CollectorApp:
         log_event(log, "collector_stopping", "shutdown signal received", run_id=self.run_id)
         self._stop.set()
 
+    def _remaining_observation_seconds(self) -> float | None:
+        """Seconds left until observation_target_hours from state.started_at."""
+        if self.hours is None:
+            return None
+        try:
+            started_at = datetime.fromisoformat(self.state.started_at)
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=UTC)
+            elapsed = (datetime.now(UTC) - started_at).total_seconds()
+        except ValueError:
+            elapsed = 0.0
+        return self.hours * 3600.0 - elapsed
+
     async def _watch_deadline(self, deadline: float | None) -> None:
         if deadline is None:
             await self._stop.wait()
             return
         while not self._stop.is_set():
+            # Re-check wall-clock remaining so clock skew / long stalls still finish.
+            remaining = self._remaining_observation_seconds()
+            if remaining is not None and remaining <= 0:
+                log.info("collection hours reached; finalizing")
+                self._completed = True
+                self._stop.set()
+                return
             if asyncio.get_running_loop().time() >= deadline:
                 log.info("collection hours reached; finalizing")
                 self._completed = True
@@ -255,12 +288,21 @@ class CollectorApp:
 
     async def shutdown(self) -> None:
         self._stop.set()
+        # Renew lease through the final flush so a waiting revision cannot steal
+        # leadership mid-upload (lease is 120s; final sync can exceed that).
+        self.lock.renew(self.run_id, git_sha=self.settings.git_sha)
         if self._ws:
             await self._ws.stop()
             log_event(log, "ws_disconnected", "websocket stopped", run_id=self.run_id)
+        # Resolve markouts whose horizons already elapsed before stopping the poller.
+        try:
+            self.markout.poll(utc_ms(), self.mid_histories)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("final markout drain failed: %s", exc)
         try:
             # Final analysis + upload (rotates/closes parts internally)
             await asyncio.to_thread(self._sync_and_analyze, final=True)
+            self.lock.renew(self.run_id, git_sha=self.settings.git_sha)
             self.store.close()
             # Keep status=running on SIGTERM/deploy so the next revision can resume.
             # Only mark completed when the observation target is reached.
@@ -332,24 +374,15 @@ class CollectorApp:
 
     def _sync_and_analyze(self, *, final: bool) -> None:
         self.store.maybe_flush()
-        if final:
-            self.store.rotate_all()
-        else:
-            # Close current parts so durable storage gets complete files
-            self.store.rotate_all()
-        uploaded = self.sync.upload_new_parquets(self.settings.data_dir)
-        self.state.last_successful_flush = now_iso()
-        self._write_state()
-        self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
-        self.backend.upload_json(
-            self.sync.active_pointer_key(),
-            {
-                "run_id": self.run_id,
-                "status": self.state.status,
-                "updated_at": now_iso(),
-                "git_sha": self.settings.git_sha,
-            },
-        )
+        # Close current parts so durable storage gets complete files only.
+        self.store.rotate_all()
+        closed = self.store.take_closed_paths()
+        try:
+            uploaded = self.sync.upload_new_parquets(self.settings.data_dir, paths=closed)
+        except Exception:
+            self.store.requeue_closed_paths(closed)
+            raise
+        self.lock.renew(self.run_id, git_sha=self.settings.git_sha)
         log_event(
             log,
             "gcs_uploaded",
@@ -362,10 +395,13 @@ class CollectorApp:
         # For short runs use elapsed observation window
         try:
             started = datetime.fromisoformat(self.state.started_at)
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
             elapsed = max((datetime.now(UTC) - started).total_seconds() / 3600.0, 0.05)
         except ValueError:
             elapsed = 1.0
         window = hours if final and self.hours else min(hours, max(elapsed, 0.1))
+        public_ok = False
         try:
             from lighter_mm.cloud.estimate import estimate_storage
 
@@ -390,8 +426,8 @@ class CollectorApp:
                 {"candidates": payload["candidates"]},
                 public=True,
             )
-            # Per-market details (bounded)
-            for sym, detail in list(payload["market_details"].items())[:80]:
+            # Detail pages are linked from the full markets table — upload all.
+            for sym, detail in payload["market_details"].items():
                 self.backend.upload_json(
                     self.sync.public_key(f"market/{sym}.json"), detail, public=True
                 )
@@ -400,11 +436,26 @@ class CollectorApp:
                 f"{self.sync.run_prefix()}/reports/latest.json", payload["latest"]
             )
             self.state.last_analysis_at = now_iso()
-            self._write_state()
-            self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+            public_ok = True
             log_event(log, "analysis_completed", "dashboard JSON refreshed", run_id=self.run_id)
         except Exception as exc:  # noqa: BLE001
             log.warning("analysis/dashboard generation failed: %s", exc)
+            # Surface public-mirror failure in durable state (do not pretend flush is green).
+            self.state.last_analysis_at = None
+
+        if public_ok:
+            self.state.last_successful_flush = now_iso()
+        self._write_state()
+        self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+        self.backend.upload_json(
+            self.sync.active_pointer_key(),
+            {
+                "run_id": self.run_id,
+                "status": self.state.status,
+                "updated_at": now_iso(),
+                "git_sha": self.settings.git_sha,
+            },
+        )
 
     async def _durable_sync_loop(self) -> None:
         interval = self.settings.gcs_upload_interval_minutes * 60
@@ -615,6 +666,8 @@ class CollectorApp:
     async def _flush_loop(self) -> None:
         while not self._stop.is_set():
             self.store.maybe_flush()
+            # Reap closed minute buckets — live TPM only needs the rolling deque.
+            self.activity.pop_closed_minutes(utc_ms())
             self.meta.set_kv("counters", self.counters.model_dump_json())
             await asyncio.sleep(1.0)
 

@@ -36,6 +36,34 @@ def _settings() -> Settings:
     return s
 
 
+def _settings_for_analysis() -> Settings:
+    """Point analysis at durable Parquet (hydrate active run when present).
+
+    Matches ``generate-dashboard-data``: cloud collectors write under the backend
+    local root (``/tmp/...``), not the default ``data/`` tree. Without hydrate,
+    ``analyze`` / ``rank`` / ``report`` / ``export`` silently see an empty tree.
+    """
+    settings = _settings()
+    backend = build_storage_backend(settings)
+    pointer = backend.download_json(f"{settings.gcs_prefix.rstrip('/')}/state/active_run.json")
+    if not pointer or not pointer.get("run_id"):
+        return settings
+    from lighter_mm.cloud.sync import DurableSync
+
+    sync = DurableSync(
+        backend,
+        run_id=str(pointer["run_id"]),
+        gcs_prefix=settings.gcs_prefix,
+        public_prefix=settings.gcs_public_prefix,
+    )
+    settings.data_dir = backend.local_data_dir()
+    ensure_dirs(settings)
+    restored = sync.hydrate_run_parquets(settings.data_dir)
+    if restored:
+        console.print(f"Hydrated {len(restored)} parquet objects for run {pointer['run_id']}")
+    return settings
+
+
 @app.callback()
 def main(
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Debug logging"),
@@ -187,7 +215,7 @@ def generate_dashboard_data(
         {"candidates": payload["candidates"]},
         public=True,
     )
-    for sym, detail in list(payload["market_details"].items())[:80]:
+    for sym, detail in payload["market_details"].items():
         backend.upload_json(f"{prefix}/market/{sym}.json", detail, public=True)
     console.print(f"Wrote dashboard JSON to {out_dir} and storage public prefix")
 
@@ -215,7 +243,7 @@ def analyze(
     hours: float = typer.Option(24, "--hours", help="Lookback window hours"),
 ) -> None:
     """Aggregate Parquet data and print summary stats."""
-    settings = _settings()
+    settings = _settings_for_analysis()
     result = analyze_window(settings, hours)
     if result.get("error"):
         console.print(f"[red]{result['error']}[/red]")
@@ -250,7 +278,7 @@ def rank(
     top: int = typer.Option(25, "--top", help="Rows to show"),
 ) -> None:
     """Rank markets by MM Opportunity Score."""
-    settings = _settings()
+    settings = _settings_for_analysis()
     result = analyze_window(settings, hours)
     if result.get("error"):
         console.print(f"[red]{result['error']}[/red]")
@@ -274,7 +302,7 @@ def report(
     out: Path = typer.Option(Path("reports/latest.html"), "--out", help="HTML output path"),
 ) -> None:
     """Generate local single-file HTML report."""
-    settings = _settings()
+    settings = _settings_for_analysis()
     result = analyze_window(settings, hours)
     if result.get("error"):
         console.print(f"[red]{result['error']}[/red]")
@@ -293,7 +321,7 @@ def export_cmd(
     if format.lower() != "csv":
         console.print("Only csv is supported in MVP")
         raise typer.Exit(2)
-    settings = _settings()
+    settings = _settings_for_analysis()
     result = analyze_window(settings, hours)
     if result.get("error"):
         console.print(f"[red]{result['error']}[/red]")
