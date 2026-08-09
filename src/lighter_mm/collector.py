@@ -85,20 +85,28 @@ class CollectorApp:
             on_stats=self._on_stats,
         )
         await self._ws.start()
-        self.dashboard.start()
+        self._dashboard_enabled = self.dashboard.console.is_terminal
+        if self._dashboard_enabled:
+            self.dashboard.start()
+        else:
+            log.info("non-TTY detected; Rich live dashboard disabled")
 
         started = asyncio.get_running_loop().time()
         deadline = None if self.hours is None else started + self.hours * 3600.0
 
         try:
-            await asyncio.gather(
+            tasks = [
                 self._sample_loop(),
                 self._markout_loop(),
                 self._flush_loop(),
                 self._market_refresh_loop(),
-                self._dashboard_loop(started),
                 self._watch_deadline(deadline),
-            )
+            ]
+            if self._dashboard_enabled:
+                tasks.append(self._dashboard_loop(started))
+            else:
+                tasks.append(self._log_progress_loop(started))
+            await asyncio.gather(*tasks)
         finally:
             await self.shutdown()
 
@@ -128,7 +136,8 @@ class CollectorApp:
         )
         self.meta.end_run(self.run_id, status="stopped")
         await self.discovery.close()
-        self.dashboard.stop()
+        if getattr(self, "_dashboard_enabled", False):
+            self.dashboard.stop()
         self.meta.close()
         log.info(
             "shutdown complete samples=%s trades=%s markouts=%s",
@@ -136,6 +145,27 @@ class CollectorApp:
             self.store.trades_written,
             self.store.markouts_written,
         )
+
+    async def _log_progress_loop(self, started: float) -> None:
+        while not self._stop.is_set():
+            runtime_s = asyncio.get_running_loop().time() - started
+            log.info(
+                "progress t=%.0fs markets=%s/%s ws=%s samples=%s trades=%s "
+                "resyncs=%s gaps=%s drops=%s",
+                runtime_s,
+                self.counters.markets_ready,
+                self.counters.markets_total,
+                self.counters.ws_ok,
+                self.counters.samples_written,
+                self.store.trades_written,
+                self.counters.book_resyncs,
+                self.counters.nonce_gaps,
+                self.counters.dropped_connections,
+            )
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=15.0)
+            except TimeoutError:
+                pass
 
     async def _on_book(self, market_id: int, book: LocalOrderBook, _kind: str) -> None:
         mid = book.mid()
