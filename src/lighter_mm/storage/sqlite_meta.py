@@ -150,19 +150,31 @@ class SqliteMeta:
         return row["value"] if row else None
 
     def update_dq(self, market_id: int, **fields: Any) -> None:
+        self.update_dq_batch([(market_id, fields)])
+
+    def update_dq_batch(self, rows: list[tuple[int, dict[str, Any]]]) -> None:
+        """Update DQ counters for many markets in a single transaction."""
+        if not rows:
+            return
         now = datetime.now(UTC).isoformat()
         cur = self._conn.cursor()
-        cur.execute(
-            "INSERT OR IGNORE INTO market_dq(market_id, updated_at) VALUES (?, ?)",
-            (market_id, now),
-        )
-        if fields:
-            cols = ", ".join(f"{k}=?" for k in fields)
-            cur.execute(
-                f"UPDATE market_dq SET {cols}, updated_at=? WHERE market_id=?",
-                (*fields.values(), now, market_id),
-            )
-        self._conn.commit()
+        cur.execute("BEGIN")
+        try:
+            for market_id, fields in rows:
+                cur.execute(
+                    "INSERT OR IGNORE INTO market_dq(market_id, updated_at) VALUES (?, ?)",
+                    (market_id, now),
+                )
+                if fields:
+                    cols = ", ".join(f"{k}=?" for k in fields)
+                    cur.execute(
+                        f"UPDATE market_dq SET {cols}, updated_at=? WHERE market_id=?",
+                        (*fields.values(), now, market_id),
+                    )
+            self._conn.commit()
+        except Exception:
+            self._conn.rollback()
+            raise
 
     def bump_dq(self, market_id: int, field: str, n: int = 1) -> None:
         now = datetime.now(UTC).isoformat()

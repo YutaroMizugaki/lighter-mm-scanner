@@ -68,6 +68,14 @@ class GCSStorageBackend(StorageBackend):
                 str(local_path), content_type=content_type, **kwargs
             )
         except Exception as exc:
+            if if_generation_match == 0 and self._is_precondition_conflict(exc):
+                log.warning(
+                    "gcs_immutable_upload_exists %s (%s)",
+                    remote_key,
+                    exc,
+                    extra={"event": "gcs_immutable_upload_exists", "path": remote_key},
+                )
+                raise FileExistsError(remote_key) from exc
             if if_generation_match == 0:
                 log.warning(
                     "gcs_immutable_upload_rejected %s (%s)",
@@ -195,3 +203,18 @@ class GCSStorageBackend(StorageBackend):
                 blob.name,
                 exc,
             )
+
+    @staticmethod
+    def _is_precondition_conflict(exc: Exception) -> bool:
+        """True when GCS rejected upload because the object already exists."""
+        try:
+            from google.api_core import exceptions as gexc
+
+            if isinstance(exc, gexc.PreconditionFailed):
+                return True
+        except ImportError:
+            pass
+        if exc.__class__.__name__ == "PreconditionFailed":
+            return True
+        msg = str(exc).lower()
+        return "precondition" in msg and ("failed" in msg or "not met" in msg)

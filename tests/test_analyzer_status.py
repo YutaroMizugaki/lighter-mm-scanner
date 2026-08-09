@@ -25,7 +25,12 @@ def _seed_run(be: LocalStorageBackend, run_id: str = "run1") -> None:
     be.upload_json("lighter-mm/state/active_run.json", {"run_id": run_id, "status": "running"})
     be.upload_json(
         f"lighter-mm/runs/{run_id}/state/state.json",
-        RunState(run_id=run_id, started_at=now_iso(), status="running").to_public_dict(),
+        RunState(
+            run_id=run_id,
+            started_at=now_iso(),
+            status="running",
+            last_successful_flush=now_iso(),
+        ).to_public_dict(),
     )
 
 

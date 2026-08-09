@@ -109,8 +109,8 @@ class WsManager:
     def __post_init__(self) -> None:
         self._stop = asyncio.Event()
         self._msg_bucket = TokenBucket(self.settings.max_client_messages_per_minute)
-        self._trade_ids: deque[int] = deque(maxlen=self.settings.trade_id_cache_size)
-        self._trade_id_set: set[int] = set()
+        self._trade_ids: deque[tuple[int, int]] = deque(maxlen=self.settings.trade_id_cache_size)
+        self._trade_id_set: set[tuple[int, int]] = set()
         self._resync_queues: dict[int, asyncio.Queue[int]] = {}
         self._tasks: list[asyncio.Task] = []
         self._shard_conns: dict[int, ClientConnection | None] = {}
@@ -422,16 +422,17 @@ class WsManager:
                         raw,
                     )
                 continue
-            if trade.trade_id in self._trade_id_set:
+            if market_id is not None:
+                trade.market_id = market_id
+            trade_key = (trade.market_id, trade.trade_id)
+            if trade_key in self._trade_id_set:
                 continue
             if len(self._trade_ids) == self._trade_ids.maxlen:
                 old = self._trade_ids.popleft()
                 self._trade_id_set.discard(old)
-            self._trade_ids.append(trade.trade_id)
-            self._trade_id_set.add(trade.trade_id)
+            self._trade_ids.append(trade_key)
+            self._trade_id_set.add(trade_key)
             self.runtime.seen_trade_ids += 1
-            if market_id is not None and trade.market_id != market_id:
-                trade.market_id = market_id
             if not persist:
                 continue
             if self.on_trade:

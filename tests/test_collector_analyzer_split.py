@@ -279,7 +279,7 @@ def test_analysis_failure_preserves_prior_public_results(tmp_path: Path) -> None
     be.upload_json("lighter-mm/state/active_run.json", {"run_id": "run1", "status": "running"})
     be.upload_json(
         "lighter-mm/runs/run1/state/state.json",
-        RunState(run_id="run1", started_at=now_iso(), status="running").to_public_dict(),
+        RunState(run_id="run1", started_at=now_iso(), status="running", last_successful_flush=now_iso()).to_public_dict(),
     )
     with patch("lighter_mm.cloud.analyzer.build_storage_backend", return_value=be):
         with patch(

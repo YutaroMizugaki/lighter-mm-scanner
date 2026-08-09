@@ -28,11 +28,18 @@ export type AnalysisStatus = {
   duration_seconds?: number | null;
   start_ms?: number;
   end_ms?: number;
+  analysis_end_ms?: number;
+  durable_watermark_ms?: number;
   book_rows?: number;
   trade_rows?: number;
   markout_rows?: number;
   markets_analyzed?: number;
   candidates?: number;
+};
+
+export type DashboardGeneration = {
+  analysis_id: string;
+  generated_at: string;
 };
 
 export type Overview = {
@@ -140,13 +147,31 @@ async function fetchJson<T>(path: string): Promise<FetchResult<T>> {
   }
 }
 
+async function resolveGenerationPrefix(): Promise<string> {
+  const current = await fetchJson<DashboardGeneration>("current.json");
+  if (current.ok && current.data.analysis_id) {
+    return `generations/${current.data.analysis_id}/`;
+  }
+  return "";
+}
+
 export async function getOverview(): Promise<Overview | null> {
-  const result = await fetchJson<Overview>("latest.json");
-  return result.ok ? result.data : null;
+  const prefix = await resolveGenerationPrefix();
+  const result = await fetchJson<Overview>(`${prefix}latest.json`);
+  if (result.ok) return result.data;
+  if (prefix) {
+    const legacy = await fetchJson<Overview>("latest.json");
+    return legacy.ok ? legacy.data : null;
+  }
+  return null;
 }
 
 export async function getOverviewResult(): Promise<FetchResult<Overview>> {
-  return fetchJson<Overview>("latest.json");
+  const prefix = await resolveGenerationPrefix();
+  const result = await fetchJson<Overview>(`${prefix}latest.json`);
+  if (result.ok) return result;
+  if (prefix) return fetchJson<Overview>("latest.json");
+  return result;
 }
 
 export async function getCollectorStatusResult(): Promise<FetchResult<CollectorStatus>> {
@@ -160,7 +185,11 @@ export async function getAnalysisStatusResult(): Promise<FetchResult<AnalysisSta
 export async function getMarketsResult(): Promise<
   FetchResult<{ markets: MarketRow[] }>
 > {
-  return fetchJson<{ markets: MarketRow[] }>("markets.json");
+  const prefix = await resolveGenerationPrefix();
+  const result = await fetchJson<{ markets: MarketRow[] }>(`${prefix}markets.json`);
+  if (result.ok) return result;
+  if (prefix) return fetchJson<{ markets: MarketRow[] }>("markets.json");
+  return result;
 }
 
 /** Compatibility helper — prefer getMarketsResult() when failure must surface. */
@@ -170,8 +199,16 @@ export async function getMarkets(): Promise<MarketRow[]> {
 }
 
 export async function getMarket(symbol: string): Promise<MarketRow | null> {
-  const result = await fetchJson<MarketRow>(`market/${encodeURIComponent(symbol)}.json`);
-  return result.ok ? result.data : null;
+  const prefix = await resolveGenerationPrefix();
+  const result = await fetchJson<MarketRow>(
+    `${prefix}market/${encodeURIComponent(symbol)}.json`,
+  );
+  if (result.ok) return result.data;
+  if (prefix) {
+    const legacy = await fetchJson<MarketRow>(`market/${encodeURIComponent(symbol)}.json`);
+    return legacy.ok ? legacy.data : null;
+  }
+  return null;
 }
 
 export function fmt(n: number | null | undefined, digits = 2, signed = false): string {

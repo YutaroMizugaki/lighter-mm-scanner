@@ -23,7 +23,7 @@ from lighter_mm.logging_setup import log_event
 from lighter_mm.models import MarketStatsSnapshot, RuntimeCounters, TradeEvent
 from lighter_mm.orderbook.book import LocalOrderBook
 from lighter_mm.rest.markets import MarketDiscovery
-from lighter_mm.storage.lock import LeaderLock, wait_for_leadership
+from lighter_mm.storage.lock import LeaderLock, LostLeadershipError, wait_for_leadership
 from lighter_mm.storage.parquet_store import ParquetStore
 from lighter_mm.storage.sqlite_meta import SqliteMeta
 from lighter_mm.storage.state import RunState, now_iso
@@ -83,6 +83,9 @@ class CollectorApp:
         self._last_usable_book_sample_ts: int | None = None
         self._trades_without_reference_mid: int = 0
         self.holder_id = uuid.uuid4().hex
+        self._lost_leadership = False
+        self._pending_dq_rows: list[tuple[int, dict[str, Any]]] = []
+        self._last_dq_flush_mono = 0.0
 
         self.run_id, self.state, resumed = self._resolve_run()
         self.sync = DurableSync(
@@ -120,6 +123,14 @@ class CollectorApp:
             self._deployment_gaps = int(self.state.deployment_gaps) + 1
             self.state.deployment_gaps = self._deployment_gaps
             log_event(log, "collector_resumed", f"resumed run {self.run_id}", run_id=self.run_id)
+
+    def _require_leadership(self, *, phase: str) -> None:
+        if self._lost_leadership:
+            raise LostLeadershipError(f"collector lock lost before {phase}")
+        if not self.lock.renew(self.run_id, git_sha=self.settings.git_sha):
+            self._lost_leadership = True
+            self._stop.set()
+            raise LostLeadershipError(f"collector lock lost during {phase}")
 
     def _resolve_run(self) -> tuple[str, RunState, bool]:
         active = None
@@ -329,7 +340,6 @@ class CollectorApp:
 
     async def shutdown(self) -> None:
         self._stop.set()
-        self.lock.renew(self.run_id, git_sha=self.settings.git_sha)
         if self._ws:
             await self._ws.stop()
             log_event(log, "ws_disconnected", "websocket stopped", run_id=self.run_id)
@@ -337,36 +347,59 @@ class CollectorApp:
             self.markout.poll(utc_ms(), self.mid_histories)
         except Exception as exc:  # noqa: BLE001
             log.warning("final markout drain failed: %s", exc)
+        if self._lost_leadership:
+            log.warning("skipping shutdown durable writes — leadership lost")
+            return
         try:
             await asyncio.to_thread(self._sync_only, final=True)
-            self.lock.renew(self.run_id, git_sha=self.settings.git_sha)
+            if self._lost_leadership:
+                return
             self.store.close()
-            status = "completed" if self._completed else "running"
-            self.state.status = status
             if self._completed:
+                self.state.status = "completed"
                 self.state.ended_at = now_iso()
+                self._write_state()
+                self._require_leadership(phase="completed state upload")
+                self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+                self.backend.upload_json(
+                    self.sync.active_pointer_key(),
+                    {
+                        "run_id": self.run_id,
+                        "status": "completed",
+                        "updated_at": now_iso(),
+                        "git_sha": self.settings.git_sha,
+                        "shutdown_reason": "completed",
+                    },
+                )
                 self._create_final_analysis_request()
-            self._write_state()
-            self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
-            self.backend.upload_json(
-                self.sync.active_pointer_key(),
-                {
-                    "run_id": self.run_id,
-                    "status": status,
-                    "updated_at": now_iso(),
-                    "git_sha": self.settings.git_sha,
-                    "shutdown_reason": "completed" if self._completed else "preempted_or_signal",
-                },
-            )
-            self._publish_collector_status()
+            else:
+                self.state.status = "running"
+                self._write_state()
+                self._require_leadership(phase="shutdown state upload")
+                self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+                self.backend.upload_json(
+                    self.sync.active_pointer_key(),
+                    {
+                        "run_id": self.run_id,
+                        "status": "running",
+                        "updated_at": now_iso(),
+                        "git_sha": self.settings.git_sha,
+                        "shutdown_reason": "preempted_or_signal",
+                    },
+                )
+            if not self._lost_leadership:
+                self._publish_collector_status()
             self.meta.end_run(self.run_id, status="completed" if self._completed else "stopped")
+        except LostLeadershipError:
+            log.error("shutdown aborted — lost leadership")
         except Exception as exc:  # noqa: BLE001
             log.exception("shutdown flush failed: %s", exc)
-            self.state.status = "error"
-            try:
-                self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
-            except Exception:  # noqa: BLE001
-                pass
+            if not self._lost_leadership:
+                self.state.status = "error"
+                try:
+                    self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+                except Exception:  # noqa: BLE001
+                    pass
         finally:
             self.lock.release()
             await self.discovery.close()
@@ -396,10 +429,13 @@ class CollectorApp:
         self.state.touch()
 
     async def _persist_state(self, *, flush_upload: bool = False) -> None:
+        if getattr(self, "_lost_leadership", False):
+            return
         self._write_state()
         if flush_upload:
             await asyncio.to_thread(self._sync_only, final=False)
         else:
+            self._require_leadership(phase="state heartbeat upload")
             self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
             self.backend.upload_json(
                 self.sync.active_pointer_key(),
@@ -412,9 +448,11 @@ class CollectorApp:
             )
 
     def _create_final_analysis_request(self) -> None:
+        if getattr(self, "_lost_leadership", False):
+            return
         key = self.sync.analysis_request_key(self.run_id)
         existing = self.backend.download_json(key)
-        if existing and existing.get("status") in {"done", "pending"}:
+        if existing and existing.get("status") in {"done", "pending", "running"}:
             return
         self.backend.upload_json(
             key,
@@ -423,6 +461,9 @@ class CollectorApp:
                 "type": "final",
                 "status": "pending",
                 "requested_at": now_iso(),
+                "attempts": 0,
+                "last_attempt_at": None,
+                "last_error": None,
             },
         )
         log_event(
@@ -433,6 +474,8 @@ class CollectorApp:
         )
 
     def _publish_collector_status(self) -> None:
+        if getattr(self, "_lost_leadership", False):
+            return
         ws_runtime = self._ws.runtime.public_dict() if self._ws is not None else None
         payload = build_collector_status_payload(
             self.state,
@@ -448,6 +491,7 @@ class CollectorApp:
 
     def _sync_only(self, *, final: bool) -> None:
         """Upload closed Parquet parts — no DuckDB analysis."""
+        self._require_leadership(phase="parquet sync")
         self.store.maybe_flush()
         self.store.rotate_all()
         closed = self.store.take_closed_paths()
@@ -458,7 +502,7 @@ class CollectorApp:
         except Exception:
             self.store.requeue_closed_paths(closed)
             raise
-        self.lock.renew(self.run_id, git_sha=self.settings.git_sha)
+        self._require_leadership(phase="post-sync state upload")
         log_event(
             log,
             "gcs_uploaded",
@@ -483,8 +527,11 @@ class CollectorApp:
 
     def _heartbeat_running(self, note: str) -> None:
         """Advance active_run/state and publish collector_status without analysis."""
+        if getattr(self, "_lost_leadership", False):
+            return
         self._write_state()
         now = now_iso()
+        self._require_leadership(phase="heartbeat upload")
         self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
         self.backend.upload_json(
             self.sync.active_pointer_key(),
@@ -522,8 +569,10 @@ class CollectorApp:
             except TimeoutError:
                 pass
             try:
-                self.lock.renew(self.run_id, git_sha=self.settings.git_sha)
                 await asyncio.to_thread(self._sync_only, final=False)
+            except LostLeadershipError:
+                log.error("durable sync stopped — lost leadership")
+                return
             except Exception as exc:  # noqa: BLE001
                 log.warning("durable sync failed: %s", exc)
                 try:
@@ -542,8 +591,13 @@ class CollectorApp:
             except TimeoutError:
                 pass
             try:
+                if self._lost_leadership:
+                    return
                 self._write_state()
+                self._require_leadership(phase="state heartbeat")
                 self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+            except LostLeadershipError:
+                return
             except Exception as exc:  # noqa: BLE001
                 log.warning("state heartbeat failed: %s", exc)
 
@@ -556,6 +610,7 @@ class CollectorApp:
                 pass
             if not self.lock.renew(self.run_id, git_sha=self.settings.git_sha):
                 log.error("lost leader lock; stopping collector")
+                self._lost_leadership = True
                 self._stop.set()
                 return
 
@@ -622,21 +677,59 @@ class CollectorApp:
         if row.get("horizon_s") == 5 and row.get("maker_markout_bps") is not None:
             self.recent_markout_5s[row["market_id"]].append(float(row["maker_markout_bps"]))
 
+    def _flush_dq_if_due(self, *, force: bool = False) -> None:
+        if not self._pending_dq_rows:
+            return
+        loop = asyncio.get_running_loop()
+        due = force or (
+            loop.time() - self._last_dq_flush_mono >= self.settings.sqlite_dq_flush_seconds
+        )
+        if not due:
+            return
+        rows = self._pending_dq_rows
+        self._pending_dq_rows = []
+        try:
+            self.meta.update_dq_batch(rows)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("sqlite dq batch write failed: %s", exc)
+        self._last_dq_flush_mono = loop.time()
+
     async def _sample_loop(self) -> None:
         interval = self.settings.book_sample_interval_seconds
+        loop = asyncio.get_running_loop()
+        next_tick = loop.time() + interval
+        self._last_dq_flush_mono = loop.time()
+
         while not self._stop.is_set():
-            await asyncio.sleep(interval)
+            delay = max(0.0, next_tick - loop.time())
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=delay)
+                break
+            except TimeoutError:
+                pass
+
+            if self._lost_leadership:
+                break
+
+            now_mono = loop.time()
+            if now_mono - next_tick > interval:
+                missed = int((now_mono - next_tick) // interval)
+                next_tick += missed * interval
+
+            sample_timestamp_ms = utc_ms()
             if not self._ws:
+                next_tick += interval
                 continue
-            now = utc_ms()
+
             ready = 0
+            dq_rows: list[tuple[int, dict[str, Any]]] = []
             for mid, book in self._ws.books.items():
                 meta = self.discovery.markets.get(mid)
                 symbol = meta.symbol if meta else book.symbol
                 metrics = book.compute_metrics(
                     depth_bps_levels=self.settings.depth_bps_levels,
                     stale_seconds=self.settings.stale_book_seconds,
-                    now_ms=now,
+                    now_ms=sample_timestamp_ms,
                 )
                 if metrics.is_usable:
                     ready += 1
@@ -683,11 +776,11 @@ class CollectorApp:
                 row.update(metrics.depths)
                 self.store.write_book(row)
                 self._sample_counts[mid] += 1
-                self._last_book_row_written_ts = now
+                self._last_book_row_written_ts = sample_timestamp_ms
                 if metrics.is_usable:
-                    self._last_usable_book_sample_ts = now
-                    self.mid_histories[mid].add(now, metrics.mid)
-                tpm = self.activity.trades_per_minute(mid, now)
+                    self._last_usable_book_sample_ts = sample_timestamp_ms
+                    self.mid_histories[mid].add(sample_timestamp_ms, metrics.mid)
+                tpm = self.activity.trades_per_minute(mid, sample_timestamp_ms)
                 m5 = list(self.recent_markout_5s[mid])
                 self.live_metrics[mid] = {
                     "symbol": symbol,
@@ -698,13 +791,19 @@ class CollectorApp:
                     "is_stale": metrics.is_inactive,
                     "is_usable": metrics.is_usable,
                 }
-                self.meta.update_dq(
-                    mid,
-                    actual_samples=self._sample_counts[mid],
-                    book_resync_count=book.resync_count,
-                    nonce_gap_count=book.nonce_gap_count,
-                    stale_book_count=book.stale_count,
+                dq_rows.append(
+                    (
+                        mid,
+                        {
+                            "actual_samples": self._sample_counts[mid],
+                            "book_resync_count": book.resync_count,
+                            "nonce_gap_count": book.nonce_gap_count,
+                            "stale_book_count": book.stale_count,
+                        },
+                    )
                 )
+            self._pending_dq_rows.extend(dq_rows)
+            self._flush_dq_if_due()
             self.counters.markets_ready = ready
             self.counters.samples_written = self.store.samples_written
             if self._ws:
@@ -732,6 +831,8 @@ class CollectorApp:
                     log_event(log, "nonce_gap", "nonce gap", run_id=self.run_id)
                 self.counters.client_messages_sent = self._ws.runtime.client_messages_sent
                 self.counters.ws_ok = self._ws.runtime.ws_healthy
+
+            next_tick += interval
 
     async def _markout_loop(self) -> None:
         while not self._stop.is_set():
