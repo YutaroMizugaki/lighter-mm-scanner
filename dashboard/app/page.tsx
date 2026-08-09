@@ -91,6 +91,12 @@ export default async function HomePage() {
   const collectorSyncAt = collectorData?.last_successful_sync ?? null;
   const lastAnalysisAt = analysisDisplayTimestamp(analysisData);
   const analysisError = analysisData?.status === "ERROR" ? analysisData.error : null;
+  const analysisDegraded =
+    analysisFreshness.status === "DEGRADED" ||
+    analysisData?.status === "DEGRADED" ||
+    overview.status === "DEGRADED";
+  const corruptSkipped = analysisData?.corrupt_parquet_files ?? 0;
+  const skippedFiles = analysisData?.skipped_files ?? [];
   const ws = overview.ws;
 
   const showHealthBanner =
@@ -100,22 +106,44 @@ export default async function HomePage() {
     analysisFreshness.status === "ERROR" ||
     analysisFreshness.status === "STALE" ||
     analysisFreshness.status === "UNKNOWN" ||
+    analysisDegraded ||
     healthWarnings.length > 0 ||
     analysisError ||
     collectorNote ||
     analysisNote ||
     marketsFetchFailed;
 
+  const healthBannerPrimary =
+    analysisError ||
+    (analysisDegraded && corruptSkipped > 0
+      ? `DEGRADED — ${corruptSkipped} corrupted Parquet file(s) skipped.`
+      : null) ||
+    healthWarnings[0] ||
+    analysisNote ||
+    collectorNote ||
+    "Check collector and analyzer status.";
+
   return (
     <>
       {showHealthBanner && (
         <section className="note">
-          <strong>Data health:</strong>{" "}
-          {analysisError ||
-            healthWarnings[0] ||
-            analysisNote ||
-            collectorNote ||
-            "Check collector and analyzer status."}
+          <strong>Data health:</strong> {healthBannerPrimary}
+          {analysisDegraded && lastAnalysisAt && (
+            <p className="muted" style={{ marginTop: "0.4rem", fontSize: "0.85rem" }}>
+              Latest valid analysis: {fmtJst(lastAnalysisAt)}
+            </p>
+          )}
+          {analysisDegraded && skippedFiles.length > 0 && (
+            <ul className="compact" style={{ marginTop: "0.4rem" }}>
+              {skippedFiles.slice(0, 5).map((entry) => (
+                <li key={entry.path}>
+                  <code>{entry.path}</code>
+                  <br />
+                  <span className="muted">{entry.error}</span>
+                </li>
+              ))}
+            </ul>
+          )}
           {analysisError && lastAnalysisAt && (
             <p className="muted" style={{ marginTop: "0.4rem", fontSize: "0.85rem" }}>
               Last successful analysis: {fmtJst(lastAnalysisAt)}

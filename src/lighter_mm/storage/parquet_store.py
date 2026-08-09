@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 import uuid
@@ -12,6 +13,8 @@ from typing import Any
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from lighter_mm.storage.parquet_validation import validate_parquet_file
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +40,7 @@ class _RotatingWriter:
         self._last_flush = time.monotonic()
         self._writer: pq.ParquetWriter | None = None
         self._current_path: Path | None = None
+        self._tmp_path: Path | None = None
         self._current_part: str | None = None
         self._current_date: str | None = None
         self._current_hour: str | None = None
@@ -96,12 +100,43 @@ class _RotatingWriter:
             return
         self._writer.close()
         self._writer = None
-        if self._current_path is not None:
-            self._closed_paths.append(self._current_path)
-            self._current_path = None
+        if self._tmp_path is not None and self._current_path is not None:
+            self._finalize_parquet_unlocked(self._tmp_path, self._current_path)
+        self._current_path = None
+        self._tmp_path = None
         self._current_part = None
         self._current_date = None
         self._current_hour = None
+
+    def _finalize_parquet_unlocked(self, tmp_path: Path, final_path: Path) -> None:
+        ok, err = validate_parquet_file(tmp_path)
+        if not ok:
+            log.error(
+                "parquet write validation failed path=%s error=%s",
+                tmp_path,
+                err,
+            )
+            try:
+                tmp_path.unlink()
+            except OSError as unlink_exc:
+                log.warning("failed to remove invalid temp parquet %s: %s", tmp_path, unlink_exc)
+            return
+        try:
+            os.replace(tmp_path, final_path)
+        except OSError as exc:
+            log.error(
+                "parquet atomic rename failed tmp=%s final=%s error=%s",
+                tmp_path,
+                final_path,
+                exc,
+            )
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            return
+        self._closed_paths.append(final_path)
+        log.debug("finalized parquet %s", final_path)
 
     def _part_key(self, ts_ms: int | None) -> tuple[str, str, str]:
         if ts_ms is None:
@@ -127,13 +162,15 @@ class _RotatingWriter:
         out_dir = self.root / self.dataset / f"date={date}" / f"hour={hour}"
         out_dir.mkdir(parents=True, exist_ok=True)
         suffix = uuid.uuid4().hex[:12]
-        path = out_dir / f"part-{part}-{suffix}.parquet"
-        self._writer = pq.ParquetWriter(path, self.schema, compression="zstd")
-        self._current_path = path
+        final_path = out_dir / f"part-{part}-{suffix}.parquet"
+        tmp_path = final_path.with_suffix(".parquet.tmp")
+        self._writer = pq.ParquetWriter(tmp_path, self.schema, compression="zstd")
+        self._current_path = final_path
+        self._tmp_path = tmp_path
         self._current_part = part
         self._current_date = date
         self._current_hour = hour
-        log.debug("opened parquet %s", path)
+        log.debug("opened parquet tmp=%s final=%s", tmp_path, final_path)
 
     def _flush_unlocked(self) -> None:
         if not self._buffer:
