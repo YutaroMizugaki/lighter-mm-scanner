@@ -41,6 +41,34 @@ def test_public_json_mirrored_to_public_bucket(mock_client_cls: MagicMock, tmp_p
 
 
 @patch("google.cloud.storage.Client")
+def test_public_upload_failure_is_raised(mock_client_cls: MagicMock, tmp_path: Path) -> None:
+    client = MagicMock()
+    mock_client_cls.return_value = client
+    private_bucket = MagicMock()
+    public_bucket = MagicMock()
+    private_blob = MagicMock()
+    public_blob = MagicMock()
+    private_bucket.blob.return_value = private_blob
+    public_bucket.blob.return_value = public_blob
+    public_blob.upload_from_string.side_effect = RuntimeError("denied")
+
+    def _bucket(name: str) -> MagicMock:
+        return public_bucket if name == "pub-bucket" else private_bucket
+
+    client.bucket.side_effect = _bucket
+    backend = GCSStorageBackend(
+        "priv-bucket",
+        local_root=tmp_path,
+        public_bucket_name="pub-bucket",
+    )
+    try:
+        backend.upload_json("lighter-mm/public/latest.json", {"ok": True}, public=True)
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as exc:
+        assert "denied" in str(exc)
+
+
+@patch("google.cloud.storage.Client")
 def test_parquet_stays_on_private_bucket(mock_client_cls: MagicMock, tmp_path: Path) -> None:
     client = MagicMock()
     mock_client_cls.return_value = client

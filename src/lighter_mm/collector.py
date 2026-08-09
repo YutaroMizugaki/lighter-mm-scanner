@@ -22,7 +22,7 @@ from lighter_mm.logging_setup import log_event
 from lighter_mm.models import MarketStatsSnapshot, RuntimeCounters, TradeEvent
 from lighter_mm.orderbook.book import LocalOrderBook
 from lighter_mm.rest.markets import MarketDiscovery
-from lighter_mm.storage.lock import LeaderLock
+from lighter_mm.storage.lock import LeaderLock, wait_for_leadership
 from lighter_mm.storage.parquet_store import ParquetStore
 from lighter_mm.storage.sqlite_meta import SqliteMeta
 from lighter_mm.storage.state import RunState, now_iso
@@ -139,7 +139,16 @@ class CollectorApp:
             except NotImplementedError:
                 signal.signal(sig, lambda *_: asyncio.create_task(self._request_stop()))
 
-        if not self.lock.acquire(self.run_id, git_sha=self.settings.git_sha):
+        # During deploys the previous revision may still hold the lease briefly.
+        # Wait instead of exiting immediately (exit → Cloud Run restart storm).
+        if not await asyncio.to_thread(
+            wait_for_leadership,
+            self.lock,
+            self.run_id,
+            git_sha=self.settings.git_sha,
+            timeout_s=180.0,
+            poll_s=5.0,
+        ):
             log.error("another collector holds the leader lock; exiting")
             return
 
