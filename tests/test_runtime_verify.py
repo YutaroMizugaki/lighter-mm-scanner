@@ -218,26 +218,85 @@ def test_analyzer_old_sha_new_revision_warn() -> None:
             "status": "OK",
             "git_sha": "oldsha",
             "generated_at": (now - timedelta(minutes=10)).isoformat(),
+            "last_successful_analysis_at": (now - timedelta(minutes=10)).isoformat(),
         },
         analyzer_job=AnalyzerJobInfo(exists=True, git_sha="abc123", command=["lighter-mm"], args=["cloud-analyze"]),
         executions=[],  # no new execution
     )
     report = verify_runtime(snap, now=now)
     assert report.exit_code() == 0
-    assert any("has not executed yet" in c.message for c in report.checks)
+    assert any("has not produced analysis yet" in c.message for c in report.checks)
 
 
-def test_analyzer_new_revision_success_stale_status_fails() -> None:
+def test_analyzer_new_revision_cloud_run_complete_stale_status_warns() -> None:
+    """Cloud Run COMPLETE must not FAIL revision freshness by itself."""
     now = _now()
     snap = _base_snapshot(
-        analysis_status={"status": "OK", "git_sha": "oldsha", "generated_at": now.isoformat()},
+        analysis_status={
+            "status": "OK",
+            "git_sha": "oldsha",
+            "generated_at": now.isoformat(),
+            "last_successful_analysis_at": now.isoformat(),
+        },
         executions=[
             ExecutionInfo(name="e1", succeeded=True, completed_at=now - timedelta(minutes=5)),
         ],
     )
     report = verify_runtime(snap, now=now)
-    assert report.exit_code() == 1
-    assert any(c.name == "analysis.revision" and c.level.value == "FAIL" for c in report.checks)
+    assert report.exit_code() == 0
+    assert any(
+        c.name == "analysis.revision" and c.level.value == "WARN" and "has not produced analysis yet" in c.message
+        for c in report.checks
+    )
+
+
+def test_analysis_outcome_requires_status_and_current_json() -> None:
+    now = _now()
+    # RUNNING + missing current.json is not analysis success.
+    snap = _base_snapshot(
+        analysis_status={
+            "status": "RUNNING",
+            "git_sha": "abc123",
+            "started_at": (now - timedelta(minutes=5)).isoformat(),
+            "generated_at": (now - timedelta(minutes=5)).isoformat(),
+            "last_successful_analysis_at": None,
+        },
+        current_json=None,
+        current_json_raw=None,
+        generation_files={},
+        executions=[
+            ExecutionInfo(name="e1", succeeded=True, completed_at=now - timedelta(minutes=1)),
+        ],
+    )
+    report = verify_runtime(snap, now=now)
+    outcome = [c for c in report.checks if c.name == "analysis.outcome"]
+    assert outcome
+    assert outcome[0].level.value == "WARN"
+    assert "not analysis success" in outcome[0].message.lower() or "RUNNING" in outcome[0].message
+
+
+def test_analysis_outcome_ok_with_current_json_passes() -> None:
+    report = verify_runtime(_base_snapshot(), now=_now())
+    outcome = [c for c in report.checks if c.name == "analysis.outcome"]
+    assert outcome
+    assert outcome[0].level.value == "PASS"
+
+
+def test_analysis_outcome_degraded_with_current_json_passes() -> None:
+    now = _now()
+    snap = _base_snapshot(
+        analysis_status={
+            "status": "DEGRADED",
+            "run_id": "run-current",
+            "generated_at": (now - timedelta(minutes=6)).isoformat(),
+            "git_sha": "abc123",
+            "last_successful_analysis_at": (now - timedelta(minutes=6)).isoformat(),
+        }
+    )
+    report = verify_runtime(snap, now=now)
+    outcome = [c for c in report.checks if c.name == "analysis.outcome"]
+    assert outcome
+    assert outcome[0].level.value == "PASS"
 
 
 def test_analysis_error_fails() -> None:

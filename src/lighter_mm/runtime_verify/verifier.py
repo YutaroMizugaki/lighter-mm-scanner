@@ -8,6 +8,7 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
+from lighter_mm.cloud.analysis_outcome import is_analysis_success, is_stale_running
 from lighter_mm.runtime_verify.models import (
     CheckLevel,
     CheckResult,
@@ -318,10 +319,18 @@ def _verify_analyzer(report: VerifyReport, snap: RuntimeSnapshot, now: datetime)
     latest = executions[0] if executions else None
     latest_ok = next((e for e in executions if e.succeeded), None)
 
+    # Cloud Run Job COMPLETE ≠ analysis success. Report job completion separately.
     if latest and latest.failed and not latest_ok:
         report.add(_check(CheckLevel.FAIL, section, "latest_execution", f"{latest.name} FAILED"))
     elif latest and latest.succeeded:
-        report.add(_check(CheckLevel.PASS, section, "latest_execution", f"{latest.name} SUCCEEDED"))
+        report.add(
+            _check(
+                CheckLevel.PASS,
+                section,
+                "latest_execution",
+                f"{latest.name} COMPLETE (Cloud Run Job exit; not analysis outcome)",
+            )
+        )
     elif latest and latest.running:
         report.add(_check(CheckLevel.WARN, section, "latest_execution", f"{latest.name} RUNNING"))
     elif latest:
@@ -347,7 +356,7 @@ def _verify_analyzer(report: VerifyReport, snap: RuntimeSnapshot, now: datetime)
                 lvl,
                 section,
                 "last_successful_execution",
-                f"{format_age(ok_age)} ago",
+                f"{format_age(ok_age)} ago (Cloud Run Job; not analysis outcome)",
             )
         )
 
@@ -356,25 +365,78 @@ def _verify_analyzer(report: VerifyReport, snap: RuntimeSnapshot, now: datetime)
         report.add(_check(CheckLevel.FAIL, section, "analysis_status.json", "malformed JSON"))
         return
 
-    aj_sha = snap.analyzer_job.git_sha or _sha_from_image(snap.analyzer_job.image)
-    new_revision_executed = latest_ok is not None and aj_sha and (
-        latest_ok.completed_at and age_seconds(latest_ok.completed_at, now) is not None
-    )
+    analysis_ok = is_analysis_success(data if valid else None, snap.current_json)
 
     if not data:
-        if latest_ok:
-            report.add(_check(CheckLevel.FAIL, section, "analysis_status.json", "missing after success"))
-        else:
-            report.add(_check(CheckLevel.WARN, section, "analysis_status.json", "missing (analyzer not run yet)"))
+        # Do not treat Cloud Run COMPLETE as proof analysis_status should exist.
+        report.add(
+            _check(
+                CheckLevel.WARN,
+                section,
+                "analysis_status.json",
+                "missing (analyzer not run yet; Cloud Run COMPLETE ≠ analysis success)",
+            )
+        )
         return
 
     ast = str(data.get("status") or "")
+    if analysis_ok:
+        report.add(
+            _check(
+                CheckLevel.PASS,
+                section,
+                "analysis.outcome",
+                f"{ast} with last_successful_analysis_at and current.json",
+            )
+        )
+    elif ast == "RUNNING":
+        stale = is_stale_running(data, stale_minutes=float(interval * 2), now=now)
+        started = parse_iso(data.get("started_at") or data.get("generated_at"))
+        run_age = age_seconds(started, now)
+        if stale or (run_age and run_age > interval * 3 * 60):
+            report.add(
+                _check(
+                    CheckLevel.FAIL,
+                    section,
+                    "analysis.outcome",
+                    f"stale RUNNING {format_age(run_age)}; current.json missing or incomplete",
+                )
+            )
+        else:
+            report.add(
+                _check(
+                    CheckLevel.WARN,
+                    section,
+                    "analysis.outcome",
+                    "RUNNING (not analysis success until OK/DEGRADED + current.json)",
+                )
+            )
+    elif latest_ok:
+        report.add(
+            _check(
+                CheckLevel.WARN,
+                section,
+                "analysis.outcome",
+                "Cloud Run COMPLETE but analysis success criteria not met "
+                "(need status OK/DEGRADED, last_successful_analysis_at, current.json)",
+            )
+        )
+    else:
+        report.add(
+            _check(
+                CheckLevel.WARN,
+                section,
+                "analysis.outcome",
+                f"{ast or 'unknown'} (not analysis success)",
+            )
+        )
+
     if ast == "ERROR":
         report.add(_check(CheckLevel.FAIL, section, "analysis.status", ast))
     elif ast == "DEGRADED":
         report.add(_check(CheckLevel.WARN, section, "analysis.status", ast))
     elif ast == "RUNNING":
-        started = parse_iso(data.get("started_at"))
+        started = parse_iso(data.get("started_at") or data.get("generated_at"))
         run_age = age_seconds(started, now)
         if run_age and run_age > interval * 3 * 60:
             report.add(_check(CheckLevel.FAIL, section, "analysis.status", f"RUNNING {format_age(run_age)}"))
@@ -392,24 +454,16 @@ def _verify_analyzer(report: VerifyReport, snap: RuntimeSnapshot, now: datetime)
     if a_sha and exp and a_sha == exp:
         report.add(_check(CheckLevel.PASS, section, "analysis.revision", a_sha))
     elif a_sha and exp and a_sha != exp:
-        if aj_sha == exp and new_revision_executed:
-            report.add(
-                _check(
-                    CheckLevel.FAIL,
-                    section,
-                    "analysis.revision",
-                    f"stale {a_sha} after new revision execution (expected {exp})",
-                )
+        # Cloud Run Job COMPLETE alone is not proof the new revision analyzed.
+        # Keep this as WARN until analysis_status.git_sha matches the expected revision.
+        report.add(
+            _check(
+                CheckLevel.WARN,
+                section,
+                "analysis.revision",
+                f"{a_sha} — new analyzer revision has not produced analysis yet",
             )
-        else:
-            report.add(
-                _check(
-                    CheckLevel.WARN,
-                    section,
-                    "analysis.revision",
-                    f"{a_sha} — new analyzer revision has not executed yet",
-                )
-            )
+        )
     elif a_sha:
         report.add(_check(CheckLevel.PASS, section, "analysis.revision", a_sha))
 
@@ -578,23 +632,13 @@ def _collect_run_ids(report: VerifyReport, snap: RuntimeSnapshot) -> None:
         "latest_json": latest_run,
     }
     if collector_run and analysis_run and collector_run != analysis_run:
-        latest_ok = next((e for e in snap.executions if e.succeeded), None)
-        aj_sha = snap.analyzer_job.git_sha or _sha_from_image(snap.analyzer_job.image)
-        if latest_ok and aj_sha == snap.expected_git_sha:
-            report.add(
-                _check(
-                    CheckLevel.FAIL,
-                    "Public data",
-                    "run_id.consistency",
-                    f"collector={collector_run} analysis={analysis_run} after current run analyzed",
-                )
+        # Cloud Run Job COMPLETE must not escalate this to FAIL; wait for formal
+        # analysis success on the collector's current run_id.
+        report.add(
+            _check(
+                CheckLevel.WARN,
+                "Public data",
+                "run_id.consistency",
+                f"analysis is from previous run (collector={collector_run} analysis={analysis_run})",
             )
-        else:
-            report.add(
-                _check(
-                    CheckLevel.WARN,
-                    "Public data",
-                    "run_id.consistency",
-                    f"analysis is from previous run (collector={collector_run} analysis={analysis_run})",
-                )
-            )
+        )

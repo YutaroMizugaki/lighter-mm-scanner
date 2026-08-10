@@ -38,3 +38,14 @@ def test_cloudbuild_deploy_order_analyzer_before_scheduler() -> None:
     grant_pos = text.index("id: grant-scheduler-invoker")
     scheduler_pos = text.index("id: deploy-analyzer-scheduler")
     assert analyzer_pos < grant_pos < scheduler_pos
+
+
+def test_cloudbuild_analyzer_memory_is_4gi() -> None:
+    """Analyzer container memory must be 4Gi; DuckDB limit stays 1GiB."""
+    text = CLOUDBUILD.read_text(encoding="utf-8")
+    assert '_ANALYZER_MEMORY: 4Gi' in text
+    assert '_ANALYZER_CPU: "2"' in text
+    assert "DUCKDB_MEMORY_LIMIT=1GiB" in text
+    assert "DUCKDB_THREADS=2" in text
+    # Collector memory substitution must remain distinct / unchanged.
+    assert "_MEMORY: 1Gi" in text

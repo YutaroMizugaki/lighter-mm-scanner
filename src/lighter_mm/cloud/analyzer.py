@@ -8,7 +8,8 @@ import time
 import uuid
 from typing import Any
 
-from lighter_mm.analytics.aggregation import analyze_range
+from lighter_mm.analytics.aggregation import _rss_mb, analyze_range
+from lighter_mm.cloud.analysis_outcome import is_stale_running, running_reference_timestamp
 from lighter_mm.cloud.analyzer_publish import (
     _last_successful_analysis_at,
     _publish_analysis_status,
@@ -43,6 +44,40 @@ __all__ = [
     "_iso_to_ms",
     "_durable_watermark_ms",
 ]
+
+
+def _log_lock_busy_diagnostics(
+    *,
+    run_id: str,
+    existing: dict[str, Any] | None,
+    lock_payload: dict[str, Any] | None,
+    stale_minutes: float,
+) -> bool:
+    """Log lock-busy context. Returns whether existing status is stale RUNNING."""
+    status = (existing or {}).get("status")
+    started_at = (existing or {}).get("started_at")
+    generated_at = (existing or {}).get("generated_at")
+    ref_ts = running_reference_timestamp(existing)
+    stale = is_stale_running(existing, stale_minutes=stale_minutes)
+    holder = (lock_payload or {}).get("holder_id")
+    expires_at = (lock_payload or {}).get("expires_at")
+    lock_run_id = (lock_payload or {}).get("run_id")
+    log.warning(
+        "analyzer_lock_busy run_id=%s existing_status=%s started_at=%s "
+        "generated_at=%s ref_ts=%s lock_holder=%s lock_run_id=%s "
+        "lock_expires_at=%s stale_running=%s stale_minutes=%s",
+        run_id,
+        status,
+        started_at,
+        generated_at,
+        ref_ts,
+        holder,
+        lock_run_id,
+        expires_at,
+        stale,
+        stale_minutes,
+    )
+    return stale
 
 
 def _load_run_state(backend, sync: DurableSync) -> RunState | None:
@@ -104,8 +139,25 @@ def run_cloud_analyze(settings: Settings) -> int:
     )
     if not lock.acquire(run_id, git_sha=settings.git_sha):
         existing = backend.download_json(sync.public_key("analysis_status.json"))
+        lock_payload = backend.download_json(sync.analyzer_lock_key())
+        stale = _log_lock_busy_diagnostics(
+            run_id=run_id,
+            existing=existing,
+            lock_payload=lock_payload,
+            stale_minutes=settings.analysis_stale_minutes,
+        )
         if existing and existing.get("status") == "RUNNING":
-            log.info("analysis already running; leaving RUNNING status unchanged")
+            # Active lease/lock is normal exclusivity — do not force-unlock or
+            # start a second analyzer. Stale RUNNING after OOM recovers when the
+            # lease expires and the next execution acquires via CAS.
+            if stale:
+                log.warning(
+                    "stale RUNNING with analyzer lock busy; not starting dual analysis; "
+                    "wait for lease expiry (lease_seconds=%s) then re-run",
+                    settings.analyzer_lock_lease_seconds,
+                )
+            else:
+                log.info("analysis already running; leaving RUNNING status unchanged")
             return 0
         log.info("analysis lock busy; exiting without overwriting status")
         return 0
@@ -156,10 +208,11 @@ def run_cloud_analyze(settings: Settings) -> int:
             analyzer_version=settings.analyzer_version,
         )
         log.info(
-            "analysis_started run_id=%s type=%s last_successful_analysis_at=%s",
+            "analysis_started run_id=%s type=%s last_successful_analysis_at=%s rss_mb=%.1f",
             run_id,
             request_type,
             last_ok,
+            _rss_mb(),
         )
 
         _check_leadership(lost_lock, phase="analysis")
@@ -191,13 +244,14 @@ def run_cloud_analyze(settings: Settings) -> int:
         )
 
         log.info(
-            "analyzing run_id=%s type=%s start_ms=%s end_ms=%s durable_ms=%s books=%s",
+            "analyzing run_id=%s type=%s start_ms=%s end_ms=%s durable_ms=%s books=%s rss_mb=%.1f",
             run_id,
             request_type,
             start_ms,
             end_ms,
             durable_ms,
             sources.books,
+            _rss_mb(),
         )
 
         result = analyze_range(
@@ -216,6 +270,11 @@ def run_cloud_analyze(settings: Settings) -> int:
             raise RuntimeError(str(result["error"]))
 
         _check_leadership(lost_lock, phase="dashboard publish")
+        log.info(
+            "analysis_dashboard_build_start run_id=%s rss_mb=%.1f",
+            run_id,
+            _rss_mb(),
+        )
         payload = build_dashboard_payload(
             settings,
             start_ms=start_ms,
@@ -223,6 +282,11 @@ def run_cloud_analyze(settings: Settings) -> int:
             state=state,
             sources=sources,
             analysis_result=result,
+        )
+        log.info(
+            "analysis_dashboard_build_done run_id=%s rss_mb=%.1f",
+            run_id,
+            _rss_mb(),
         )
         analysis_id = uuid.uuid4().hex[:16]
         _publish_dashboard(backend, sync, payload, analysis_id=analysis_id)

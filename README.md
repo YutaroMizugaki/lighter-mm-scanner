@@ -81,7 +81,7 @@ Lighter → Collector Worker Pool → immutable Parquet → Private GCS
 ### Analyzer Job deployment
 
 - **Command:** `lighter-mm cloud-analyze`
-- **Resources:** 2 CPU / 2 GiB (configurable via `_ANALYZER_CPU` / `_ANALYZER_MEMORY`)
+- **Resources:** 2 CPU / 4 GiB (configurable via `_ANALYZER_CPU` / `_ANALYZER_MEMORY`; DuckDB `DUCKDB_MEMORY_LIMIT=1GiB` is separate from container memory)
 - **Schedule:** `*/15 * * * *` (Cloud Scheduler → Cloud Run Job)
 - **GCS mount:** `/mnt/lighter-mm` (read-only)
 - **Publishes:** `current.json` + `generations/{id}/*` (and legacy `latest.json` mirror), `analysis_status.json`

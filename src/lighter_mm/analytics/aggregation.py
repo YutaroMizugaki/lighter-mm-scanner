@@ -218,6 +218,16 @@ def analyze_range(
         },
         all_corrupt,
     )
+    log.info(
+        "analysis phase=parquet_prepare elapsed=%.3fs valid_books=%s valid_trades=%s "
+        "valid_markouts=%s corrupt_files=%s rss_mb=%.1f",
+        time.monotonic() - t0,
+        len(book_valid),
+        len(trade_valid),
+        len(markout_valid),
+        len(all_corrupt),
+        _rss_mb(),
+    )
 
     if not book_valid:
         log.error(
@@ -365,33 +375,51 @@ def analyze_range(
     book_count = con.execute("SELECT COUNT(*) FROM book_deduped").fetchone()[0]
     latest_book_event_ms = con.execute("SELECT MAX(timestamp_ms) FROM book_deduped").fetchone()[0]
     profile: dict[str, float] = {}
+    rss = _rss_mb()
     if benchmark_profile:
-        profile["rss_after_book_load_mb"] = _rss_mb()
+        profile["rss_after_book_load_mb"] = rss
     log.info(
-        "analysis phase=book_load elapsed=%.3fs book_rows=%s",
+        "analysis phase=book_load elapsed=%.3fs book_rows=%s rss_mb=%.1f",
         time.monotonic() - t0,
         book_count,
+        rss,
     )
 
     t_book = time.monotonic()
     book_agg = _aggregate_book_sql(con, settings, start_ms, end_ms, hours)
+    rss = _rss_mb()
     if benchmark_profile:
-        profile["rss_after_book_aggregate_mb"] = _rss_mb()
-    log.info("analysis phase=book_aggregate elapsed=%.3fs markets=%s", time.monotonic() - t_book, len(book_agg))
+        profile["rss_after_book_aggregate_mb"] = rss
+    log.info(
+        "analysis phase=book_aggregate elapsed=%.3fs markets=%s rss_mb=%.1f",
+        time.monotonic() - t_book,
+        len(book_agg),
+        rss,
+    )
 
     t_persist = time.monotonic()
     persistence = _spread_persistence_sql(
         con, settings.spread_thresholds_bps, settings.book_sample_interval_seconds
     )
+    rss = _rss_mb()
     if benchmark_profile:
-        profile["rss_after_spread_persistence_mb"] = _rss_mb()
-    log.info("analysis phase=spread_persistence elapsed=%.3fs", time.monotonic() - t_persist)
+        profile["rss_after_spread_persistence_mb"] = rss
+    log.info(
+        "analysis phase=spread_persistence elapsed=%.3fs rss_mb=%.1f",
+        time.monotonic() - t_persist,
+        rss,
+    )
 
     t_vol = time.monotonic()
     volatility = _volatility_sql(con, settings)
+    rss = _rss_mb()
     if benchmark_profile:
-        profile["rss_after_volatility_mb"] = _rss_mb()
-    log.info("analysis phase=volatility elapsed=%.3fs", time.monotonic() - t_vol)
+        profile["rss_after_volatility_mb"] = rss
+    log.info(
+        "analysis phase=volatility elapsed=%.3fs rss_mb=%.1f",
+        time.monotonic() - t_vol,
+        rss,
+    )
 
     trade_count = 0
     trade_agg: dict[int, dict[str, Any]] = {}
@@ -409,12 +437,14 @@ def analyze_range(
             trade_count = con.execute("SELECT COUNT(*) FROM trade_raw").fetchone()[0]
             t_trade = time.monotonic()
             trade_agg = _aggregate_trades_sql(con)
+            rss = _rss_mb()
             if benchmark_profile:
-                profile["rss_after_trade_aggregate_mb"] = _rss_mb()
+                profile["rss_after_trade_aggregate_mb"] = rss
             log.info(
-                "analysis phase=trade_aggregate elapsed=%.3fs trade_rows=%s",
+                "analysis phase=trade_aggregate elapsed=%.3fs trade_rows=%s rss_mb=%.1f",
                 time.monotonic() - t_trade,
                 trade_count,
+                rss,
             )
 
     markout_count = 0
@@ -435,12 +465,14 @@ def analyze_range(
             markout_count = con.execute("SELECT COUNT(*) FROM markout_raw").fetchone()[0]
             t_markout = time.monotonic()
             markout_agg = _aggregate_markouts_sql(con)
+            rss = _rss_mb()
             if benchmark_profile:
-                profile["rss_after_markout_aggregate_mb"] = _rss_mb()
+                profile["rss_after_markout_aggregate_mb"] = rss
             log.info(
-                "analysis phase=markout_aggregate elapsed=%.3fs markout_rows=%s",
+                "analysis phase=markout_aggregate elapsed=%.3fs markout_rows=%s rss_mb=%.1f",
                 time.monotonic() - t_markout,
                 markout_count,
+                rss,
             )
 
     rows = _merge_market_rows(book_agg, persistence, volatility, trade_agg, markout_agg, hours)
@@ -457,12 +489,14 @@ def analyze_range(
         min_observation_hours=settings.min_observation_hours_for_candidate,
     )
     scored = score_markets(rows, thresholds=thresholds)
+    rss = _rss_mb()
     if benchmark_profile:
-        profile["rss_after_score_mb"] = _rss_mb()
+        profile["rss_after_score_mb"] = rss
     log.info(
-        "analysis phase=score elapsed=%.3fs total_elapsed=%.3fs",
+        "analysis phase=score elapsed=%.3fs total_elapsed=%.3fs rss_mb=%.1f",
         time.monotonic() - t_score,
         time.monotonic() - t0,
+        rss,
     )
     log.info(
         "analysis completed valid_files=%s corrupt_files=%s status=%s",

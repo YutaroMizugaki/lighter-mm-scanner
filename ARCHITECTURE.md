@@ -63,7 +63,7 @@ Cloud Run Worker Pool (lighter-mm-collector)   1 CPU / 1 GiB
 Private GCS (source of truth)
         │  read-only mount
         ▼
-Cloud Run Job (lighter-mm-analyzer)            2 CPU / 2 GiB
+Cloud Run Job (lighter-mm-analyzer)            2 CPU / 4 GiB
         │  aggregate JSON
         ▼
 Public GCS
