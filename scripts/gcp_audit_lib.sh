@@ -88,48 +88,116 @@ audit_cloud_build_sa() {
     | awk '{print $1 "@cloudbuild.gserviceaccount.com"}'
 }
 
+# Resolve the service account that actually runs Cloud Build (not always the legacy SA).
+audit_cloud_build_executor_sa() {
+  local project_id="$1"
+  local region="${2:-${REGION:-asia-northeast1}}"
+
+  if [[ -n "${CLOUD_BUILD_SERVICE_ACCOUNT:-}" ]]; then
+    printf '%s' "${CLOUD_BUILD_SERVICE_ACCOUNT}"
+    return 0
+  fi
+
+  local default_sa=""
+  if default_sa="$(gcloud builds get-default-service-account \
+      --project="${project_id}" \
+      --region="${region}" 2>/dev/null)"; then
+    if [[ -n "${default_sa}" ]]; then
+      printf '%s' "${default_sa}"
+      return 0
+    fi
+  fi
+
+  audit_cloud_build_sa "${project_id}"
+}
+
+_audit_lib_dir() {
+  cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+}
+
+_audit_gcp_helpers() {
+  local script_dir
+  script_dir="$(_audit_lib_dir)"
+  printf '%s/audit_gcp_helpers.py' "${script_dir}"
+}
+
+audit_api_probe() {
+  local project_id="$1"
+  local api="$2"
+  case "${api}" in
+    run.googleapis.com)
+      gcloud run worker-pools list --project="${project_id}" --region="${REGION:-asia-northeast1}" --limit=1 >/dev/null 2>&1
+      ;;
+    cloudscheduler.googleapis.com)
+      gcloud scheduler jobs list --project="${project_id}" --location="${REGION:-asia-northeast1}" --limit=1 >/dev/null 2>&1
+      ;;
+    artifactregistry.googleapis.com)
+      gcloud artifacts repositories list --project="${project_id}" --location="${REGION:-asia-northeast1}" --limit=1 >/dev/null 2>&1
+      ;;
+    storage.googleapis.com)
+      gcloud storage buckets list --project="${project_id}" --limit=1 >/dev/null 2>&1
+      ;;
+    cloudbuild.googleapis.com)
+      gcloud builds list --project="${project_id}" --region="${REGION:-asia-northeast1}" --limit=1 >/dev/null 2>&1
+      ;;
+    iam.googleapis.com)
+      gcloud projects get-iam-policy "${project_id}" --format=json --limit=1 >/dev/null 2>&1
+      ;;
+    cloudresourcemanager.googleapis.com)
+      gcloud projects describe "${project_id}" >/dev/null 2>&1
+      ;;
+    logging.googleapis.com)
+      gcloud logging read 'timestamp>="1970-01-01T00:00:00Z"' --project="${project_id}" --limit=1 >/dev/null 2>&1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 audit_api_enabled() {
   local project_id="$1"
   local api="$2"
   local label="$3"
+  local tmp_err list_out list_rc perm_denied=0
 
-  if gcloud services list --enabled --project="${project_id}" \
-      --filter="config.name:${api}" --format="value(config.name)" 2>/dev/null \
-      | grep -qx "${api}"; then
+  tmp_err="$(mktemp)"
+  list_rc=0
+  list_out="$(gcloud services list --enabled --project="${project_id}" \
+      --filter="config.name:${api}" --format="value(config.name)" 2>"${tmp_err}")" || list_rc=$?
+
+  if [[ "${list_rc}" -eq 0 ]] && printf '%s' "${list_out}" | grep -qx "${api}"; then
+    rm -f "${tmp_err}"
     audit_pass "${label}"
     return 0
   fi
 
-  # Probe without services.list permission (Cloud Build may lack serviceusage.services.list).
-  case "${api}" in
-    run.googleapis.com)
-      if gcloud run worker-pools list --project="${project_id}" --region="${REGION:-asia-northeast1}" --limit=1 >/dev/null 2>&1; then
-        audit_pass "${label} (probe ok)"
-        return 0
-      fi
-      ;;
-    cloudscheduler.googleapis.com)
-      if gcloud scheduler jobs list --project="${project_id}" --location="${REGION:-asia-northeast1}" --limit=1 >/dev/null 2>&1; then
-        audit_pass "${label} (probe ok)"
-        return 0
-      fi
-      ;;
-    artifactregistry.googleapis.com)
-      if gcloud artifacts repositories list --project="${project_id}" --location="${REGION:-asia-northeast1}" --limit=1 >/dev/null 2>&1; then
-        audit_pass "${label} (probe ok)"
-        return 0
-      fi
-      ;;
-    storage.googleapis.com)
-      if gcloud storage buckets list --project="${project_id}" --limit=1 >/dev/null 2>&1; then
-        audit_pass "${label} (probe ok)"
-        return 0
-      fi
-      ;;
-  esac
+  if grep -qiE 'permission|denied|403|does not have|PERMISSION_DENIED' "${tmp_err}" 2>/dev/null; then
+    perm_denied=1
+  fi
+  rm -f "${tmp_err}"
 
-  audit_fail "${label} (${api}) is not enabled"
-  return 1
+  if audit_api_probe "${project_id}" "${api}"; then
+    if [[ "${perm_denied}" -eq 1 ]]; then
+      audit_pass "${label} (probe ok; cannot list services — missing serviceusage.services.list)"
+    else
+      audit_pass "${label} (probe ok)"
+    fi
+    return 0
+  fi
+
+  if [[ "${perm_denied}" -eq 1 ]]; then
+    audit_unknown "${label} (${api}) — cannot verify (missing serviceusage.services.list)"
+    return 0
+  fi
+
+  if [[ "${list_rc}" -eq 0 ]]; then
+    audit_fail "${label} (${api}) is not enabled"
+    return 1
+  fi
+
+  audit_unknown "${label} (${api}) — cannot verify API status"
+  return 0
 }
 
 audit_check_apis() {
@@ -309,13 +377,13 @@ audit_member_has_project_role() {
 
 audit_check_cloud_build_iam() {
   local project_id="$1"
-  audit_section "Cloud Build IAM"
+  audit_section "Cloud Build executor IAM"
   local build_sa
-  if ! build_sa="$(audit_cloud_build_sa "${project_id}")" || [[ -z "${build_sa}" ]]; then
-    audit_unknown "cannot resolve Cloud Build service account"
+  if ! build_sa="$(audit_cloud_build_executor_sa "${project_id}")" || [[ -z "${build_sa}" ]]; then
+    audit_unknown "cannot resolve Cloud Build executor service account"
     return 0
   fi
-  audit_pass "Cloud Build SA ${build_sa}"
+  audit_pass "Cloud Build executor SA ${build_sa}"
   local role
   for role in "${GCP_CLOUD_BUILD_ROLES[@]}"; do
     audit_member_has_project_role "${project_id}" "serviceAccount:${build_sa}" "${role}" || true
@@ -330,8 +398,8 @@ audit_check_service_account_user_on_runtime() {
     return 0
   fi
   local build_sa
-  if ! build_sa="$(audit_cloud_build_sa "${project_id}")" || [[ -z "${build_sa}" ]]; then
-    audit_unknown "cannot resolve Cloud Build SA"
+  if ! build_sa="$(audit_cloud_build_executor_sa "${project_id}")" || [[ -z "${build_sa}" ]]; then
+    audit_unknown "cannot resolve Cloud Build executor SA"
     return 0
   fi
   local policy
@@ -342,7 +410,7 @@ audit_check_service_account_user_on_runtime() {
   fi
   if printf '%s' "${policy}" | grep -q "\"serviceAccount:${build_sa}\"" \
       && printf '%s' "${policy}" | grep -q 'roles/iam.serviceAccountUser'; then
-    audit_pass "Cloud Build SA can act as ${SERVICE_ACCOUNT}"
+    audit_pass "Cloud Build executor SA can act as ${SERVICE_ACCOUNT}"
   else
     # Project-level roles/iam.serviceAccountUser also satisfies deploy; already checked above.
     audit_warn "no direct SA-user binding on ${SERVICE_ACCOUNT} (ok if project-level iam.serviceAccountUser is granted)"
@@ -408,19 +476,51 @@ audit_check_worker_pool_prereqs() {
   fi
 }
 
+audit_ar_collector_digest() {
+  local project_id="$1"
+  local region="$2"
+  local ar_repo="$3"
+  local commit_sha="$4"
+  gcloud artifacts docker images describe \
+    "${region}-docker.pkg.dev/${project_id}/${ar_repo}/collector:${commit_sha}" \
+    --format='value(image_summary.digest)' 2>/dev/null || true
+}
+
+audit_verify_deployment_image() {
+  local label="$1"
+  local deployed_image="$2"
+  local commit_sha="$3"
+  local ar_digest="${4:-}"
+  local git_sha_env="${5:-}"
+  local helpers
+  helpers="$(_audit_gcp_helpers)"
+
+  if [[ -z "${deployed_image}" ]]; then
+    audit_fail "${label} deployment image is empty"
+    return 1
+  fi
+
+  local ok
+  ok="$(python3 "${helpers}" provenance-ok "${deployed_image}" "${commit_sha}" "${ar_digest}" "${git_sha_env}")"
+  if [[ "${ok}" == "yes" ]]; then
+    if [[ -n "${ar_digest}" ]]; then
+      audit_pass "${label} image digest matches Artifact Registry (${commit_sha})"
+    elif [[ -n "${git_sha_env}" && "${git_sha_env}" == "${commit_sha}" ]]; then
+      audit_pass "${label} GIT_SHA env matches ${commit_sha}"
+    else
+      audit_pass "${label} image references commit ${commit_sha}: ${deployed_image}"
+    fi
+    return 0
+  fi
+
+  audit_fail "${label} image does not match commit ${commit_sha}: ${deployed_image}"
+  return 1
+}
+
 audit_image_contains_sha() {
   local image="$1"
   local commit_sha="$2"
-  if [[ -z "${image}" ]]; then
-    audit_fail "deployment image is empty"
-    return 1
-  fi
-  if [[ "${image}" == *":${commit_sha}"* ]] || [[ "${image}" == *"/collector:${commit_sha}"* ]]; then
-    audit_pass "image references commit ${commit_sha}: ${image}"
-    return 0
-  fi
-  audit_fail "image does not reference commit ${commit_sha}: ${image}"
-  return 1
+  audit_verify_deployment_image "deployment" "${image}" "${commit_sha}" "" ""
 }
 
 audit_check_worker_pool_deployed() {
@@ -428,6 +528,7 @@ audit_check_worker_pool_deployed() {
   local commit_sha="$2"
   local worker_pool="${WORKER_POOL:-lighter-mm-collector}"
   local region="${REGION:-asia-northeast1}"
+  local ar_repo="${AR_REPO:-lighter-mm}"
   audit_section "Worker pool deployment"
   local json
   if ! json="$(gcloud run worker-pools describe "${worker_pool}" \
@@ -436,13 +537,12 @@ audit_check_worker_pool_deployed() {
     return 1
   fi
   audit_pass "worker pool ${worker_pool} exists"
-  local image
-  image="$(printf '%s' "${json}" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-print(data.get('template', {}).get('containers', [{}])[0].get('image', ''), end='')
-" 2>/dev/null || true)"
-  audit_image_contains_sha "${image}" "${commit_sha}" || true
+  local helpers image git_sha_env ar_digest
+  helpers="$(_audit_gcp_helpers)"
+  image="$(printf '%s' "${json}" | python3 "${helpers}" image)"
+  git_sha_env="$(printf '%s' "${json}" | python3 "${helpers}" git-sha)"
+  ar_digest="$(audit_ar_collector_digest "${project_id}" "${region}" "${ar_repo}" "${commit_sha}")"
+  audit_verify_deployment_image "worker pool" "${image}" "${commit_sha}" "${ar_digest}" "${git_sha_env}" || true
 }
 
 audit_check_analyzer_job_deployed() {
@@ -450,6 +550,7 @@ audit_check_analyzer_job_deployed() {
   local commit_sha="$2"
   local analyzer_job="${ANALYZER_JOB:-lighter-mm-analyzer}"
   local region="${REGION:-asia-northeast1}"
+  local ar_repo="${AR_REPO:-lighter-mm}"
   audit_section "Analyzer job deployment"
   local json
   if ! json="$(gcloud run jobs describe "${analyzer_job}" \
@@ -458,16 +559,12 @@ audit_check_analyzer_job_deployed() {
     return 1
   fi
   audit_pass "analyzer job ${analyzer_job} exists"
-  local image
-  image="$(printf '%s' "${json}" | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-containers = data.get('template', {}).get('template', {}).get('containers', [])
-if not containers:
-    containers = data.get('template', {}).get('containers', [])
-print((containers[0] if containers else {}).get('image', ''), end='')
-" 2>/dev/null || true)"
-  audit_image_contains_sha "${image}" "${commit_sha}" || true
+  local helpers image git_sha_env ar_digest
+  helpers="$(_audit_gcp_helpers)"
+  image="$(printf '%s' "${json}" | python3 "${helpers}" image)"
+  git_sha_env="$(printf '%s' "${json}" | python3 "${helpers}" git-sha)"
+  ar_digest="$(audit_ar_collector_digest "${project_id}" "${region}" "${ar_repo}" "${commit_sha}")"
+  audit_verify_deployment_image "analyzer job" "${image}" "${commit_sha}" "${ar_digest}" "${git_sha_env}" || true
 }
 
 audit_check_scheduler_target() {
