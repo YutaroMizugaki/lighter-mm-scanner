@@ -396,15 +396,14 @@ def test_size_ladder_25_50_100() -> None:
     assert DEFAULT_ORDER_USD == 50.0
 
 
-def test_edge_half_spread_formula() -> None:
-    # spread=4bp → half=2; markout=+1; fee=0; fill=0.5 → edge_per_fill=3; edge=1.5
+def test_edge_markout_minus_fee_formula() -> None:
+    # markout=+1; fee=0; fill=0.5 → edge=0.5 (no half-spread term)
     edge = estimated_maker_edge_bps(
         fill_rate=0.5,
-        median_spread_bps=4.0,
         maker_markout_bps=1.0,
         maker_fee_bps=0.0,
     )
-    assert edge == pytest.approx(1.5)
+    assert edge == pytest.approx(0.5)
 
     row = {
         "median_spread_bps": 4.0,
@@ -414,7 +413,7 @@ def test_edge_half_spread_formula() -> None:
         "estimated_maker_fill_rate_30s_conservative": 0.5,
     }
     attach_estimated_maker_edge(row)
-    assert row["estimated_maker_edge_5s_bps"] == pytest.approx(1.5)
+    assert row["estimated_maker_edge_5s_bps"] == pytest.approx(0.5)
     assert row["estimated_maker_edge_fee_included"] is False
 
 
@@ -423,12 +422,11 @@ def test_maker_fee_rate_to_bps() -> None:
     assert maker_fee_rate_to_bps(0.00045) == pytest.approx(4.5)
     edge = estimated_maker_edge_bps(
         fill_rate=1.0,
-        median_spread_bps=4.0,
         maker_markout_bps=1.0,
         maker_fee_bps=maker_fee_rate_to_bps(0.00010),
     )
-    # half spread 2 + markout 1 - fee 1 = 2
-    assert edge == pytest.approx(2.0)
+    # markout 1 - fee 1 = 0
+    assert edge == pytest.approx(0.0)
 
 
 def test_downsample_caps_24h_window() -> None:

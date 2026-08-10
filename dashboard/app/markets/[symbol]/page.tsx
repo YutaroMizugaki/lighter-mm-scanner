@@ -1,5 +1,6 @@
 import Link from "next/link";
 import {
+  ESTIMATED_EDGE_TOOLTIP,
   ESTIMATED_FILL_TOOLTIP,
   fmt,
   fmtEstimatedFill,
@@ -62,8 +63,15 @@ export default async function MarketDetailPage({
             {fmtEstimatedFill(m.estimated_maker_fill_rate_5s_conservative, fillQ)}
           </div>
         </div>
-        <div className="kpi">
-          <div className="label">Est. Maker Edge 30s</div>
+        <div className="kpi" title={ESTIMATED_EDGE_TOOLTIP}>
+          <div className="label">
+            Est. Maker Edge 30s
+            {m.estimated_maker_edge_fee_included === false
+              ? " (fee excl.)"
+              : m.estimated_maker_edge_fee_included === true
+                ? " (fee incl.)"
+                : ""}
+          </div>
           <div className="value">{fmt(m.estimated_maker_edge_30s_bps, 2, true)} bp</div>
         </div>
         <div className="kpi">

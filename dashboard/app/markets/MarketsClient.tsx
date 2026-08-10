@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 import type { MarketRow } from "@/lib/data";
 import {
+  ESTIMATED_EDGE_TOOLTIP,
   ESTIMATED_FILL_TOOLTIP,
   fmt,
   fmtEstimatedFill,
@@ -82,7 +83,7 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
               <th title={ESTIMATED_FILL_TOOLTIP}>Est. Fill 30s</th>
               <th>M5</th>
               <th>M30</th>
-              <th title="Estimated Maker Edge (not expected profit)">Est. Edge</th>
+              <th title={ESTIMATED_EDGE_TOOLTIP}>Est. Edge</th>
               <th>Sample Q</th>
               <th title="Market-level trade prints (not Estimated Maker Fill)">Trades</th>
               <th>Coverage</th>

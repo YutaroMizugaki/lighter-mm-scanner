@@ -495,15 +495,24 @@ def analyze_range(
                 trade_count,
                 rss,
             )
+            # Required source fields must exist in Parquet — not merely as
+            # all-NULL projected placeholders — or fill would look like 0%.
+            fill_source_ok = (
+                "price" in trade_available and "is_maker_ask" in trade_available
+            )
             t_fill = time.monotonic()
-            estimated_fill_agg = aggregate_estimated_fill_sql(con)
+            estimated_fill_agg = aggregate_estimated_fill_sql(
+                con, source_fields_available=fill_source_ok
+            )
             rss = _rss_mb()
             if benchmark_profile:
                 profile["rss_after_estimated_fill_mb"] = rss
             log.info(
-                "analysis phase=estimated_fill elapsed=%.3fs markets=%s rss_mb=%.1f",
+                "analysis phase=estimated_fill elapsed=%.3fs markets=%s "
+                "source_fields_ok=%s rss_mb=%.1f",
                 time.monotonic() - t_fill,
                 len(estimated_fill_agg),
+                fill_source_ok,
                 rss,
             )
 

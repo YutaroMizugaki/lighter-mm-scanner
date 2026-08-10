@@ -32,6 +32,7 @@ class CandidateThresholds:
     min_median_spread_bps: float = 1.0
     min_markout_samples_5s: int = 20
     min_markout_samples_30s: int = 20
+    min_estimated_maker_fill_samples: int = 100
     min_median_trades_per_minute: float | None = None
     min_observation_hours: float = 1.0
     min_markout_5s_median_bps: float = -5.0
@@ -344,6 +345,7 @@ def score_markets(
         obs_hours = max(row.get("observation_hours") or 0.0, 0.0)
         observation_ok = obs_hours >= thresholds.min_observation_hours
 
+        fill_sample_ok = fill_samples >= thresholds.min_estimated_maker_fill_samples
         candidate = (
             cov >= thresholds.min_coverage_pct
             and activity_ok
@@ -356,6 +358,7 @@ def score_markets(
             and m30 >= thresholds.min_markout_30s_median_bps
             and m5_count >= thresholds.min_markout_samples_5s
             and m30_count >= thresholds.min_markout_samples_30s
+            and fill_sample_ok
         )
         # Also require activity percentile not bottom 20% among peers when enough markets
         if len(rows) >= 10 and pr_act < 20:

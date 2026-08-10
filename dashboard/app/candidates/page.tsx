@@ -1,5 +1,6 @@
 import Link from "next/link";
 import {
+  ESTIMATED_EDGE_TOOLTIP,
   ESTIMATED_FILL_TOOLTIP,
   fmt,
   fmtEstimatedFill,
@@ -27,7 +28,7 @@ export default async function CandidatesPage() {
               <th title={ESTIMATED_FILL_TOOLTIP}>Est. Fill 30s</th>
               <th>M5</th>
               <th>M30</th>
-              <th>Est. Edge</th>
+              <th title={ESTIMATED_EDGE_TOOLTIP}>Est. Edge</th>
               <th>Sample Q</th>
             </tr>
           </thead>

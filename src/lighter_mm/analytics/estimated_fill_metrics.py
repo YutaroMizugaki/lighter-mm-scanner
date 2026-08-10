@@ -45,17 +45,25 @@ def maker_fee_rate_to_bps(maker_fee: float | None) -> float:
 def estimated_maker_edge_bps(
     *,
     fill_rate: float | None,
-    median_spread_bps: float | None,
     maker_markout_bps: float | None,
     maker_fee_bps: float = 0.0,
 ) -> float | None:
-    """fill_rate × (half_spread + markout − fee). Not expected profit."""
-    if fill_rate is None or median_spread_bps is None or maker_markout_bps is None:
+    """fill_rate × (maker_markout − fee). Not expected profit.
+
+    Maker markout is already measured from the executed maker price to a future
+    mid, so entry spread economics are included there. Do **not** add half-spread
+    again (that would double-count spread).
+    """
+    if fill_rate is None or maker_markout_bps is None:
         return None
-    edge_per_fill = (float(median_spread_bps) / 2.0) + float(maker_markout_bps) - float(
-        maker_fee_bps
-    )
-    return float(fill_rate) * edge_per_fill
+    return float(fill_rate) * (float(maker_markout_bps) - float(maker_fee_bps))
+
+
+def snapshot_bucket_id(timestamp_ms: int, bucket_ms: int = SNAPSHOT_BUCKET_MS) -> int:
+    """Floor bucket id: ``floor(timestamp_ms / bucket_ms)``."""
+    if bucket_ms <= 0:
+        raise ValueError("bucket_ms must be > 0")
+    return int(timestamp_ms) // int(bucket_ms)
 
 
 def max_estimated_fill_snapshots(window_hours: float, bucket_ms: int = SNAPSHOT_BUCKET_MS) -> int:
@@ -115,7 +123,7 @@ def _downsample_snapshots_sql(bucket_ms: int = SNAPSHOT_BUCKET_MS) -> str:
                 best_bid_size_usd,
                 best_ask_size_usd,
                 ROW_NUMBER() OVER (
-                    PARTITION BY market_id, CAST(timestamp_ms / {bucket_ms} AS BIGINT)
+                    PARTITION BY market_id, (timestamp_ms // {bucket_ms})
                     ORDER BY timestamp_ms ASC
                 ) AS rn
             FROM book_observed
@@ -291,25 +299,48 @@ def attach_estimated_maker_edge(
     row["estimated_maker_edge_fee_included"] = fee_included
     row["estimated_maker_edge_5s_bps"] = estimated_maker_edge_bps(
         fill_rate=row.get("estimated_maker_fill_rate_5s_conservative"),
-        median_spread_bps=row.get("median_spread_bps"),
         maker_markout_bps=row.get("maker_markout_5s_median_bps"),
         maker_fee_bps=fee_bps,
     )
     row["estimated_maker_edge_30s_bps"] = estimated_maker_edge_bps(
         fill_rate=row.get("estimated_maker_fill_rate_30s_conservative"),
-        median_spread_bps=row.get("median_spread_bps"),
         maker_markout_bps=row.get("maker_markout_30s_median_bps"),
         maker_fee_bps=fee_bps,
     )
 
 
-def _trade_deduped_ready(con: duckdb.DuckDBPyConnection) -> bool:
+def _trade_fields_computable(con: duckdb.DuckDBPyConnection) -> bool:
+    """True only when trade_deduped can support Estimated Fill.
+
+    Column names alone are insufficient: aggregation may project missing source
+    fields as all-NULL ``price`` / ``is_maker_ask``. That must be treated as
+    unavailable, not as measured 0% fill.
+    """
     try:
-        cols = {r[0] for r in con.execute("DESCRIBE trade_deduped").fetchall()}
+        cols = {str(r[0]) for r in con.execute("DESCRIBE trade_deduped").fetchall()}
     except duckdb.CatalogException:
         return False
     required = {"market_id", "timestamp_ms", "price", "usd_amount", "is_maker_ask"}
-    return required.issubset(cols)
+    if not required.issubset(cols):
+        return False
+    n, n_price, n_side = con.execute(
+        """
+        SELECT
+            COUNT(*)::BIGINT,
+            COUNT(price)::BIGINT,
+            COUNT(is_maker_ask)::BIGINT
+        FROM trade_deduped
+        """
+    ).fetchone()
+    # Empty regular-trade table with a valid schema is computable (measured zero).
+    if int(n) == 0:
+        return True
+    # All-null synthetic columns ⇒ source fields unavailable.
+    return int(n_price) > 0 and int(n_side) > 0
+
+
+def _trade_deduped_ready(con: duckdb.DuckDBPyConnection) -> bool:
+    return _trade_fields_computable(con)
 
 
 def _book_observed_ready(con: duckdb.DuckDBPyConnection) -> bool:
@@ -324,8 +355,16 @@ def aggregate_estimated_fill_sql(
     con: duckdb.DuckDBPyConnection,
     *,
     bucket_ms: int = SNAPSHOT_BUCKET_MS,
+    source_fields_available: bool | None = None,
 ) -> dict[int, dict[str, Any]]:
-    """Compute Estimated Maker Fill rates from materialized books/trades."""
+    """Compute Estimated Maker Fill rates from materialized books/trades.
+
+    ``source_fields_available=False`` short-circuits when the caller already
+    knows required raw trade columns were missing from Parquet (schema drift).
+    When omitted, readiness is inferred from ``trade_deduped`` contents.
+    """
+    if source_fields_available is False:
+        return {}
     if not _book_observed_ready(con) or not _trade_deduped_ready(con):
         return {}
 
