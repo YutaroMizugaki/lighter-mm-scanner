@@ -8,8 +8,8 @@ import ScoreExplainer from "@/components/ScoreExplainer";
 import TopOpportunities from "@/components/TopOpportunities";
 import {
   getAnalysisStatusResult,
+  getCandidatesResult,
   getCollectorStatusResult,
-  getMarketsResult,
   getOverviewResult,
   resolveDashboardBundle,
 } from "@/lib/api";
@@ -27,10 +27,17 @@ import styles from "./summary.module.css";
 
 export default async function HomePage() {
   const bundle = await resolveDashboardBundle();
-  const overviewResult = await getOverviewResult();
-  const collectorResult = await getCollectorStatusResult();
-  const analysisStatusResult = await getAnalysisStatusResult();
-  const marketsResult = await getMarketsResult(bundle);
+  const [
+    overviewResult,
+    collectorResult,
+    analysisStatusResult,
+    candidatesResult,
+  ] = await Promise.all([
+    getOverviewResult(bundle),
+    getCollectorStatusResult(),
+    getAnalysisStatusResult(),
+    getCandidatesResult(bundle),
+  ]);
   const configured = Boolean(process.env.NEXT_PUBLIC_DATA_BASE_URL);
 
   if (!configured) {
@@ -61,8 +68,8 @@ export default async function HomePage() {
   };
   const lastAnalysisAt = publicAnalysis.lastAnalysisAt;
   const analysisStatusFetchFailed = publicAnalysis.analysisStatusFetchFailed;
-  const markets = marketsResult.ok ? marketsResult.data.markets ?? [] : [];
-  const marketsFetchFailed = !marketsResult.ok;
+  const candidates = candidatesResult.ok ? candidatesResult.data.candidates ?? [] : [];
+  const marketDataFetchFailed = !candidatesResult.ok;
 
   const analyzed = overview.markets_analyzed ?? overview.markets;
   const analysisError = analysisData?.status === "ERROR";
@@ -78,7 +85,7 @@ export default async function HomePage() {
   const collectorSyncAt = collectorData?.last_successful_sync ?? null;
 
   const healthWarnings = [...(overview.health_warnings || [])];
-  if (marketsFetchFailed) {
+  if (marketDataFetchFailed) {
     healthWarnings.unshift("Market aggregate data could not be loaded.");
   }
   if (analysisStatusFetchFailed) {
@@ -100,7 +107,7 @@ export default async function HomePage() {
     analysisError ||
     Boolean(collectorNote) ||
     Boolean(analysisNote) ||
-    marketsFetchFailed ||
+    marketDataFetchFailed ||
     analysisStatusFetchFailed;
 
   const primaryMessages = [
@@ -146,7 +153,7 @@ export default async function HomePage() {
         </div>
       </section>
 
-      <TopOpportunities markets={markets} fetchFailed={marketsFetchFailed} />
+      <TopOpportunities candidates={candidates} fetchFailed={marketDataFetchFailed} />
 
       <ScoreExplainer />
 
@@ -156,7 +163,7 @@ export default async function HomePage() {
         corruptSkipped={corruptSkipped}
         lastAnalysisAt={lastAnalysisAt}
         analysisError={analysisError}
-        marketsFetchFailed={marketsFetchFailed}
+        marketDataFetchFailed={marketDataFetchFailed}
       />
 
       <Diagnostics
@@ -167,7 +174,7 @@ export default async function HomePage() {
         lastAnalysisAt={lastAnalysisAt}
         analysisData={analysisData}
         collectorData={collectorData}
-        marketsFetchFailed={marketsFetchFailed}
+        marketDataFetchFailed={marketDataFetchFailed}
       />
 
       <section className="panel" aria-labelledby="disclaimer-heading">

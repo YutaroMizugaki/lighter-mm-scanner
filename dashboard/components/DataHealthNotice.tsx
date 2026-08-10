@@ -7,7 +7,7 @@ type Props = {
   corruptSkipped?: number;
   lastAnalysisAt?: string | null;
   analysisError?: boolean;
-  marketsFetchFailed?: boolean;
+  marketDataFetchFailed?: boolean;
 };
 
 export default function DataHealthNotice({
@@ -16,7 +16,7 @@ export default function DataHealthNotice({
   corruptSkipped = 0,
   lastAnalysisAt = null,
   analysisError = false,
-  marketsFetchFailed = false,
+  marketDataFetchFailed = false,
 }: Props) {
   if (!show) return null;
 
@@ -49,7 +49,7 @@ export default function DataHealthNotice({
           Latest valid analysis: {fmtJst(lastAnalysisAt)}
         </p>
       )}
-      {marketsFetchFailed && (
+      {marketDataFetchFailed && (
         <p className="muted notice-meta">
           Market aggregate data could not be loaded for this view.
         </p>
