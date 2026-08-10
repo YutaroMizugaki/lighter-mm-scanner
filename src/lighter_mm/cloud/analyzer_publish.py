@@ -38,6 +38,7 @@ def _publish_analysis_status(
     error: str | None = None,
     last_successful_analysis_at: str | None = None,
     started_at: str | None = None,
+    heartbeat_at: str | None = None,
     duration_seconds: float | None = None,
     start_ms: int | None = None,
     end_ms: int | None = None,
@@ -92,6 +93,8 @@ def _publish_analysis_status(
         if parquet_health_status:
             payload["parquet_health_status"] = parquet_health_status
     elif status == "RUNNING":
+        # Heartbeat keeps long-running analyses from looking stale.
+        payload["heartbeat_at"] = heartbeat_at or generated_at
         if last_successful_analysis_at:
             payload["last_successful_analysis_at"] = last_successful_analysis_at
     else:

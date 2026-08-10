@@ -101,7 +101,7 @@ class RuntimeSnapshot:
     public_prefix: str = "lighter-mm/public"
     gcs_bucket: str | None = None
     gcs_public_bucket: str | None = None
-    analysis_interval_minutes: float = 15.0
+    analysis_interval_minutes: float = 30.0
     parquet_rotation_minutes: float = 15.0
     gcs_upload_interval_minutes: float = 15.0
     status_ok_minutes: float = 20.0

@@ -8,7 +8,11 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
-from lighter_mm.cloud.analysis_outcome import is_analysis_success, is_stale_running
+from lighter_mm.cloud.analysis_outcome import (
+    is_analysis_success,
+    is_stale_running,
+    running_reference_timestamp,
+)
 from lighter_mm.runtime_verify.models import (
     CheckLevel,
     CheckResult,
@@ -390,16 +394,17 @@ def _verify_analyzer(report: VerifyReport, snap: RuntimeSnapshot, now: datetime)
             )
         )
     elif ast == "RUNNING":
+        # Stale threshold uses heartbeat_at (via is_stale_running), not started_at.
         stale = is_stale_running(data, stale_minutes=float(interval * 2), now=now)
-        started = parse_iso(data.get("started_at") or data.get("generated_at"))
-        run_age = age_seconds(started, now)
-        if stale or (run_age and run_age > interval * 3 * 60):
+        ref = parse_iso(running_reference_timestamp(data))
+        ref_age = age_seconds(ref, now)
+        if stale:
             report.add(
                 _check(
                     CheckLevel.FAIL,
                     section,
                     "analysis.outcome",
-                    f"stale RUNNING {format_age(run_age)}; current.json missing or incomplete",
+                    f"stale RUNNING {format_age(ref_age)}; current.json missing or incomplete",
                 )
             )
         else:
@@ -436,10 +441,19 @@ def _verify_analyzer(report: VerifyReport, snap: RuntimeSnapshot, now: datetime)
     elif ast == "DEGRADED":
         report.add(_check(CheckLevel.WARN, section, "analysis.status", ast))
     elif ast == "RUNNING":
-        started = parse_iso(data.get("started_at") or data.get("generated_at"))
-        run_age = age_seconds(started, now)
-        if run_age and run_age > interval * 3 * 60:
-            report.add(_check(CheckLevel.FAIL, section, "analysis.status", f"RUNNING {format_age(run_age)}"))
+        # Heartbeat-aware: long started_at is OK while heartbeat_at stays fresh.
+        stale = is_stale_running(data, stale_minutes=float(interval * 2), now=now)
+        ref = parse_iso(running_reference_timestamp(data))
+        ref_age = age_seconds(ref, now)
+        if stale:
+            report.add(
+                _check(
+                    CheckLevel.FAIL,
+                    section,
+                    "analysis.status",
+                    f"RUNNING {format_age(ref_age)} (stale heartbeat/reference)",
+                )
+            )
         else:
             report.add(_check(CheckLevel.WARN, section, "analysis.status", ast))
     elif ast == "OK":
@@ -449,6 +463,32 @@ def _verify_analyzer(report: VerifyReport, snap: RuntimeSnapshot, now: datetime)
         report.add(_check(lvl, section, "analysis.status", f"OK ({format_age(gen_age)} ago)"))
     else:
         report.add(_check(CheckLevel.WARN, section, "analysis.status", ast or "unknown"))
+
+    # Warn when successful Analyzer duration approaches Scheduler cadence.
+    duration_raw = data.get("duration_seconds")
+    if isinstance(duration_raw, (int, float)) and interval > 0:
+        duration_s = float(duration_raw)
+        threshold_s = interval * 60.0 * 0.8
+        if duration_s > threshold_s:
+            report.add(
+                _check(
+                    CheckLevel.WARN,
+                    section,
+                    "analyzer.duration_vs_schedule",
+                    f"duration_seconds={duration_s:.0f} > 80% of schedule "
+                    f"interval ({interval:.0f}m = {threshold_s:.0f}s)",
+                )
+            )
+        else:
+            report.add(
+                _check(
+                    CheckLevel.PASS,
+                    section,
+                    "analyzer.duration_vs_schedule",
+                    f"duration_seconds={duration_s:.0f} within schedule headroom "
+                    f"({interval:.0f}m)",
+                )
+            )
 
     a_sha = str(data.get("git_sha") or "")
     if a_sha and exp and a_sha == exp:
@@ -503,7 +543,7 @@ def _verify_public_data(report: VerifyReport, snap: RuntimeSnapshot, now: dateti
             markets_field = latest_data.get("markets")
             if isinstance(markets_field, list):
                 _check_markets_coverage(report, section, markets_field, "latest")
-            elif isinstance(markets_field, int):
+            elif isinstance(markets_field, int) and not isinstance(markets_field, bool):
                 if markets_field <= 0:
                     report.add(
                         _check(
@@ -522,16 +562,57 @@ def _verify_public_data(report: VerifyReport, snap: RuntimeSnapshot, now: dateti
                             f"markets={markets_field}",
                         )
                     )
-            analyzed = latest_data.get("markets_analyzed")
-            if isinstance(analyzed, int) and analyzed <= 0:
+            else:
                 report.add(
                     _check(
                         CheckLevel.FAIL,
                         section,
-                        "generation.latest.markets_analyzed",
-                        f"markets_analyzed={analyzed}",
+                        "generation.latest.markets_count",
+                        f"unexpected type {type(markets_field).__name__}",
                     )
                 )
+
+            analyzed = latest_data.get("markets_analyzed")
+            if "markets_analyzed" in latest_data:
+                if isinstance(analyzed, int) and not isinstance(analyzed, bool) and analyzed > 0:
+                    report.add(
+                        _check(
+                            CheckLevel.PASS,
+                            section,
+                            "generation.latest.markets_analyzed",
+                            f"markets_analyzed={analyzed}",
+                        )
+                    )
+                else:
+                    report.add(
+                        _check(
+                            CheckLevel.FAIL,
+                            section,
+                            "generation.latest.markets_analyzed",
+                            f"markets_analyzed={analyzed!r} (expected int > 0)",
+                        )
+                    )
+
+            candidates = latest_data.get("candidates")
+            if "candidates" in latest_data:
+                if isinstance(candidates, int) and not isinstance(candidates, bool) and candidates >= 0:
+                    report.add(
+                        _check(
+                            CheckLevel.PASS,
+                            section,
+                            "generation.latest.candidates",
+                            f"candidates={candidates}",
+                        )
+                    )
+                else:
+                    report.add(
+                        _check(
+                            CheckLevel.FAIL,
+                            section,
+                            "generation.latest.candidates",
+                            f"candidates={candidates!r} (expected int >= 0)",
+                        )
+                    )
 
     if not gen_markets:
         report.add(_check(CheckLevel.FAIL, section, "generation.markets.json", "missing"))

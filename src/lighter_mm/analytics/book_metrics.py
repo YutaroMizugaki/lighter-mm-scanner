@@ -11,18 +11,26 @@ from lighter_mm.config import Settings
 
 log = logging.getLogger(__name__)
 
-def _volatility_explain_plans(
-    con: duckdb.DuckDBPyConnection, settings: Settings
-) -> dict[str, str]:
-    """Return EXPLAIN ANALYZE text for forward-horizon volatility queries."""
-    tolerance_ms = max(int(settings.book_sample_interval_seconds * 1500), 2500)
-    plans: dict[str, str] = {}
-    for horizon_s, label in [(5, "5s"), (30, "30s"), (60, "60s")]:
-        horizon_ms = horizon_s * 1000
-        sql = f"""
+
+def _resolve_mid_relation(con: duckdb.DuckDBPyConnection) -> str:
+    """Prefer thin ``book_mids``; fall back only when that table is missing.
+
+    Catch CatalogException / table-not-found only. OOM, IO, and other DuckDB
+    failures must propagate — never silently fall back to wide book_observed.
+    """
+    try:
+        con.execute("SELECT 1 FROM book_mids LIMIT 1")
+        return "book_mids"
+    except duckdb.CatalogException:
+        return "book_observed"
+
+
+def _forward_horizon_sql(mid_relation: str, horizon_ms: int, tolerance_ms: int) -> str:
+    """Shared forward-horizon mid pairing SQL (production + EXPLAIN)."""
+    return f"""
         WITH origins AS (
             SELECT market_id, timestamp_ms AS origin_ts, mid AS mid0
-            FROM book_observed
+            FROM {mid_relation}
             WHERE mid IS NOT NULL AND mid > 0
         ),
         candidates AS (
@@ -33,7 +41,7 @@ def _volatility_explain_plans(
                 b.timestamp_ms AS ts1,
                 b.mid AS mid1
             FROM origins o
-            INNER JOIN book_observed b
+            INNER JOIN {mid_relation} b
               ON b.market_id = o.market_id
              AND b.timestamp_ms >= o.origin_ts + {horizon_ms}
              AND b.timestamp_ms <= o.origin_ts + {horizon_ms} + {tolerance_ms}
@@ -52,8 +60,22 @@ def _volatility_explain_plans(
             ) ranked
             WHERE rn = 1
         )
-        SELECT market_id, COUNT(*) FROM paired WHERE mid1 IS NOT NULL GROUP BY market_id
         """
+
+
+def _volatility_explain_plans(
+    con: duckdb.DuckDBPyConnection, settings: Settings
+) -> dict[str, str]:
+    """Return EXPLAIN ANALYZE text for forward-horizon volatility queries."""
+    tolerance_ms = max(int(settings.book_sample_interval_seconds * 1500), 2500)
+    mid_relation = _resolve_mid_relation(con)
+    plans: dict[str, str] = {}
+    for horizon_s, label in [(5, "5s"), (30, "30s"), (60, "60s")]:
+        horizon_ms = horizon_s * 1000
+        sql = (
+            _forward_horizon_sql(mid_relation, horizon_ms, tolerance_ms)
+            + "\nSELECT market_id, COUNT(*) FROM paired WHERE mid1 IS NOT NULL GROUP BY market_id"
+        )
         rows = con.execute(f"EXPLAIN ANALYZE {sql}").fetchall()
         plans[label] = "\n".join(str(r[1] if len(r) > 1 else r[0]) for r in rows)
     return plans
@@ -324,13 +346,7 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
     tolerance_ms = max(int(settings.book_sample_interval_seconds * 1500), 2500)
     horizons = [(1, "1s"), (5, "5s"), (30, "30s"), (60, "60s")]
     out: dict[int, dict[str, Any]] = {}
-
-    # Prefer the thin book_mids table when present (Analyzer materializes it).
-    mid_relation = "book_mids"
-    try:
-        con.execute("SELECT 1 FROM book_mids LIMIT 1")
-    except Exception:  # noqa: BLE001
-        mid_relation = "book_observed"
+    mid_relation = _resolve_mid_relation(con)
 
     # 1s proxy: consecutive sample moves (same as before).
     sql_consec = f"""
@@ -368,39 +384,10 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
         # Hash/range JOIN + ROW_NUMBER (not correlated subqueries). The previous
         # per-row scalar subquery over book_observed OOMed Analyzer at multi-million
         # row scale even with a 1GiB DuckDB memory_limit.
-        sql = f"""
-        WITH origins AS (
-            SELECT market_id, timestamp_ms AS origin_ts, mid AS mid0
-            FROM {mid_relation}
-            WHERE mid IS NOT NULL AND mid > 0
-        ),
-        candidates AS (
-            SELECT
-                o.market_id,
-                o.origin_ts,
-                o.mid0,
-                b.timestamp_ms AS ts1,
-                b.mid AS mid1
-            FROM origins o
-            INNER JOIN {mid_relation} b
-              ON b.market_id = o.market_id
-             AND b.timestamp_ms >= o.origin_ts + {horizon_ms}
-             AND b.timestamp_ms <= o.origin_ts + {horizon_ms} + {tolerance_ms}
-             AND b.mid IS NOT NULL
-             AND b.mid > 0
-        ),
-        paired AS (
-            SELECT market_id, origin_ts, mid0, mid1
-            FROM (
-                SELECT
-                    *,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY market_id, origin_ts ORDER BY ts1 ASC
-                    ) AS rn
-                FROM candidates
-            ) ranked
-            WHERE rn = 1
-        ),
+        sql = (
+            _forward_horizon_sql(mid_relation, horizon_ms, tolerance_ms)
+            + """
+        ,
         moves AS (
             SELECT market_id,
                 ABS(LN(mid1 / mid0)) * 10000.0 AS move_bps
@@ -415,6 +402,7 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
         FROM moves
         GROUP BY market_id
         """
+        )
         log.info("volatility horizon=%s using=%s starting", label, mid_relation)
         for row in con.execute(sql).fetchall():
             mid, sample_count, p50, p90, p95 = row

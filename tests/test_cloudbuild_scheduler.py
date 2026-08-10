@@ -28,7 +28,8 @@ def test_cloudbuild_scheduler_iam_and_oauth() -> None:
 
 def test_cloudbuild_scheduler_schedule_and_name() -> None:
     text = CLOUDBUILD.read_text(encoding="utf-8")
-    assert "*/15 * * * *" in text
+    assert '_ANALYZER_SCHEDULE: "*/30 * * * *"' in text
+    assert "*/15 * * * *" not in text
     assert "lighter-mm-analyzer-schedule" in text
 
 

@@ -63,7 +63,7 @@ Cloud Run Worker Pool (lighter-mm-collector)   1 CPU / 1 GiB
 Private GCS (source of truth)
         │  read-only mount
         ▼
-Cloud Run Job (lighter-mm-analyzer)            2 CPU / 4 GiB
+Cloud Run Job (lighter-mm-analyzer)            2 CPU / 8 GiB
         │  aggregate JSON
         ▼
 Public GCS
@@ -74,7 +74,7 @@ Vercel dashboard
 
 **Collector** — collection only: WS, sampling, markouts, Parquet rotation, GCS upload, `collector_status.json`. Does **not** run DuckDB or write ranking JSON.
 
-**Analyzer** — `lighter-mm cloud-analyze` (Cloud Run Job, default schedule `*/15 * * * *`): reads GCS-mounted Parquet via DuckDB, publishes `latest.json`, `markets.json`, `candidates.json`, `market/*.json`, `analysis_status.json`.
+**Analyzer** — `lighter-mm cloud-analyze` (Cloud Run Job, default schedule `*/30 * * * *`, task timeout 3600s): reads GCS-mounted Parquet via DuckDB, publishes `latest.json`, `markets.json`, `candidates.json`, `market/*.json`, `analysis_status.json`.
 
 **GCS** — durable Parquet + `state.json` + analysis markers. Local `/tmp` holds only open/upload-pending chunks.
 

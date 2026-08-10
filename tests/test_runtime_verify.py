@@ -178,6 +178,117 @@ def test_latest_json_markets_count_int_does_not_crash() -> None:
     )
 
 
+def test_latest_json_markets_unexpected_type_fails() -> None:
+    now = _now()
+    for bad in ("205", None, {}):
+        snap = _base_snapshot(
+            generation_files={
+                "lighter-mm/public/generations/gen1/latest.json": json.dumps(
+                    {
+                        "run_id": "run-current",
+                        "generated_at": now.isoformat(),
+                        "markets": bad,
+                        "markets_analyzed": 205,
+                        "candidates": 1,
+                    }
+                ),
+                "lighter-mm/public/generations/gen1/markets.json": json.dumps({"markets": []}),
+            }
+        )
+        report = verify_runtime(snap, now=now)
+        assert report.exit_code() == 1
+        assert any(
+            c.name == "generation.latest.markets_count" and c.level.value == "FAIL"
+            for c in report.checks
+        ), bad
+
+
+def test_latest_json_markets_analyzed_string_fails() -> None:
+    now = _now()
+    snap = _base_snapshot(
+        generation_files={
+            "lighter-mm/public/generations/gen1/latest.json": json.dumps(
+                {
+                    "run_id": "run-current",
+                    "generated_at": now.isoformat(),
+                    "markets": 205,
+                    "markets_analyzed": "205",
+                    "candidates": 1,
+                }
+            ),
+            "lighter-mm/public/generations/gen1/markets.json": json.dumps({"markets": []}),
+        }
+    )
+    report = verify_runtime(snap, now=now)
+    assert report.exit_code() == 1
+    assert any(
+        c.name == "generation.latest.markets_analyzed" and c.level.value == "FAIL"
+        for c in report.checks
+    )
+
+
+def test_running_with_fresh_heartbeat_not_stale_fail() -> None:
+    now = _now()
+    snap = _base_snapshot(
+        analysis_interval_minutes=30.0,
+        analysis_status={
+            "status": "RUNNING",
+            "git_sha": "abc123",
+            "started_at": (now - timedelta(minutes=60)).isoformat(),
+            "generated_at": (now - timedelta(minutes=60)).isoformat(),
+            "heartbeat_at": (now - timedelta(minutes=1)).isoformat(),
+            "last_successful_analysis_at": None,
+        },
+        current_json=None,
+        current_json_raw=None,
+        generation_files={},
+    )
+    report = verify_runtime(snap, now=now)
+    outcome = [c for c in report.checks if c.name == "analysis.outcome"]
+    assert outcome
+    assert outcome[0].level.value == "WARN"
+
+
+def test_duration_vs_schedule_warns_near_interval() -> None:
+    now = _now()
+    snap = _base_snapshot(
+        analysis_interval_minutes=30.0,
+        analysis_status={
+            "status": "OK",
+            "run_id": "run-current",
+            "generated_at": (now - timedelta(minutes=6)).isoformat(),
+            "git_sha": "abc123",
+            "last_successful_analysis_at": (now - timedelta(minutes=6)).isoformat(),
+            "duration_seconds": 26 * 60,
+        },
+    )
+    report = verify_runtime(snap, now=now)
+    assert any(
+        c.name == "analyzer.duration_vs_schedule" and c.level.value == "WARN"
+        for c in report.checks
+    )
+
+
+def test_duration_vs_schedule_pass_for_current_runtime() -> None:
+    now = _now()
+    snap = _base_snapshot(
+        analysis_interval_minutes=30.0,
+        analysis_status={
+            "status": "OK",
+            "run_id": "run-current",
+            "generated_at": (now - timedelta(minutes=6)).isoformat(),
+            "git_sha": "abc123",
+            "last_successful_analysis_at": (now - timedelta(minutes=6)).isoformat(),
+            "duration_seconds": 19 * 60,
+        },
+    )
+    report = verify_runtime(snap, now=now)
+    assert any(
+        c.name == "analyzer.duration_vs_schedule" and c.level.value == "PASS"
+        for c in report.checks
+    )
+
+
 def test_sync_fresh_durable_stale_fails() -> None:
     now = _now()
     snap = _base_snapshot(

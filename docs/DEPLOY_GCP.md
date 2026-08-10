@@ -18,7 +18,7 @@ Official references used for this guide (verify current pages if UI labels chang
 GitHub (private) main
   ├─ Cloud Build → tests → Docker → Artifact Registry
   │                 → Cloud Run Worker Pool (Collector, 1 instance)
-  │                 → Cloud Run Job (Analyzer, */15 via Cloud Scheduler)
+  │                 → Cloud Run Job (Analyzer, */30 via Cloud Scheduler)
   │                 → Private GCS (immutable Parquet + state)
   │                 → Public GCS (dashboard JSON)
   └─ Vercel → Next.js dashboard reads public aggregate JSON only
@@ -346,9 +346,11 @@ Cloud Run Job execution `COMPLETE 1/1` is **not** proof that analysis succeeded
 2. `analysis_status.json.last_successful_analysis_at` is non-null
 3. `current.json` exists
 
-Container memory for the Analyzer Job is `_ANALYZER_MEMORY=4Gi` (DuckDB remains
-`DUCKDB_MEMORY_LIMIT=1GiB`). After an OOM, `analysis_status` may remain `RUNNING`
-until the analyzer lock lease expires and a later execution recovers.
+Container memory for the Analyzer Job is `_ANALYZER_MEMORY=8Gi` (DuckDB remains
+`DUCKDB_MEMORY_LIMIT=1GiB`; task timeout `_ANALYZER_TASK_TIMEOUT=3600`). Schedule is
+`*/30 * * * *`. After an OOM, `analysis_status` may remain `RUNNING` until the
+analyzer lock lease expires and a later execution recovers. While RUNNING,
+`heartbeat_at` is refreshed so long analyses are not treated as stale.
 
 ### Dashboard Last Analysis stops moving
 
