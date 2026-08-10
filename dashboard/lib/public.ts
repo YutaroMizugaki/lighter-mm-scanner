@@ -85,21 +85,74 @@ export function publicAnalysisPendingMessage(): { title: string; body: string } 
 
 export type FreshnessLevel = "current" | "delayed" | "unavailable";
 
-export function analysisFreshnessLevel(status: string): FreshnessLevel {
-  if (status === "OK" || status === "RUNNING" || status === "DEGRADED" || status === "COMPLETED") {
+const FRESHNESS_STALE_MINUTES = 30;
+
+function analysisAgeMinutes(
+  iso: string | null | undefined,
+  now = Date.now(),
+): number | null {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return null;
+  return (now - t) / 60_000;
+}
+
+export function analysisFreshnessLevel(
+  status: string,
+  lastAnalysisAt?: string | null,
+  now = Date.now(),
+  staleMinutes = FRESHNESS_STALE_MINUTES,
+): FreshnessLevel {
+  if (status === "RUNNING") {
+    if (!lastAnalysisAt) return "unavailable";
+    const age = analysisAgeMinutes(lastAnalysisAt, now);
+    if (age === null) return "unavailable";
+    if (age > staleMinutes) return "delayed";
+    return "current";
+  }
+  if (status === "OK" || status === "DEGRADED" || status === "COMPLETED") {
     return "current";
   }
   if (status === "STALE") return "delayed";
   return "unavailable";
 }
 
-/** Map analysis freshness to public labels. Does not change status detection. */
+/** Map analysis freshness to public labels. Uses lastAnalysisAt age for RUNNING. */
 export function publicFreshnessCopy(
   status: string,
   lastAnalysisAt: string | null,
   relative: string,
+  now = Date.now(),
 ): { level: FreshnessLevel; label: string; detail: string } {
-  const level = analysisFreshnessLevel(status);
+  const level = analysisFreshnessLevel(status, lastAnalysisAt, now);
+
+  if (status === "RUNNING") {
+    const runningNote = lastAnalysisAt ? "Analysis updating" : "Analysis is running";
+    if (level === "current") {
+      return {
+        level,
+        label: "Data current",
+        detail: lastAnalysisAt
+          ? `Updated ${relative} · ${runningNote}`
+          : runningNote,
+      };
+    }
+    if (level === "delayed") {
+      return {
+        level,
+        label: "Data delayed",
+        detail: lastAnalysisAt
+          ? `Latest analysis ${relative} · ${runningNote}`
+          : runningNote,
+      };
+    }
+    return {
+      level: "unavailable",
+      label: "Data unavailable",
+      detail: runningNote,
+    };
+  }
+
   if (level === "current") {
     return {
       level,

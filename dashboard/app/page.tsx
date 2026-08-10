@@ -15,9 +15,8 @@ import {
 } from "@/lib/api";
 import { fmt, fmtJst } from "@/lib/format";
 import {
-  analysisDisplayTimestamp,
-  effectiveAnalysisStatus,
   effectiveCollectorStatus,
+  effectivePublicAnalysisStatus,
   statusHealthNote,
 } from "@/lib/status";
 import {
@@ -54,13 +53,18 @@ export default async function HomePage() {
   const collectorStatus = collectorData
     ? effectiveCollectorStatus(collectorData)
     : null;
-  const analysisData = analysisStatusResult.ok ? analysisStatusResult.data : null;
-  const analysisFreshness = effectiveAnalysisStatus(analysisData);
+  const publicAnalysis = effectivePublicAnalysisStatus(analysisStatusResult, overview);
+  const analysisData = publicAnalysis.analysisData;
+  const analysisFreshness = {
+    status: publicAnalysis.status,
+    stale: publicAnalysis.stale,
+  };
+  const lastAnalysisAt = publicAnalysis.lastAnalysisAt;
+  const analysisStatusFetchFailed = publicAnalysis.analysisStatusFetchFailed;
   const markets = marketsResult.ok ? marketsResult.data.markets ?? [] : [];
   const marketsFetchFailed = !marketsResult.ok;
 
   const analyzed = overview.markets_analyzed ?? overview.markets;
-  const lastAnalysisAt = analysisDisplayTimestamp(analysisData);
   const analysisError = analysisData?.status === "ERROR";
   const analysisDegraded =
     analysisFreshness.status === "DEGRADED" ||
@@ -77,6 +81,11 @@ export default async function HomePage() {
   if (marketsFetchFailed) {
     healthWarnings.unshift("Market aggregate data could not be loaded.");
   }
+  if (analysisStatusFetchFailed) {
+    healthWarnings.unshift(
+      "Analyzer status could not be loaded; showing the published overview snapshot.",
+    );
+  }
 
   const showHealthBanner =
     collectorStatus === "DEGRADED" ||
@@ -91,7 +100,8 @@ export default async function HomePage() {
     analysisError ||
     Boolean(collectorNote) ||
     Boolean(analysisNote) ||
-    marketsFetchFailed;
+    marketsFetchFailed ||
+    analysisStatusFetchFailed;
 
   const primaryMessages = [
     analysisError
