@@ -276,7 +276,11 @@ main.app-shell {
 .notice p { margin: var(--space-2) 0 0; }
 .notice-meta { margin-top: var(--space-3); font-size: 0.85rem; }
 
-.summary-grid,
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-3);
+}
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
