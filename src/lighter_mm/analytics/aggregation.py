@@ -310,10 +310,12 @@ def analyze_range(
             "parquet_health": parquet_health,
         }
 
-    # Dedupe book samples on (market_id, timestamp_ms) — restart/hydrate overlap defense.
+    # Materialize projected/deduped books once onto local DuckDB storage.
+    # Re-scanning hive Parquet via GCS FUSE for every aggregate CTE caused the
+    # Cloud Run Analyzer to OOM at ~4Gi after book_load (~1.2Gi RSS / ~2.7M rows).
     con.execute(
         """
-        CREATE OR REPLACE VIEW book_deduped AS
+        CREATE OR REPLACE TABLE book_deduped AS
         SELECT * EXCLUDE (rn) FROM (
             SELECT *, ROW_NUMBER() OVER (
                 PARTITION BY market_id, timestamp_ms ORDER BY timestamp_ms
@@ -322,9 +324,13 @@ def analyze_range(
         ) WHERE rn = 1
         """
     )
+    try:
+        con.execute("DROP VIEW IF EXISTS book_raw")
+    except Exception:  # noqa: BLE001
+        pass
     con.execute(
         """
-        CREATE OR REPLACE VIEW book_observed AS
+        CREATE OR REPLACE TABLE book_observed AS
         SELECT * FROM book_deduped
         WHERE is_usable = true
            OR (is_usable IS NULL AND mid IS NOT NULL)
@@ -332,7 +338,7 @@ def analyze_range(
     )
     con.execute(
         """
-        CREATE OR REPLACE VIEW book_spread_observed AS
+        CREATE OR REPLACE TABLE book_spread_observed AS
         SELECT
             *,
             CASE
@@ -350,7 +356,7 @@ def analyze_range(
     # recovered from best_bid/best_ask/mid when spread_bps was nulled by old collector.
     con.execute(
         """
-        CREATE OR REPLACE VIEW book_metrics_good AS
+        CREATE OR REPLACE TABLE book_metrics_good AS
         SELECT
             *,
             CASE
@@ -427,13 +433,18 @@ def analyze_range(
         trade_cols = "timestamp_ms, market_id, symbol, trade_id, usd_amount, type"
         if _read_view(
             con,
-            "trade_raw",
+            "trade_raw_view",
             None,
             trade_cols,
             start_ms,
             end_ms,
             file_paths=trade_valid,
         ):
+            con.execute("CREATE OR REPLACE TABLE trade_raw AS SELECT * FROM trade_raw_view")
+            try:
+                con.execute("DROP VIEW IF EXISTS trade_raw_view")
+            except Exception:  # noqa: BLE001
+                pass
             trade_count = con.execute("SELECT COUNT(*) FROM trade_raw").fetchone()[0]
             t_trade = time.monotonic()
             trade_agg = _aggregate_trades_sql(con)
@@ -455,13 +466,20 @@ def analyze_range(
         )
         if _read_view(
             con,
-            "markout_raw",
+            "markout_raw_view",
             None,
             markout_cols,
             start_ms,
             end_ms,
             file_paths=markout_valid,
         ):
+            con.execute(
+                "CREATE OR REPLACE TABLE markout_raw AS SELECT * FROM markout_raw_view"
+            )
+            try:
+                con.execute("DROP VIEW IF EXISTS markout_raw_view")
+            except Exception:  # noqa: BLE001
+                pass
             markout_count = con.execute("SELECT COUNT(*) FROM markout_raw").fetchone()[0]
             t_markout = time.monotonic()
             markout_agg = _aggregate_markouts_sql(con)
