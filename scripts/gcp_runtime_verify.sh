@@ -13,4 +13,7 @@ ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 export PYTHONPATH="${ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
+if command -v uv >/dev/null 2>&1; then
+  exec uv run python -m lighter_mm.runtime_verify.cli "$@"
+fi
 exec python3 -m lighter_mm.runtime_verify.cli "$@"

@@ -498,7 +498,40 @@ def _verify_public_data(report: VerifyReport, snap: RuntimeSnapshot, now: dateti
         if not latest_valid:
             report.add(_check(CheckLevel.FAIL, section, "generation.latest.json", "malformed"))
         elif latest_data:
-            _check_markets_coverage(report, section, latest_data.get("markets") or [], "latest")
+            # latest.json exposes markets as a count (int), not row objects.
+            # Row-level coverage is validated via generations/.../markets.json below.
+            markets_field = latest_data.get("markets")
+            if isinstance(markets_field, list):
+                _check_markets_coverage(report, section, markets_field, "latest")
+            elif isinstance(markets_field, int):
+                if markets_field <= 0:
+                    report.add(
+                        _check(
+                            CheckLevel.FAIL,
+                            section,
+                            "generation.latest.markets_count",
+                            f"markets={markets_field}",
+                        )
+                    )
+                else:
+                    report.add(
+                        _check(
+                            CheckLevel.PASS,
+                            section,
+                            "generation.latest.markets_count",
+                            f"markets={markets_field}",
+                        )
+                    )
+            analyzed = latest_data.get("markets_analyzed")
+            if isinstance(analyzed, int) and analyzed <= 0:
+                report.add(
+                    _check(
+                        CheckLevel.FAIL,
+                        section,
+                        "generation.latest.markets_analyzed",
+                        f"markets_analyzed={analyzed}",
+                    )
+                )
 
     if not gen_markets:
         report.add(_check(CheckLevel.FAIL, section, "generation.markets.json", "missing"))

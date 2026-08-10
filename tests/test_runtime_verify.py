@@ -138,6 +138,46 @@ def test_healthy_all_components_exit_0() -> None:
     assert report.status == "healthy"
 
 
+def test_latest_json_markets_count_int_does_not_crash() -> None:
+    """Production latest.json uses markets as an int count, not a row list."""
+    now = _now()
+    snap = _base_snapshot(
+        generation_files={
+            "lighter-mm/public/generations/gen1/latest.json": json.dumps(
+                {
+                    "run_id": "run-current",
+                    "generated_at": now.isoformat(),
+                    "status": "OK",
+                    "markets": 205,
+                    "markets_analyzed": 205,
+                    "candidates": 80,
+                }
+            ),
+            "lighter-mm/public/generations/gen1/markets.json": json.dumps(
+                {
+                    "markets": [
+                        {
+                            "market_id": 1,
+                            "symbol": "ETH",
+                            "score": 80.0,
+                            "data_coverage_pct": 95.0,
+                            "observation_coverage_pct": 95.0,
+                            "usable_quote_coverage_pct": 90.0,
+                            "spread_coverage_pct": 88.0,
+                        }
+                    ]
+                }
+            ),
+        }
+    )
+    report = verify_runtime(snap, now=now)
+    assert report.exit_code() == 0
+    assert any(
+        c.name == "generation.latest.markets_count" and c.level.value == "PASS"
+        for c in report.checks
+    )
+
+
 def test_sync_fresh_durable_stale_fails() -> None:
     now = _now()
     snap = _base_snapshot(
