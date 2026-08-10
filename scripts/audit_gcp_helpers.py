@@ -22,6 +22,8 @@ def _dig_into(obj: Any, *keys: str) -> Any:
 
 def _containers_from_describe(data: dict[str, Any]) -> list[dict[str, Any]]:
     paths: tuple[tuple[str, ...], ...] = (
+        # Cloud Run Job v1: Job → JobTemplate → ExecutionTemplate → PodTemplate
+        ("spec", "template", "spec", "template", "spec", "containers"),
         ("spec", "template", "spec", "containers"),
         ("template", "template", "containers"),
         ("template", "containers"),
