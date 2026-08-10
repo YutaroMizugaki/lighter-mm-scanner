@@ -16,12 +16,15 @@ def _run_audit(
     commit_sha: str,
     collector_json: str | None = None,
     analysis_json: str | None = None,
-    collector_wait: int = 0,
+    collector_max_wait: int = 0,
+    stub_sleep: bool = True,
 ) -> tuple[int, str]:
     collector_body = json.dumps(collector_json) if collector_json is not None else ""
     analysis_body = json.dumps(analysis_json) if analysis_json is not None else ""
+    sleep_stub = "sleep() { :; }" if stub_sleep else ""
     script = f"""
 set -euo pipefail
+{sleep_stub}
 source "{AUDIT_LIB}"
 audit_reset_counters
 COMMIT_SHA="{commit_sha}"
@@ -36,10 +39,7 @@ audit_fetch_public_json() {{
     printf ''
   fi
 }}
-audit_check_public_collector_status "bucket" "prefix" "{commit_sha}" || true
-if [[ "{collector_wait}" -gt 0 ]]; then
-  :
-fi
+audit_check_public_collector_status "bucket" "prefix" "{commit_sha}" {collector_max_wait} 5 || true
 audit_check_public_analysis_status "bucket" "prefix" "{commit_sha}" || true
 if audit_print_summary; then exit 0; else exit 1; fi
 """
@@ -91,6 +91,19 @@ def test_collector_malformed_json_fails() -> None:
     )
     assert code != 0
     assert "FAIL collector_status.json malformed JSON" in out
+
+
+def test_collector_missing_after_bounded_retry_fails() -> None:
+    code, out = _run_audit(
+        commit_sha="newsha",
+        collector_json=None,
+        analysis_json=None,
+        collector_max_wait=0,
+    )
+    assert code != 0
+    assert "FAIL collector_status.json" in out
+    assert "not available after" in out
+    assert "expected git_sha=newsha" in out
 
 
 def test_analyzer_old_sha_warns_build_passes() -> None:

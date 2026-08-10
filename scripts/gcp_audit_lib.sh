@@ -527,6 +527,7 @@ audit_check_public_json_git_sha() {
   local commit_sha="$4"
   local max_wait_seconds="${5:-0}"
   local interval_seconds="${6:-5}"
+  local missing_is_failure="${7:-false}"
   local elapsed=0
   local json=""
   local parsed=""
@@ -540,7 +541,7 @@ audit_check_public_json_git_sha() {
       valid="$(printf '%s' "${parsed}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('valid', False))")"
       sha="$(printf '%s' "${parsed}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('git_sha', ''), end='')")"
       if [[ "${valid}" != "True" ]]; then
-        audit_fail "${label} malformed JSON (gs://${bucket}/${object_path})"
+        audit_fail "${label} malformed JSON (elapsed=${elapsed}s expected git_sha=${commit_sha}) (gs://${bucket}/${object_path})"
         return 1
       fi
       if [[ -n "${sha}" && "${sha}" == "${commit_sha}" ]]; then
@@ -549,19 +550,25 @@ audit_check_public_json_git_sha() {
       fi
       if [[ -n "${sha}" ]]; then
         if [[ "${max_wait_seconds}" -gt 0 && "${elapsed}" -lt "${max_wait_seconds}" ]]; then
-          printf 'waiting for %s git_sha (have %s, want %s)...\n' "${label}" "${sha}" "${commit_sha}"
+          printf 'waiting for %s elapsed=%ss observed git_sha=%s expected=%s...\n' \
+            "${label}" "${elapsed}" "${sha}" "${commit_sha}"
         else
-          audit_fail "${label} git_sha mismatch (have ${sha}, want ${commit_sha})"
+          audit_fail "${label} git_sha mismatch after ${elapsed}s retry (have ${sha}, want ${commit_sha})"
           return 1
         fi
       elif [[ "${max_wait_seconds}" -gt 0 && "${elapsed}" -lt "${max_wait_seconds}" ]]; then
-        printf 'waiting for %s git_sha field...\n' "${label}"
+        printf 'waiting for %s elapsed=%ss git_sha missing expected=%s...\n' \
+          "${label}" "${elapsed}" "${commit_sha}"
       else
-        audit_fail "${label} missing git_sha (gs://${bucket}/${object_path})"
+        audit_fail "${label} missing git_sha after ${elapsed}s retry (expected ${commit_sha}) (gs://${bucket}/${object_path})"
         return 1
       fi
     elif [[ "${max_wait_seconds}" -gt 0 && "${elapsed}" -lt "${max_wait_seconds}" ]]; then
-      printf 'waiting for %s...\n' "${label}"
+      printf 'waiting for %s elapsed=%ss object missing expected git_sha=%s...\n' \
+        "${label}" "${elapsed}" "${commit_sha}"
+    elif [[ "${missing_is_failure}" == "true" ]]; then
+      audit_fail "${label} not available after ${elapsed}s retry (expected git_sha=${commit_sha}) (gs://${bucket}/${object_path})"
+      return 1
     else
       audit_warn "${label} not yet available (gs://${bucket}/${object_path})"
       return 1
@@ -581,6 +588,8 @@ audit_check_public_collector_status() {
   local bucket="$1"
   local prefix="${2:-lighter-mm/public}"
   local commit_sha="${3:-${COMMIT_SHA:-}}"
+  local max_wait_seconds="${4:-75}"
+  local interval_seconds="${5:-5}"
   audit_section "Public collector status"
   if [[ -z "${commit_sha}" ]]; then
     audit_warn "COMMIT_SHA not set; skipping collector_status git_sha check"
@@ -592,8 +601,9 @@ audit_check_public_collector_status() {
     "${prefix}/collector_status.json" \
     "collector_status.json" \
     "${commit_sha}" \
-    75 \
-    5
+    "${max_wait_seconds}" \
+    "${interval_seconds}" \
+    true
 }
 
 audit_check_public_analysis_status() {
