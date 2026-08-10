@@ -66,8 +66,23 @@ def validate_parquet_file(path: Path, *, data_probe: bool = True) -> tuple[bool,
         return False, str(exc)
 
 
+def _row_group_max_timestamp_ms(pf: pq.ParquetFile, rg_idx: int, col_idx: int) -> int | None:
+    """Max timestamp_ms for one row group via statistics or column read."""
+    rg = pf.metadata.row_group(rg_idx)
+    if col_idx >= rg.num_columns:
+        return None
+    stats = rg.column(col_idx).statistics
+    if stats is not None and stats.has_min_max:
+        return int(stats.max)
+    table = pf.read_row_group(rg_idx, columns=["timestamp_ms"])
+    if table.num_rows == 0:
+        return None
+    values = [int(v) for v in table.column("timestamp_ms").to_pylist() if v is not None]
+    return max(values) if values else None
+
+
 def parquet_max_timestamp_ms(path: Path) -> int | None:
-    """Return max timestamp_ms using row-group statistics, with a light fallback."""
+    """Return max timestamp_ms using row-group statistics, with per-row-group fallback."""
     try:
         pf = pq.ParquetFile(path)
         schema = pf.schema_arrow
@@ -76,24 +91,12 @@ def parquet_max_timestamp_ms(path: Path) -> int | None:
         col_idx = schema.get_field_index("timestamp_ms")
         max_ts: int | None = None
         for rg_idx in range(pf.metadata.num_row_groups):
-            rg = pf.metadata.row_group(rg_idx)
-            if col_idx >= rg.num_columns:
-                continue
-            stats = rg.column(col_idx).statistics
-            if stats is not None and stats.has_max:
-                candidate = int(stats.max)
+            candidate = _row_group_max_timestamp_ms(pf, rg_idx, col_idx)
+            if candidate is not None:
                 max_ts = candidate if max_ts is None else max(max_ts, candidate)
-        if max_ts is not None:
-            return max_ts
-        if pf.metadata.num_row_groups == 0:
-            return None
-        table = pf.read_row_group(0, columns=["timestamp_ms"])
-        if table.num_rows == 0:
-            return None
-        values = [int(v) for v in table.column("timestamp_ms").to_pylist() if v is not None]
-        return max(values) if values else None
+        return max_ts
     except Exception as exc:  # noqa: BLE001
-        log.debug("parquet_max_timestamp_ms failed path=%s error=%s", path, exc)
+        log.warning("parquet_max_timestamp_ms failed path=%s error=%s", path, exc)
         return None
 
 
