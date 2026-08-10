@@ -40,6 +40,73 @@ def test_market_row_includes_tpm_mean_and_trade_count() -> None:
     assert row["total_trade_count"] == 120
 
 
+def test_market_row_estimated_fill_fields_optional_compat() -> None:
+    """Old generations without Estimated Fill fields still serialize cleanly."""
+    legacy = ScoredMarket(
+        row={
+            "symbol": "OLD",
+            "market_id": 3,
+            "trades_per_minute_median": 1.0,
+            "trades_per_minute_mean": 1.0,
+            "total_trade_count": 10,
+            "maker_markout_5s_median_bps": 0.0,
+            "maker_markout_30s_median_bps": 0.0,
+            "median_spread_bps": 2.0,
+            "pct_time_spread_ge_5bps": 0.1,
+            "median_two_sided_depth_10bps_usd": 300.0,
+            "current_funding_rate": None,
+            "data_coverage_pct": 90.0,
+        },
+        score=40.0,
+        rank_components={},
+        penalties=[],
+        pros=[],
+        cons=[],
+        warnings=[],
+        candidate=False,
+        letter_rank="C",
+        recommended_max_order_usd=None,
+        size_fit={},
+    )
+    legacy_row = _market_row(legacy)
+    assert legacy_row["estimated_maker_fill_rate_30s_conservative"] is None
+    assert legacy_row["estimated_maker_fill_sample_quality"] is None
+
+    modern = ScoredMarket(
+        row={
+            **legacy.row,
+            "symbol": "NEW",
+            "estimated_maker_fill_rate_5s_conservative": 0.1,
+            "estimated_maker_fill_rate_30s_conservative": 0.25,
+            "estimated_maker_fill_rate_5s_optimistic": 0.2,
+            "estimated_maker_fill_rate_30s_optimistic": 0.4,
+            "estimated_maker_fill_samples": 500,
+            "estimated_maker_fill_sample_quality": "reliable",
+            "estimated_maker_edge_5s_bps": 0.5,
+            "estimated_maker_edge_30s_bps": 1.0,
+            "markout_sample_quality": "preliminary",
+            "analysis_scope": "rolling",
+            "estimated_maker_fill_by_size": {"50": {"30s": {"conservative": 0.25}}},
+        },
+        score=70.0,
+        rank_components={"estimated_maker_fill": 80.0},
+        penalties=[],
+        pros=[],
+        cons=[],
+        warnings=[],
+        candidate=True,
+        letter_rank="B",
+        recommended_max_order_usd=50.0,
+        size_fit={},
+    )
+    from lighter_mm.cloud.dashboard_data import _market_detail
+
+    detail = _market_detail(modern)
+    assert detail["estimated_maker_fill_rate_30s_conservative"] == 0.25
+    assert detail["estimated_maker_fill_by_size"]["50"]["30s"]["conservative"] == 0.25
+    assert detail["estimated_maker_fill_order_usd_default"] == 50
+
+
 def test_markout_without_trades_adds_warning() -> None:
     s = ScoredMarket(
         row={

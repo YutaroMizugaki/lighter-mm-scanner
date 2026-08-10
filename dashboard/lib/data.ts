@@ -68,6 +68,7 @@ export type Overview = {
   started_at: string | null;
   observation_hours: number | null;
   run_observation_hours?: number | null;
+  analysis_scope?: string | null;
   analysis_window_hours?: number | null;
   observation_target_hours: number | null;
   markets: number;
@@ -115,6 +116,15 @@ export type Overview = {
   disclaimer: string;
 };
 
+export type EstimatedFillSideRates = {
+  optimistic?: number | null;
+  conservative?: number | null;
+  bid_optimistic?: number | null;
+  bid_conservative?: number | null;
+  ask_optimistic?: number | null;
+  ask_conservative?: number | null;
+};
+
 export type MarketRow = {
   symbol: string;
   market_id: number;
@@ -129,6 +139,23 @@ export type MarketRow = {
   total_trade_count: number | null;
   maker_markout_5s_median_bps: number | null;
   maker_markout_30s_median_bps: number | null;
+  markout_sample_quality?: string | null;
+  estimated_maker_fill_rate_5s_conservative?: number | null;
+  estimated_maker_fill_rate_30s_conservative?: number | null;
+  estimated_maker_fill_rate_5s_optimistic?: number | null;
+  estimated_maker_fill_rate_30s_optimistic?: number | null;
+  estimated_maker_fill_samples?: number | null;
+  estimated_maker_fill_sample_quality?: string | null;
+  estimated_maker_edge_5s_bps?: number | null;
+  estimated_maker_edge_30s_bps?: number | null;
+  estimated_maker_edge_fee_included?: boolean | null;
+  estimated_maker_fill_by_size?: Record<
+    string,
+    Record<string, EstimatedFillSideRates>
+  > | null;
+  estimated_maker_fill_order_usd_default?: number | null;
+  analysis_scope?: string | null;
+  analysis_window_hours?: number | null;
   current_funding_rate: number | null;
   data_coverage_pct: number | null;
   observation_coverage_pct?: number | null;
@@ -261,6 +288,40 @@ export function fmt(n: number | null | undefined, digits = 2, signed = false): s
   if (!signed) return body;
   return n > 0 ? `+${body}` : body;
 }
+
+/** Format a 0–1 fraction as percent. Null/undefined → em dash (not 0%). */
+export function fmtPctFraction(
+  n: number | null | undefined,
+  digits = 0,
+): string {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  return `${(n * 100).toFixed(digits)}%`;
+}
+
+/** Estimated Fill display: insufficient → label; else percent; null → em dash. */
+export function fmtEstimatedFill(
+  rate: number | null | undefined,
+  quality?: string | null,
+  digits = 0,
+): string {
+  if (quality === "insufficient") return "Insufficient";
+  if (rate === null || rate === undefined || Number.isNaN(rate)) return "—";
+  return fmtPctFraction(rate, digits);
+}
+
+export function fmtSampleQuality(q: string | null | undefined): string {
+  if (!q) return "—";
+  if (q === "insufficient") return "Insufficient";
+  if (q === "preliminary") return "Preliminary";
+  if (q === "reliable") return "Reliable";
+  return q;
+}
+
+export const ESTIMATED_FILL_TOOLTIP =
+  "公開板と公開約定データから、Best Bid / Ask に仮想 Maker 注文を置いた場合の約定機会を推定した指標です。実際の queue position、自身の注文履歴、cancel latency は含まれないため、実約定率ではありません。ランキング基準サイズは $50（conservative / 30s）です。sample <100 は Insufficient（0% ではありません）。";
+
+export const ESTIMATED_EDGE_TOOLTIP =
+  "Estimated Maker Edge = Estimated Fill × (Maker Markout − Maker Fee)。期待利益ではありません。Maker Markout は約定価格起点のため half-spread は加算しません。Maker Fee 未取得時は fee 控除前（fee excluded）です。";
 
 /** Format an ISO timestamp in Japan Standard Time with an explicit JST suffix. */
 export function fmtJst(iso: string | null | undefined): string {

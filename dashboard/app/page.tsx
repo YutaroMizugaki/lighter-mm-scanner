@@ -225,6 +225,8 @@ export default async function HomePage() {
             {analysisWindow != null && (
               <div className="muted" style={{ fontSize: "0.8rem", marginTop: "0.35rem" }}>
                 Ranking window {analysisWindow.toFixed(1)}h
+                {overview.analysis_scope ? ` (${overview.analysis_scope})` : ""}
+                {" · "}run age {obs != null ? `${obs.toFixed(1)}h` : "—"}
               </div>
             )}
           </div>

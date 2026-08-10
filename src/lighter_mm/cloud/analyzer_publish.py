@@ -88,6 +88,7 @@ def _publish_analysis_status(
             payload["duration_seconds"] = duration_seconds
         if analysis_window_hours is not None:
             payload["analysis_window_hours"] = analysis_window_hours
+            payload["analysis_scope"] = "rolling"
         if run_observation_hours is not None:
             payload["run_observation_hours"] = run_observation_hours
         if valid_parquet_files is not None:

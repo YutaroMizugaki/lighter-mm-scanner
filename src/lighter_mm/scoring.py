@@ -16,10 +16,11 @@ ORDER_SIZE_USD = [25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]
 
 @dataclass
 class ScoreWeights:
-    trade_activity: float = 25.0
+    trade_activity: float = 15.0
+    estimated_maker_fill: float = 20.0
     spread: float = 20.0
-    two_sided_depth: float = 20.0
-    maker_markout: float = 25.0
+    two_sided_depth: float = 15.0
+    maker_markout: float = 20.0
     data_quality_persistence: float = 10.0
 
 
@@ -31,6 +32,7 @@ class CandidateThresholds:
     min_median_spread_bps: float = 1.0
     min_markout_samples_5s: int = 20
     min_markout_samples_30s: int = 20
+    min_estimated_maker_fill_samples: int = 100
     min_median_trades_per_minute: float | None = None
     min_observation_hours: float = 1.0
     min_markout_5s_median_bps: float = -5.0
@@ -41,7 +43,7 @@ class CandidateThresholds:
 class ScoredMarket:
     row: dict[str, Any]
     score: float
-    rank_components: dict[str, float]
+    rank_components: dict[str, float | None]
     penalties: list[str] = field(default_factory=list)
     pros: list[str] = field(default_factory=list)
     cons: list[str] = field(default_factory=list)
@@ -105,8 +107,14 @@ def build_narratives(
         pros.append("persistent/usable spread" if (pers5 or 0) >= 0.25 else "meaningful median spread")
     if (pers5 or 0) >= 0.35:
         pros.append("spread >=5bp for substantial fraction of time")
+    fill30 = row.get("estimated_maker_fill_rate_30s_conservative")
+    fill_samples = int(row.get("estimated_maker_fill_samples") or 0)
+    fill_quality = row.get("estimated_maker_fill_sample_quality")
+
     if (tpm or 0) >= 5:
-        pros.append("high trade frequency (market-level; not your fill probability)")
+        pros.append("high trade frequency (market-level; not Estimated Maker Fill)")
+    if fill30 is not None and fill30 >= 0.3:
+        pros.append("meaningful Estimated Maker Fill @30s conservative ($50)")
     if (depth10 or 0) >= 1000:
         pros.append("sufficient two-sided depth within ±10bp")
     if m5 is not None and m5 > 0:
@@ -118,6 +126,10 @@ def build_narratives(
         cons.append("tight spread — limited edge after fees/latency")
     if (tpm or 0) < 1:
         cons.append("low trade activity")
+    if fill30 is not None and fill30 <= 0.0 and fill_samples >= 100:
+        cons.append("Estimated Maker Fill ~0 @30s conservative (touch rarely clears)")
+    elif fill_quality == "insufficient":
+        warnings.append("Estimated Maker Fill sample insufficient (<100)")
     if (depth10 or 0) < 500:
         cons.append("thin two-sided depth")
     if m5 is not None and m5 < 0:
@@ -143,6 +155,11 @@ def build_narratives(
             f"MARKOUT: {m5:+.2f}bp @5s / {m30:+.2f}bp @30s"
             if m5 is not None and m30 is not None
             else "MARKOUT: n/a"
+        ),
+        (
+            f"EST. FILL: {fill30*100:.0f}% @30s cons. ($50)"
+            if fill30 is not None
+            else "EST. FILL: n/a"
         ),
         (
             f"PERSISTENCE: spread >=5bp for {(pers5 or 0)*100:.0f}% of observed time"
@@ -206,10 +223,21 @@ def score_markets(
     activity = activity_blend
     depth = [r.get("median_two_sided_depth_10bps_usd") for r in rows]
     markout = [r.get("maker_markout_5s_median_bps") for r in rows]
+    # $50 / 30s / conservative Estimated Maker Fill (market-level min of bid/ask).
+    estimated_fill = [r.get("estimated_maker_fill_rate_30s_conservative") for r in rows]
     persistence = [r.get("pct_time_spread_ge_5bps") for r in rows]
     coverage = [
         r.get("observation_coverage_pct") or r.get("data_coverage_pct") for r in rows
     ]
+
+    weight_total = (
+        weights.trade_activity
+        + weights.estimated_maker_fill
+        + weights.spread
+        + weights.two_sided_depth
+        + weights.maker_markout
+        + weights.data_quality_persistence
+    )
 
     scored: list[ScoredMarket] = []
     for i, row in enumerate(rows):
@@ -217,6 +245,11 @@ def score_markets(
         pr_spr = _pct_rank(spread_for_rank, spread_for_rank[i])
         pr_dep = _pct_rank(depth, depth[i])
         pr_mk = _pct_rank(markout, markout[i])
+        # Missing Estimated Fill is data-unavailable, not a forced bottom percentile.
+        if estimated_fill[i] is None:
+            pr_fill: float | None = None
+        else:
+            pr_fill = _pct_rank(estimated_fill, estimated_fill[i])
         # blend persistence + coverage for DQ component
         dq_raw = None
         if persistence[i] is not None and coverage[i] is not None:
@@ -233,20 +266,33 @@ def score_markets(
                 dq_vals.append(None)
         pr_dq = _pct_rank(dq_vals, dq_raw)
 
-        components = {
+        components: dict[str, float | None] = {
             "trade_activity": pr_act,
+            "estimated_maker_fill": pr_fill,
             "spread": pr_spr,
             "two_sided_depth": pr_dep,
             "maker_markout": pr_mk,
             "data_quality_persistence": pr_dq,
         }
-        score = (
-            components["trade_activity"] * weights.trade_activity
-            + components["spread"] * weights.spread
-            + components["two_sided_depth"] * weights.two_sided_depth
-            + components["maker_markout"] * weights.maker_markout
-            + components["data_quality_persistence"] * weights.data_quality_persistence
-        ) / 100.0
+        component_weights = {
+            "trade_activity": weights.trade_activity,
+            "estimated_maker_fill": weights.estimated_maker_fill,
+            "spread": weights.spread,
+            "two_sided_depth": weights.two_sided_depth,
+            "maker_markout": weights.maker_markout,
+            "data_quality_persistence": weights.data_quality_persistence,
+        }
+        weighted_sum = 0.0
+        used_weight = 0.0
+        for name, pr in components.items():
+            if pr is None:
+                continue
+            w = component_weights[name]
+            weighted_sum += float(pr) * w
+            used_weight += w
+        # Renormalize when Estimated Fill (or another component) is unavailable.
+        denom = used_weight if used_weight > 0 else weight_total
+        score = weighted_sum / denom
 
         penalties: list[str] = []
         cov = row.get("observation_coverage_pct") or row.get("data_coverage_pct") or 0.0
@@ -272,6 +318,13 @@ def score_markets(
         if m30 is not None and m30 < thresholds.min_markout_30s_median_bps:
             score *= 0.55
             penalties.append("strong penalty: 30s markout largely negative")
+        fill30 = row.get("estimated_maker_fill_rate_30s_conservative")
+        fill_samples = int(row.get("estimated_maker_fill_samples") or 0)
+        if fill30 is not None and fill30 <= 0.0 and fill_samples >= 100:
+            score *= 0.85
+            penalties.append(
+                "penalty: Estimated Maker Fill ~0 @30s conservative ($50)"
+            )
 
         score = max(0.0, min(100.0, score))
 
@@ -292,6 +345,7 @@ def score_markets(
         obs_hours = max(row.get("observation_hours") or 0.0, 0.0)
         observation_ok = obs_hours >= thresholds.min_observation_hours
 
+        fill_sample_ok = fill_samples >= thresholds.min_estimated_maker_fill_samples
         candidate = (
             cov >= thresholds.min_coverage_pct
             and activity_ok
@@ -304,6 +358,7 @@ def score_markets(
             and m30 >= thresholds.min_markout_30s_median_bps
             and m5_count >= thresholds.min_markout_samples_5s
             and m30_count >= thresholds.min_markout_samples_30s
+            and fill_sample_ok
         )
         # Also require activity percentile not bottom 20% among peers when enough markets
         if len(rows) >= 10 and pr_act < 20:

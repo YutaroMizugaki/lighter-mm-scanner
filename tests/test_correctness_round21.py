@@ -123,6 +123,10 @@ def _candidate_row(**overrides) -> dict:
         "markout_5s_count": 50,
         "markout_30s_count": 50,
         "pct_time_spread_ge_5bps": 0.5,
+        # Estimated Maker Fill candidate gate (>=100 samples).
+        "estimated_maker_fill_samples": 100,
+        "estimated_maker_fill_rate_30s_conservative": 0.3,
+        "estimated_maker_fill_sample_quality": "preliminary",
     }
     row.update(overrides)
     return row
@@ -422,23 +426,14 @@ def test_new_market_tpm_uses_market_window(tmp_path: Path) -> None:
 
 
 def test_new_market_trades_per_hour_candidate(tmp_path: Path) -> None:
-    row = {
-        "market_id": 99,
-        "symbol": "NEW",
-        "observation_hours": 2.0,
-        "analysis_window_hours": 72.0,
-        "data_coverage_pct": 95.0,
-        "trades_per_minute_mean": 1.0,
-        "trades_per_minute_median": 0.0,
-        "total_trade_count": 120,
-        "median_two_sided_depth_10bps_usd": 800.0,
-        "median_spread_bps": 3.0,
-        "maker_markout_5s_median_bps": 1.0,
-        "maker_markout_30s_median_bps": 0.5,
-        "markout_5s_count": 50,
-        "markout_30s_count": 50,
-        "pct_time_spread_ge_5bps": 0.5,
-    }
+    row = _candidate_row(
+        market_id=99,
+        symbol="NEW",
+        observation_hours=2.0,
+        trades_per_minute_mean=1.0,
+        trades_per_minute_median=0.0,
+        total_trade_count=120,
+    )
     scored = score_markets([row], thresholds=CandidateThresholds())
     assert scored[0].candidate is True
 

@@ -152,6 +152,9 @@ def test_candidate_uses_trades_per_hour_not_median_tpm() -> None:
         "markout_5s_count": 50,
         "markout_30s_count": 50,
         "pct_time_spread_ge_5bps": 0.5,
+        "estimated_maker_fill_samples": 100,
+        "estimated_maker_fill_rate_30s_conservative": 0.3,
+        "estimated_maker_fill_sample_quality": "preliminary",
     }
     scored = score_markets([row], thresholds=CandidateThresholds())
     assert scored[0].candidate is True
@@ -204,6 +207,9 @@ def test_markout_sample_minimum_blocks_candidate() -> None:
         "markout_5s_count": 1,
         "markout_30s_count": 1,
         "pct_time_spread_ge_5bps": 0.5,
+        "estimated_maker_fill_samples": 100,
+        "estimated_maker_fill_rate_30s_conservative": 0.3,
+        "estimated_maker_fill_sample_quality": "preliminary",
     }
     scored_low = score_markets([row_low], thresholds=CandidateThresholds())
     assert scored_low[0].candidate is False
