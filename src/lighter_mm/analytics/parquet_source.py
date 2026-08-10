@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,9 +32,20 @@ def _connect(
     memory_limit: str | None = None,
     threads: int | None = None,
 ) -> duckdb.DuckDBPyConnection:
-    con = duckdb.connect(database=":memory:")
+    """Open a file-backed DuckDB so large aggregates can spill under memory_limit.
+
+    Cloud Run Analyzer containers previously OOMed with ``:memory:`` while scanning
+    multi-GB hive Parquet via GCS FUSE. A local DB + temp_directory keeps the
+    configured DuckDB memory_limit meaningful without raising the limit itself.
+    """
+    del data_dir  # reserved for future cache locality; callers still pass Settings.data_dir
+    work = Path(tempfile.mkdtemp(prefix="lighter-mm-duckdb-"))
+    spill = work / "spill"
+    spill.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(database=str(work / "analyze.duckdb"))
     con.execute(f"SET threads TO {threads or 2}")
     con.execute(f"SET memory_limit='{memory_limit or '512MB'}'")
+    con.execute(f"SET temp_directory='{spill}'")
     return con
 
 

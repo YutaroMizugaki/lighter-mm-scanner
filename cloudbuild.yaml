@@ -21,7 +21,7 @@ substitutions:
   _RUN_TARGET_HOURS: "72"
   _ANALYZER_JOB: lighter-mm-analyzer
   _ANALYZER_CPU: "2"
-  _ANALYZER_MEMORY: 4Gi
+  _ANALYZER_MEMORY: 8Gi
   _ANALYZER_SCHEDULE: "*/15 * * * *"
   _ANALYZER_MOUNT_PATH: /mnt/lighter-mm
   _SCHEDULER_SERVICE_ACCOUNT: ""

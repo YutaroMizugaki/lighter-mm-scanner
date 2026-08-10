@@ -40,10 +40,15 @@ def test_cloudbuild_deploy_order_analyzer_before_scheduler() -> None:
     assert analyzer_pos < grant_pos < scheduler_pos
 
 
-def test_cloudbuild_analyzer_memory_is_4gi() -> None:
-    """Analyzer container memory must be 4Gi; DuckDB limit stays 1GiB."""
+def test_cloudbuild_analyzer_memory_is_8gi() -> None:
+    """Analyzer container memory must be 8Gi; DuckDB limit stays 1GiB.
+
+    Evidence: 4Gi OOMed after book_load (~2.7M rows / ~1.2Gi RSS) during
+    book_aggregate over ~22h of hive Parquet via GCS FUSE.
+    """
     text = CLOUDBUILD.read_text(encoding="utf-8")
-    assert '_ANALYZER_MEMORY: 4Gi' in text
+    assert '_ANALYZER_MEMORY: 8Gi' in text
+    assert '_ANALYZER_MEMORY: 4Gi' not in text
     assert '_ANALYZER_CPU: "2"' in text
     assert "DUCKDB_MEMORY_LIMIT=1GiB" in text
     assert "DUCKDB_THREADS=2" in text

@@ -25,22 +25,32 @@ def _volatility_explain_plans(
             FROM book_observed
             WHERE mid IS NOT NULL AND mid > 0
         ),
-        paired AS (
+        candidates AS (
             SELECT
                 o.market_id,
                 o.origin_ts,
                 o.mid0,
-                (
-                    SELECT b.mid
-                    FROM book_observed b
-                    WHERE b.market_id = o.market_id
-                      AND b.timestamp_ms >= o.origin_ts + {horizon_ms}
-                      AND b.timestamp_ms <= o.origin_ts + {horizon_ms} + {tolerance_ms}
-                      AND b.mid > 0
-                    ORDER BY b.timestamp_ms ASC
-                    LIMIT 1
-                ) AS mid1
+                b.timestamp_ms AS ts1,
+                b.mid AS mid1
             FROM origins o
+            INNER JOIN book_observed b
+              ON b.market_id = o.market_id
+             AND b.timestamp_ms >= o.origin_ts + {horizon_ms}
+             AND b.timestamp_ms <= o.origin_ts + {horizon_ms} + {tolerance_ms}
+             AND b.mid IS NOT NULL
+             AND b.mid > 0
+        ),
+        paired AS (
+            SELECT market_id, origin_ts, mid0, mid1
+            FROM (
+                SELECT
+                    *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY market_id, origin_ts ORDER BY ts1 ASC
+                    ) AS rn
+                FROM candidates
+            ) ranked
+            WHERE rn = 1
         )
         SELECT market_id, COUNT(*) FROM paired WHERE mid1 IS NOT NULL GROUP BY market_id
         """
@@ -348,28 +358,41 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
 
     for horizon_s, label in horizons[1:]:
         horizon_ms = horizon_s * 1000
+        # Hash/range JOIN + ROW_NUMBER (not correlated subqueries). The previous
+        # per-row scalar subquery over book_observed OOMed Analyzer at multi-million
+        # row scale even with a 1GiB DuckDB memory_limit.
         sql = f"""
         WITH origins AS (
             SELECT market_id, timestamp_ms AS origin_ts, mid AS mid0
             FROM book_observed
             WHERE mid IS NOT NULL AND mid > 0
         ),
-        paired AS (
+        candidates AS (
             SELECT
                 o.market_id,
                 o.origin_ts,
                 o.mid0,
-                (
-                    SELECT b.mid
-                    FROM book_observed b
-                    WHERE b.market_id = o.market_id
-                      AND b.timestamp_ms >= o.origin_ts + {horizon_ms}
-                      AND b.timestamp_ms <= o.origin_ts + {horizon_ms} + {tolerance_ms}
-                      AND b.mid > 0
-                    ORDER BY b.timestamp_ms ASC
-                    LIMIT 1
-                ) AS mid1
+                b.timestamp_ms AS ts1,
+                b.mid AS mid1
             FROM origins o
+            INNER JOIN book_observed b
+              ON b.market_id = o.market_id
+             AND b.timestamp_ms >= o.origin_ts + {horizon_ms}
+             AND b.timestamp_ms <= o.origin_ts + {horizon_ms} + {tolerance_ms}
+             AND b.mid IS NOT NULL
+             AND b.mid > 0
+        ),
+        paired AS (
+            SELECT market_id, origin_ts, mid0, mid1
+            FROM (
+                SELECT
+                    *,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY market_id, origin_ts ORDER BY ts1 ASC
+                    ) AS rn
+                FROM candidates
+            ) ranked
+            WHERE rn = 1
         ),
         moves AS (
             SELECT market_id,
