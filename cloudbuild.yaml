@@ -22,6 +22,7 @@ substitutions:
   _ANALYZER_JOB: lighter-mm-analyzer
   _ANALYZER_CPU: "2"
   _ANALYZER_MEMORY: 8Gi
+  _ANALYZER_TASK_TIMEOUT: "3600"
   _ANALYZER_SCHEDULE: "*/15 * * * *"
   _ANALYZER_MOUNT_PATH: /mnt/lighter-mm
   _SCHEDULER_SERVICE_ACCOUNT: ""
@@ -136,6 +137,7 @@ steps:
           --image="$$IMAGE" \
           --cpu="${_ANALYZER_CPU}" \
           --memory="${_ANALYZER_MEMORY}" \
+          --task-timeout="${_ANALYZER_TASK_TIMEOUT}" \
           --tasks=1 \
           --max-retries=0 \
           --set-env-vars="ENVIRONMENT=cloud,STRUCTURED_LOGGING=true,GCP_PROJECT_ID=$PROJECT_ID,GCP_REGION=${_REGION},GCS_BUCKET=${_GCS_BUCKET},GCS_PUBLIC_BUCKET=${_GCS_PUBLIC_BUCKET},GIT_SHA=$COMMIT_SHA,DUCKDB_MEMORY_LIMIT=1GiB,DUCKDB_THREADS=2,ANALYZER_MOUNT_PATH=${_ANALYZER_MOUNT_PATH}" \
