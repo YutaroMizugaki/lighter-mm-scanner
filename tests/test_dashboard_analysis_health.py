@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DATA_TS = ROOT / "dashboard" / "lib" / "data.ts"
 HOME_PAGE = ROOT / "dashboard" / "app" / "page.tsx"
+DATA_FRESHNESS = ROOT / "dashboard" / "components" / "DataFreshness.tsx"
 
 
 def _iso(dt: datetime) -> str:
@@ -121,13 +122,18 @@ def test_analyzer_stale_does_not_offline_collector() -> None:
 # Test E/F/G — UI labels in source
 def test_dashboard_labels_last_analysis_and_last_sync() -> None:
     home = HOME_PAGE.read_text(encoding="utf-8")
+    data_freshness = DATA_FRESHNESS.read_text(encoding="utf-8")
     data = DATA_TS.read_text(encoding="utf-8")
     diagnostics = (ROOT / "dashboard" / "components" / "Diagnostics.tsx").read_text(
         encoding="utf-8",
     )
     status = (ROOT / "dashboard" / "lib" / "status.ts").read_text(encoding="utf-8")
     types = (ROOT / "dashboard" / "lib" / "types.ts").read_text(encoding="utf-8")
-    assert "Last Analysis" in home
+    # Home delegates analysis freshness to DataFreshness (not inline "Last Analysis").
+    assert "DataFreshness" in home
+    assert "lastAnalysisAt" in home
+    assert "publicFreshnessCopy" in data_freshness
+    assert "lastAnalysisAt" in data_freshness
     assert "Last Sync" in diagnostics
     assert "Last Analysis" in diagnostics
     assert "Last Data" not in home
