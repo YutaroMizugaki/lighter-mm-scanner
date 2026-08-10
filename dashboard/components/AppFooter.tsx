@@ -15,13 +15,6 @@ export default function AppFooter() {
       </ul>
       <nav className="app-footer-links" aria-label="Footer">
         <Link href="/#methodology">Methodology</Link>
-        <a
-          href="https://github.com/YutaroMizugaki/lighter-mm-scanner"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          GitHub
-        </a>
         <a href="https://apidocs.lighter.xyz/" target="_blank" rel="noopener noreferrer">
           Lighter
         </a>

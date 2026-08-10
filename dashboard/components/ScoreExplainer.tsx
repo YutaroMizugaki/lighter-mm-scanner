@@ -33,15 +33,6 @@ export default function ScoreExplainer() {
         <p className="muted">It is not actual fill probability.</p>
       </div>
       <p className="muted method-more">
-        Full methodology notes are in the project{" "}
-        <a
-          href="https://github.com/YutaroMizugaki/lighter-mm-scanner#mm-opportunity-score"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          README
-        </a>
-        .{" "}
         <Link href="/markets">Explore markets →</Link>
       </p>
     </section>
