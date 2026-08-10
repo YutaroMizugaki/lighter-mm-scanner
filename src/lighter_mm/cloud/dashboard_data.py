@@ -47,6 +47,7 @@ def build_dashboard_payload(
                 start_ms=start_ms,
                 end_ms=end_ms,
                 sources=sources,
+                market_lifecycle=state.market_lifecycle if state is not None else None,
             )
         else:
             analysis_result = analyze_window(

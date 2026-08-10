@@ -4,6 +4,9 @@
 #
 # Usage:
 #   bash scripts/gcp_doctor.sh --project PROJECT_ID
+# Post-deploy runtime E2E (separate script):
+#   bash scripts/gcp_runtime_verify.sh --project PROJECT_ID --from-trigger lighter-mm-main
+#
 #   bash scripts/gcp_doctor.sh --project PROJECT_ID \
 #     --region asia-northeast1 \
 #     --ar-repo lighter-mm \

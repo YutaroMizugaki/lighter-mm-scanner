@@ -85,7 +85,8 @@ Lighter → Collector Worker Pool → immutable Parquet → Private GCS
 - **Schedule:** `*/15 * * * *` (Cloud Scheduler → Cloud Run Job)
 - **GCS mount:** `/mnt/lighter-mm` (read-only)
 - **Publishes:** `current.json` + `generations/{id}/*` (and legacy `latest.json` mirror), `analysis_status.json`
-- **Analysis window:** end time is capped at `state.last_successful_flush` (durable GCS watermark), never execution time
+- **Analysis window:** end time is capped at `state.last_durable_event_ms` (durable market-event watermark), never execution time
+- **Observation coverage:** uses each market's active lifecycle window (`market_lifecycle` in run state). Collector gaps count as missing observations; periods before listing or after removal do not.
 - **Manual run:** `gcloud run jobs execute lighter-mm-analyzer --region=...`
 
 ### Public JSON roles
@@ -99,7 +100,8 @@ Lighter → Collector Worker Pool → immutable Parquet → Private GCS
 | `markets.json` / `candidates.json` | Analyzer | Tables and candidate list |
 
 ```bash
-# Local / manual analyzer (hydrates Parquet for dev)
+# GCP runtime E2E (post-deploy, read-only default)
+bash scripts/gcp_runtime_verify.sh --project "$PROJECT_ID" --from-trigger lighter-mm-main
 uv run lighter-mm cloud-analyze
 
 # GCP manual analyzer + scheduler smoke

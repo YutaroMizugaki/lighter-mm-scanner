@@ -205,6 +205,7 @@ def run_cloud_analyze(settings: Settings) -> int:
             start_ms=start_ms,
             end_ms=end_ms,
             sources=sources,
+            market_lifecycle=state.market_lifecycle,
             duckdb_memory_limit=settings.duckdb_memory_limit,
             duckdb_threads=settings.duckdb_threads,
             read_only=True,

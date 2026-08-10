@@ -28,6 +28,10 @@ from lighter_mm.runtime.collector_durability import (
     build_final_analysis_request_payload,
     project_collector_counters,
 )
+from lighter_mm.runtime.market_lifecycle import (
+    apply_discovery_markets,
+    apply_market_refresh,
+)
 from lighter_mm.runtime.run_lifecycle import (
     build_minimal_resumed_state,
     build_new_run_state,
@@ -242,6 +246,8 @@ class CollectorApp:
             self.meta.upsert_markets(markets)
             self.counters.markets_total = len(markets)
             self.state.markets = [m.market_id for m in markets]
+            discovery_ms = utc_ms()
+            apply_discovery_markets(self.state, markets, discovery_ms)
             log_event(
                 log,
                 "market_discovered",
@@ -842,6 +848,8 @@ class CollectorApp:
             try:
                 added, removed = await self.discovery.refresh()
                 if added or removed:
+                    refresh_ms = utc_ms()
+                    apply_market_refresh(self.state, added, removed, refresh_ms)
                     self.meta.upsert_markets(list(self.discovery.markets.values()))
                     self.counters.markets_total = len(self.discovery.markets)
                     self.state.markets = list(self.discovery.markets.keys())

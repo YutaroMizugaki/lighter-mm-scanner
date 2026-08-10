@@ -67,6 +67,31 @@ bash scripts/gcp_doctor.sh --project "$PROJECT_ID" --from-trigger lighter-mm-mai
 
 Exit `0` + `SAFE TO RETRY CLOUD BUILD` means known blockers are cleared.
 
+After deploy, verify the live pipeline (read-only by default):
+
+```bash
+bash scripts/gcp_runtime_verify.sh \
+  --project "$PROJECT_ID" \
+  --from-trigger lighter-mm-main \
+  --gcs-bucket "$GCS_BUCKET" \
+  --gcs-public-bucket "$GCS_PUBLIC_BUCKET" \
+  --dashboard-url "https://your-dashboard.vercel.app"
+```
+
+Optional immediate analyzer run (action mode — executes the Cloud Run Job):
+
+```bash
+bash scripts/gcp_runtime_verify.sh \
+  --project "$PROJECT_ID" \
+  --from-trigger lighter-mm-main \
+  --gcs-bucket "$GCS_BUCKET" \
+  --gcs-public-bucket "$GCS_PUBLIC_BUCKET" \
+  --execute-analyzer
+```
+
+`gcp_doctor.sh` = deploy **prerequisites** (IAM, buckets, APIs).  
+`gcp_runtime_verify.sh` = deploy **after** runtime E2E health.
+
 ## 3) Artifact Registry
 
 ```bash

@@ -94,6 +94,8 @@ def test_gcp_audit_lib_has_post_deploy_checks() -> None:
     assert "audit_check_worker_pool_deployed" in lib
     assert "audit_check_analyzer_job_deployed" in lib
     assert "audit_check_public_collector_status" in lib
+    assert "audit_check_public_json_git_sha" in lib
+    assert "audit_parse_status_json" in lib
 
 
 def test_cloudbuild_automap_substitutions_enabled() -> None:

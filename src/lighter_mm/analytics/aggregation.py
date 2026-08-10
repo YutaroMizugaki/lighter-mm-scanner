@@ -49,6 +49,7 @@ from lighter_mm.storage.parquet_validation import (
     parquet_health_summary,
     prepare_parquet_dataset,
 )
+from lighter_mm.storage.state import MarketLifecycleEntry
 
 log = logging.getLogger(__name__)
 
@@ -73,12 +74,111 @@ def _rss_mb() -> float:
     return usage / 1024
 
 
+def _register_market_lifecycle_table(
+    con: duckdb.DuckDBPyConnection,
+    market_lifecycle: dict[int, MarketLifecycleEntry] | None,
+) -> bool:
+    """Register lifecycle bounds. Returns True when lifecycle metadata is provided."""
+    con.execute(
+        """
+        CREATE OR REPLACE TABLE market_lifecycle_tbl (
+            market_id BIGINT,
+            first_active_at_ms BIGINT,
+            removed_at_ms BIGINT
+        )
+        """
+    )
+    if market_lifecycle is None:
+        return False
+    if market_lifecycle:
+        rows = [
+            (mid, entry.first_active_at_ms, entry.removed_at_ms)
+            for mid, entry in market_lifecycle.items()
+        ]
+        con.executemany(
+            "INSERT INTO market_lifecycle_tbl VALUES (?, ?, ?)",
+            rows,
+        )
+    return True
+
+
+def _create_market_windows_view(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    start_ms: int,
+    end_ms: int,
+    market_lifecycle: dict[int, MarketLifecycleEntry] | None = None,
+) -> None:
+    """Lifecycle-aware per-market observation bounds for coverage metrics.
+
+    With ``market_lifecycle`` (Cloud Analyzer / RunState):
+    - ``effective_start_ms = max(analysis_start_ms, first_active_at_ms)``
+    - active at analysis end → ``effective_end_ms = end_ms``
+    - removed before analysis end → ``effective_end_ms = min(end_ms, removed_at_ms)``
+
+    Parquet first/last observed timestamps are diagnostic only; they do not
+    define the lifecycle window. Inactive time is never inferred from
+    ``last_observed_ms``.
+
+    Fallback when ``market_lifecycle`` is None (local analysis without RunState):
+    treat markets as active through ``end_ms`` so trailing collector outages
+    are not hidden. Start uses the first observed Parquet row within the window.
+    """
+    has_lifecycle = _register_market_lifecycle_table(con, market_lifecycle)
+
+    if has_lifecycle:
+        effective_start_expr = (
+            f"CASE WHEN lc.market_id IS NOT NULL "
+            f"THEN GREATEST(CAST({start_ms} AS BIGINT), lc.first_active_at_ms) "
+            f"ELSE GREATEST(CAST({start_ms} AS BIGINT), bounds.first_observed_ms) END"
+        )
+        effective_end_expr = (
+            f"CASE WHEN lc.market_id IS NOT NULL "
+            f"AND (lc.removed_at_ms IS NULL OR lc.removed_at_ms > CAST({end_ms} AS BIGINT)) "
+            f"THEN CAST({end_ms} AS BIGINT) "
+            f"WHEN lc.market_id IS NOT NULL "
+            f"THEN LEAST(CAST({end_ms} AS BIGINT), lc.removed_at_ms) "
+            f"ELSE CAST({end_ms} AS BIGINT) END"
+        )
+    else:
+        effective_start_expr = (
+            f"GREATEST(CAST({start_ms} AS BIGINT), bounds.first_observed_ms)"
+        )
+        effective_end_expr = f"CAST({end_ms} AS BIGINT)"
+
+    con.execute(
+        f"""
+        CREATE OR REPLACE VIEW market_windows AS
+        SELECT
+            bounds.market_id,
+            bounds.symbol,
+            bounds.first_observed_ms,
+            bounds.last_observed_ms,
+            {effective_start_expr} AS effective_start_ms,
+            {effective_end_expr} AS effective_end_ms,
+            CAST({effective_end_expr} - {effective_start_expr} AS DOUBLE) / 1000.0
+                AS market_observation_seconds
+        FROM (
+            SELECT
+                market_id,
+                MAX(symbol) AS symbol,
+                MIN(timestamp_ms) AS first_observed_ms,
+                MAX(timestamp_ms) AS last_observed_ms
+            FROM book_deduped
+            GROUP BY market_id
+        ) bounds
+        LEFT JOIN market_lifecycle_tbl lc ON lc.market_id = bounds.market_id
+        """
+    )
+
+
 def analyze_range(
     settings: Settings,
     *,
     start_ms: int,
     end_ms: int,
     sources: AnalysisSources | None = None,
+    market_lifecycle: dict[int, MarketLifecycleEntry] | None = None,
     benchmark_profile: bool = False,
     explain_volatility: bool = False,
     duckdb_memory_limit: str | None = None,
@@ -255,24 +355,11 @@ def analyze_range(
            OR (is_usable IS NULL AND is_stale = false AND mid IS NOT NULL)
         """
     )
-    con.execute(
-        f"""
-        CREATE OR REPLACE VIEW market_windows AS
-        SELECT
-            market_id,
-            MAX(symbol) AS symbol,
-            MIN(timestamp_ms) AS first_observed_ms,
-            MAX(timestamp_ms) AS last_observed_ms,
-            GREATEST(CAST({start_ms} AS BIGINT), MIN(timestamp_ms)) AS effective_start_ms,
-            LEAST(CAST({end_ms} AS BIGINT), MAX(timestamp_ms)) AS effective_end_ms,
-            CAST(
-                LEAST(CAST({end_ms} AS BIGINT), MAX(timestamp_ms))
-                - GREATEST(CAST({start_ms} AS BIGINT), MIN(timestamp_ms))
-                AS DOUBLE
-            ) / 1000.0 AS market_observation_seconds
-        FROM book_deduped
-        GROUP BY market_id
-        """
+    _create_market_windows_view(
+        con,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        market_lifecycle=market_lifecycle,
     )
 
     book_count = con.execute("SELECT COUNT(*) FROM book_deduped").fetchone()[0]
