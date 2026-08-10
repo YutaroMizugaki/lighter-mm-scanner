@@ -127,7 +127,7 @@ export default async function HomePage() {
             }
           />
           <MetricCard
-            label="Last analysis"
+            label="Last Analysis"
             value={relativeUpdated}
             subtext={fmtJst(lastAnalysisAt)}
             title={fmtJst(lastAnalysisAt)}

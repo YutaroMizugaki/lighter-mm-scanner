@@ -24,7 +24,8 @@ def test_get_markets_result_exported() -> None:
 def test_markets_page_surfaces_fetch_failure() -> None:
     src = MARKETS_PAGE.read_text(encoding="utf-8")
     assert "getMarketsResult" in src
-    assert "Failed to load markets.json" in src
+    assert "PublicErrorState" in src
+    assert "publicDataUnavailableMessage" in src
     # Must not use the swallow-to-[] helper as the sole data path.
     assert "getMarkets()" not in src
 
