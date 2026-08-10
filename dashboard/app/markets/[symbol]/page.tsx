@@ -6,7 +6,7 @@ import RankBadge from "@/components/RankBadge";
 import ScoreBar from "@/components/ScoreBar";
 import SignedValue from "@/components/SignedValue";
 import { getMarket } from "@/lib/api";
-import { fmt, fmtEstimatedFill } from "@/lib/format";
+import { fmt, fmtEstimatedFill, fmtPaperBp, fmtPaperCount, fmtPaperUsd } from "@/lib/format";
 import {
   ESTIMATED_EDGE_TOOLTIP,
   ESTIMATED_FILL_TOOLTIP,
@@ -217,6 +217,66 @@ export default async function MarketDetailPage({
             Size ladder unavailable in this analysis snapshot. Top-level $50 fields still show
             above when present.
           </p>
+        )}
+      </section>
+
+      <section className="detail-section" aria-labelledby="paper-mm-heading">
+        <h2 id="paper-mm-heading">Paper Market Maker</h2>
+        <p className="section-lead">
+          Historical simulation using sampled public order-book and trade data. No real orders are
+          placed.
+        </p>
+        <p className="section-lead muted">
+          実注文ではなく、取得済みデータ上でBest Bid / Askに仮想注文を置いた場合のシミュレーションです。
+          5秒間隔の板サンプルを使用するため、実際のqueue positionや約定を完全には再現しません。
+        </p>
+        {m.paper_mm_status && m.paper_mm_status !== "ok" ? (
+          <p className="muted">
+            Paper MM: {m.paper_mm_status === "not_simulated" ? "not simulated for this market" : m.paper_mm_status}
+          </p>
+        ) : (
+          <div className="metric-grid" style={{ marginTop: "1rem" }}>
+            <MetricCard
+              label="Paper PnL"
+              value={fmtPaperUsd(m.paper_mm_total_pnl_usd, m.paper_mm_status, true)}
+            />
+            <MetricCard
+              label="PnL / hour"
+              value={fmtPaperUsd(m.paper_mm_pnl_per_hour_usd, m.paper_mm_status, true)}
+            />
+            <MetricCard
+              label="Round Trips"
+              value={fmtPaperCount(m.paper_mm_round_trips, m.paper_mm_status)}
+            />
+            <MetricCard
+              label="Filled Notional"
+              value={fmtPaperUsd(m.paper_mm_filled_notional_usd, m.paper_mm_status)}
+            />
+            <MetricCard
+              label="Max Inventory"
+              value={fmtPaperUsd(m.paper_mm_max_abs_inventory_usd, m.paper_mm_status)}
+            />
+            <MetricCard
+              label="Time With Inventory"
+              value={
+                m.paper_mm_status === "ok" && m.paper_mm_time_with_inventory_pct != null
+                  ? `${fmt(m.paper_mm_time_with_inventory_pct, 1)}%`
+                  : "—"
+              }
+            />
+            <MetricCard
+              label="Median Holding"
+              value={
+                m.paper_mm_status === "ok" && m.paper_mm_median_holding_seconds != null
+                  ? `${fmt(m.paper_mm_median_holding_seconds, 0)}s`
+                  : "—"
+              }
+            />
+            <MetricCard
+              label="30s Paper Markout"
+              value={fmtPaperBp(m.paper_mm_markout_30s_median_bps, m.paper_mm_status)}
+            />
+          </div>
         )}
       </section>
 

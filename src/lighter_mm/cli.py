@@ -6,12 +6,13 @@ import asyncio
 import json
 from pathlib import Path
 
+import duckdb
 import typer
 from rich.console import Console
 from rich.table import Table
 
 from lighter_mm import __version__
-from lighter_mm.analytics.aggregation import analyze_window, scored_to_records
+from lighter_mm.analytics.aggregation import analyze_range, analyze_window, scored_to_records
 from lighter_mm.cloud.analyzer import run_cloud_analyze
 from lighter_mm.cloud.dashboard_data import build_dashboard_payload, collector_status_label
 from lighter_mm.cloud.estimate import estimate_storage
@@ -339,6 +340,95 @@ def export_cmd(
         raise typer.Exit(1)
     path = export_csv(result.get("scored") or [], out)
     console.print(f"Wrote {path} ({len(scored_to_records(result.get('scored') or []))} rows)")
+
+
+@app.command("paper-mm")
+def paper_mm_cmd(
+    hours: float = typer.Option(24, "--hours", help="Lookback window hours"),
+    symbol: str | None = typer.Option(None, "--symbol", help="Single market symbol"),
+    order_usd: float | None = typer.Option(None, "--order-usd", help="Virtual order USD"),
+    top: int | None = typer.Option(None, "--top", help="Top N scored markets"),
+) -> None:
+    """Run Paper Market Maker historical simulation (no real orders)."""
+    settings = _settings_for_analysis()
+    if order_usd is not None:
+        settings = settings.model_copy(update={"paper_mm_order_usd": order_usd})
+
+    con_probe = duckdb.connect(database=":memory:")
+    now_ms = con_probe.execute(
+        "SELECT CAST(epoch_ms(current_timestamp) AS BIGINT)"
+    ).fetchone()[0]
+    start_ms = now_ms - int(hours * 3600 * 1000)
+
+    market_ids: set[int] | None = None
+    if symbol:
+        mid = _resolve_symbol_market_id(settings, symbol)
+        if mid is None:
+            console.print(f"[red]Unknown symbol: {symbol}[/red]")
+            raise typer.Exit(1)
+        market_ids = {mid}
+
+    result = analyze_range(
+        settings,
+        start_ms=start_ms,
+        end_ms=now_ms,
+        paper_mm_market_ids=market_ids,
+        paper_mm_top_n_override=top,
+        paper_mm_order_usd_override=order_usd,
+    )
+    if result.get("error"):
+        console.print(f"[red]{result['error']}[/red]")
+        raise typer.Exit(1)
+
+    scored = result.get("scored") or []
+    targets = scored[:1] if symbol else scored[: (top or settings.paper_mm_top_n)]
+    if symbol:
+        targets = [s for s in scored if str(s.row.get("symbol")).upper() == symbol.upper()]
+    if not targets:
+        console.print("[yellow]No matching market for Paper MM output[/yellow]")
+        raise typer.Exit(0)
+
+    for s in targets:
+        r = s.row
+        sym = r.get("symbol")
+        status = r.get("paper_mm_status")
+        console.print(f"\n[bold]{sym} Paper MM[/bold]")
+        if status != "ok":
+            console.print(f"Status: {status}")
+            continue
+        console.print(f"Order size          ${r.get('paper_mm_order_usd')}")
+        console.print(f"Queue model         {r.get('paper_mm_queue_model')}")
+        console.print(f"Round trips         {r.get('paper_mm_round_trips')}")
+        console.print(f"Filled notional     ${r.get('paper_mm_filled_notional_usd'):,.0f}")
+        console.print(f"Gross PnL           {_n(r.get('paper_mm_gross_pnl_usd'), signed=True)}")
+        console.print(f"Fees                ${_n(r.get('paper_mm_fees_usd'))}")
+        console.print(f"Total PnL           {_n(r.get('paper_mm_total_pnl_usd'), signed=True)}")
+        console.print(f"PnL/hour            {_n(r.get('paper_mm_pnl_per_hour_usd'), signed=True)}")
+        console.print(f"Max inventory       ${_n(r.get('paper_mm_max_abs_inventory_usd'))}")
+        med_hold = r.get("paper_mm_median_holding_seconds")
+        console.print(
+            f"Median holding      {med_hold:.0f}s" if med_hold is not None else "Median holding      —"
+        )
+        m30 = r.get("paper_mm_markout_30s_median_bps")
+        console.print(
+            f"30s markout         {_n(m30, signed=True)}bp" if m30 is not None else "30s markout         —"
+        )
+
+
+def _resolve_symbol_market_id(settings: Settings, symbol: str) -> int | None:
+    db = settings.data_dir / "metadata.db"
+    if db.exists():
+        import sqlite3
+
+        conn = sqlite3.connect(str(db))
+        row = conn.execute(
+            "SELECT market_id FROM markets WHERE UPPER(symbol) = UPPER(?)",
+            (symbol,),
+        ).fetchone()
+        conn.close()
+        if row:
+            return int(row[0])
+    return None
 
 
 def _n(v: object, signed: bool = False) -> str:

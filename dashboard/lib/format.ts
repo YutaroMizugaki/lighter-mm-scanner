@@ -25,6 +25,38 @@ export function fmtEstimatedFill(
   return fmtPctFraction(rate, digits);
 }
 
+/** Paper MM USD: not simulated / unavailable → em dash. */
+export function fmtPaperUsd(
+  value: number | null | undefined,
+  status?: string | null,
+  signed = false,
+): string {
+  if (status && status !== "ok") return "—";
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  const body = value.toFixed(2);
+  if (!signed) return body === "0.00" ? "$0" : `$${body}`;
+  const prefix = value > 0 ? "+$" : value < 0 ? "-$" : "$";
+  return `${prefix}${Math.abs(value).toFixed(2)}`;
+}
+
+export function fmtPaperBp(
+  value: number | null | undefined,
+  status?: string | null,
+): string {
+  if (status && status !== "ok") return "—";
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  return value > 0 ? `+${value.toFixed(1)}bp` : `${value.toFixed(1)}bp`;
+}
+
+export function fmtPaperCount(
+  value: number | null | undefined,
+  status?: string | null,
+): string {
+  if (status && status !== "ok") return "—";
+  if (value === null || value === undefined || Number.isNaN(value)) return "—";
+  return String(value);
+}
+
 export function fmtSampleQuality(q: string | null | undefined): string {
   if (!q) return "—";
   if (q === "insufficient") return "Insufficient";

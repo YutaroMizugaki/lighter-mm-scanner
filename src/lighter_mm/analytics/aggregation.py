@@ -46,6 +46,7 @@ from lighter_mm.analytics.trade_metrics import (
     _trade_stats,
 )
 from lighter_mm.config import Settings
+from lighter_mm.paper_mm import run_paper_mm_for_scored
 from lighter_mm.scoring import (
     CandidateThresholds,
     ScoredMarket,
@@ -585,6 +586,9 @@ def analyze_range(
     duckdb_memory_limit: str | None = None,
     duckdb_threads: int | None = None,
     read_only: bool = False,
+    paper_mm_market_ids: set[int] | None = None,
+    paper_mm_top_n_override: int | None = None,
+    paper_mm_order_usd_override: float | None = None,
 ) -> dict[str, Any]:
     """Aggregate Parquet over an explicit time window and source paths."""
     if end_ms <= start_ms:
@@ -737,6 +741,28 @@ def analyze_range(
         time.monotonic() - t0,
         rss,
     )
+
+    if settings.paper_mm_enabled:
+        t_paper = time.monotonic()
+        try:
+            run_paper_mm_for_scored(
+                con,
+                scored,
+                settings,
+                start_ms,
+                end_ms,
+                hours,
+                market_ids_override=paper_mm_market_ids,
+                top_n_override=paper_mm_top_n_override,
+                order_usd_override=paper_mm_order_usd_override,
+            )
+        except Exception:
+            log.exception("paper_mm batch failed")
+        log.info(
+            "analysis phase=paper_mm elapsed=%.3fs rss_mb=%.1f",
+            time.monotonic() - t_paper,
+            _rss_mb(),
+        )
     log.info(
         "analysis completed valid_files=%s corrupt_files=%s status=%s",
         parquet_health["valid_parquet_files"],

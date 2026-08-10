@@ -115,6 +115,14 @@ class Settings(BaseSettings):
     dashboard_top_n: int = 10
     structured_logging: bool = False
 
+    # Paper Market Maker (historical conservative queue simulation)
+    paper_mm_enabled: bool = True
+    paper_mm_order_usd: float = Field(default=50.0, ge=1.0)
+    paper_mm_max_inventory_usd: float = Field(default=50.0, ge=1.0)
+    paper_mm_max_quote_age_seconds: float = Field(default=30.0, ge=1.0)
+    paper_mm_top_n: int = Field(default=20, ge=1)
+    paper_mm_maker_fee_bps: float | None = None
+
     @model_validator(mode="before")
     @classmethod
     def _merge_unprefixed_env(cls, data: Any) -> Any:  # noqa: ANN401

@@ -5,7 +5,7 @@ import RankBadge from "@/components/RankBadge";
 import ScoreBar from "@/components/ScoreBar";
 import SignedValue from "@/components/SignedValue";
 import { getCandidatesResult } from "@/lib/api";
-import { fmt } from "@/lib/format";
+import { fmt, fmtPaperCount, fmtPaperUsd } from "@/lib/format";
 import {
   ESTIMATED_EDGE_TOOLTIP,
   ESTIMATED_FILL_TOOLTIP,
@@ -53,6 +53,9 @@ export default async function CandidatesPage() {
                 <th title={TOOLTIPS.makerMarkout}>M5</th>
                 <th title={TOOLTIPS.makerMarkout}>M30</th>
                 <th title={ESTIMATED_EDGE_TOOLTIP}>Est. Edge</th>
+                <th>Paper PnL</th>
+                <th>Paper PnL/h</th>
+                <th>Round Trips</th>
                 <th title={TOOLTIPS.sampleQuality}>Quality</th>
               </tr>
             </thead>
@@ -91,6 +94,15 @@ export default async function CandidatesPage() {
                     {m.estimated_maker_edge_fee_included === false && (
                       <span className="edge-meta">fee excl.</span>
                     )}
+                  </td>
+                  <td className="tabular">
+                    {fmtPaperUsd(m.paper_mm_total_pnl_usd, m.paper_mm_status, true)}
+                  </td>
+                  <td className="tabular">
+                    {fmtPaperUsd(m.paper_mm_pnl_per_hour_usd, m.paper_mm_status, true)}
+                  </td>
+                  <td className="tabular">
+                    {fmtPaperCount(m.paper_mm_round_trips, m.paper_mm_status)}
                   </td>
                   <td>
                     <QualityChip quality={m.estimated_maker_fill_sample_quality} />
