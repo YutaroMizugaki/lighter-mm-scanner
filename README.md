@@ -100,7 +100,8 @@ Lighter → Collector Worker Pool → immutable Parquet → Private GCS
 | `markets.json` / `candidates.json` | Analyzer | Tables and candidate list |
 
 ```bash
-# Local / manual analyzer (hydrates Parquet for dev)
+# GCP runtime E2E (post-deploy, read-only default)
+bash scripts/gcp_runtime_verify.sh --project "$PROJECT_ID" --from-trigger lighter-mm-main
 uv run lighter-mm cloud-analyze
 
 # GCP manual analyzer + scheduler smoke
