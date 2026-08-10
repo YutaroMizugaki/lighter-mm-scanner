@@ -513,16 +513,11 @@ audit_fetch_public_json() {
   gcloud storage cat "gs://${bucket}/${object_path}" 2>/dev/null || true
 }
 
-audit_json_git_sha() {
+audit_parse_status_json() {
   local json="$1"
-  printf '%s' "${json}" | python3 -c "
-import json, sys
-try:
-    data = json.load(sys.stdin)
-    print(data.get('git_sha', ''), end='')
-except json.JSONDecodeError:
-    print('', end='')
-" 2>/dev/null || true
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  printf '%s' "${json}" | python3 "${script_dir}/audit_status_json.py"
 }
 
 audit_check_public_json_git_sha() {
@@ -534,12 +529,20 @@ audit_check_public_json_git_sha() {
   local interval_seconds="${6:-5}"
   local elapsed=0
   local json=""
+  local parsed=""
+  local valid=""
   local sha=""
 
   while true; do
     json="$(audit_fetch_public_json "${bucket}" "${object_path}")"
     if [[ -n "${json}" ]]; then
-      sha="$(audit_json_git_sha "${json}")"
+      parsed="$(audit_parse_status_json "${json}")"
+      valid="$(printf '%s' "${parsed}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('valid', False))")"
+      sha="$(printf '%s' "${parsed}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('git_sha', ''), end='')")"
+      if [[ "${valid}" != "True" ]]; then
+        audit_fail "${label} malformed JSON (gs://${bucket}/${object_path})"
+        return 1
+      fi
       if [[ -n "${sha}" && "${sha}" == "${commit_sha}" ]]; then
         audit_pass "${label} git_sha matches ${commit_sha} (gs://${bucket}/${object_path})"
         return 0
@@ -603,33 +606,36 @@ audit_check_public_analysis_status() {
   json="$(audit_fetch_public_json "${bucket}" "${object_path}")"
   if [[ -z "${json}" ]]; then
     audit_warn "analysis_status.json not yet available (gs://${bucket}/${object_path})"
+    audit_warn "new analyzer revision has not executed yet (optional: gcloud run jobs execute lighter-mm-analyzer --wait)"
+    return 1
+  fi
+  local parsed
+  parsed="$(audit_parse_status_json "${json}")"
+  local valid
+  valid="$(printf '%s' "${parsed}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('valid', False))")"
+  if [[ "${valid}" != "True" ]]; then
+    audit_fail "analysis_status.json malformed (gs://${bucket}/${object_path})"
     return 1
   fi
   local sha
-  sha="$(audit_json_git_sha "${json}")"
+  sha="$(printf '%s' "${parsed}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('git_sha', ''), end='')")"
   local status
-  status="$(printf '%s' "${json}" | python3 -c "
-import json, sys
-try:
-    data = json.load(sys.stdin)
-    print(data.get('status', ''), end='')
-except json.JSONDecodeError:
-    print('', end='')
-" 2>/dev/null || true)"
+  status="$(printf '%s' "${parsed}" | python3 -c "import json,sys; print(json.load(sys.stdin).get('status', ''), end='')")"
   if [[ -z "${commit_sha}" ]]; then
     audit_warn "COMMIT_SHA not set; skipping analysis_status git_sha check"
-    audit_pass "analysis_status.json is fetchable (gs://${bucket}/${object_path})"
+    audit_pass "analysis_status.json is valid JSON (gs://${bucket}/${object_path})"
     return 0
   fi
   if [[ "${sha}" == "${commit_sha}" ]]; then
     audit_pass "analysis_status.json git_sha matches ${commit_sha}"
     return 0
   fi
-  if [[ -z "${sha}" || "${status}" == "NOT_STARTED" ]]; then
-    audit_warn "analysis_status.json not from this revision (status=${status}, git_sha=${sha:-missing})"
+  if [[ "${status}" == "NOT_STARTED" ]]; then
+    audit_warn "analysis_status.json NOT_STARTED (git_sha=${sha:-missing})"
     return 1
   fi
-  audit_fail "analysis_status.json stale git_sha (have ${sha}, want ${commit_sha})"
+  audit_warn "analysis_status.json stale git_sha (have ${sha:-missing}, want ${commit_sha}); new analyzer revision has not executed yet"
+  audit_warn "optional manual run: gcloud run jobs execute lighter-mm-analyzer --wait"
   return 1
 }
 

@@ -8,6 +8,13 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class MarketLifecycleEntry(BaseModel):
+    """Per-market active window bounds persisted across collector restarts."""
+
+    first_active_at_ms: int
+    removed_at_ms: int | None = None
+
+
 class RunState(BaseModel):
     run_id: str
     started_at: str
@@ -20,6 +27,7 @@ class RunState(BaseModel):
     collector_version: str = "0.1.0"
     git_sha: str | None = None
     markets: list[int] = Field(default_factory=list)
+    market_lifecycle: dict[int, MarketLifecycleEntry] = Field(default_factory=dict)
     samples_written: int = 0
     trades_written: int = 0
     markouts_written: int = 0

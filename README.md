@@ -86,6 +86,7 @@ Lighter → Collector Worker Pool → immutable Parquet → Private GCS
 - **GCS mount:** `/mnt/lighter-mm` (read-only)
 - **Publishes:** `current.json` + `generations/{id}/*` (and legacy `latest.json` mirror), `analysis_status.json`
 - **Analysis window:** end time is capped at `state.last_durable_event_ms` (durable market-event watermark), never execution time
+- **Observation coverage:** uses each market's active lifecycle window (`market_lifecycle` in run state). Collector gaps count as missing observations; periods before listing or after removal do not.
 - **Manual run:** `gcloud run jobs execute lighter-mm-analyzer --region=...`
 
 ### Public JSON roles
