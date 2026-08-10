@@ -152,7 +152,7 @@ export function statusHealthNote(
     return "一部の収集データを読み込めませんでした。破損ファイルを除外して解析を継続しています。";
   }
   if (status === "STALE") {
-    return "Analysis results are older than 30m (expected cadence: 15m).";
+    return "Analysis results are older than 30m (expected cadence: 30m).";
   }
   return null;
 }

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from lighter_mm.analytics.aggregation import AnalysisSources, analyze_range, analyze_window, scored_to_records
+from lighter_mm.analytics.estimated_fill_policy import DEFAULT_ORDER_USD
 from lighter_mm.cloud.health import (
     _ms_to_iso,
     _ws_connected,
@@ -358,7 +359,7 @@ def _market_detail(s: ScoredMarket) -> dict[str, Any]:
             "size_fit": s.size_fit,
             "penalties": s.penalties,
             "estimated_maker_fill_by_size": r.get("estimated_maker_fill_by_size"),
-            "estimated_maker_fill_order_usd_default": 50,
+            "estimated_maker_fill_order_usd_default": DEFAULT_ORDER_USD,
         }
     )
     return base
