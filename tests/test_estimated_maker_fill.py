@@ -18,52 +18,7 @@ from lighter_mm.analytics.estimated_fill_metrics import (
     max_estimated_fill_snapshots,
     sample_quality,
 )
-
-
-def _setup_books_trades(
-    con: duckdb.DuckDBPyConnection,
-    *,
-    books: list[tuple],
-    trades: list[tuple],
-) -> None:
-    con.execute(
-        """
-        CREATE OR REPLACE TABLE book_observed (
-            market_id BIGINT,
-            symbol VARCHAR,
-            timestamp_ms BIGINT,
-            mid DOUBLE,
-            is_usable BOOLEAN,
-            best_bid DOUBLE,
-            best_ask DOUBLE,
-            best_bid_size_usd DOUBLE,
-            best_ask_size_usd DOUBLE
-        )
-        """
-    )
-    if books:
-        con.executemany(
-            "INSERT INTO book_observed VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            books,
-        )
-    con.execute(
-        """
-        CREATE OR REPLACE TABLE trade_deduped (
-            market_id BIGINT,
-            trade_id BIGINT,
-            timestamp_ms BIGINT,
-            price DOUBLE,
-            usd_amount DOUBLE,
-            is_maker_ask BOOLEAN,
-            type VARCHAR
-        )
-        """
-    )
-    if trades:
-        con.executemany(
-            "INSERT INTO trade_deduped VALUES (?, ?, ?, ?, ?, ?, ?)",
-            trades,
-        )
+from tests.helpers.estimated_fill import setup_books_trades
 
 
 def _single_snap_books(
@@ -90,7 +45,7 @@ def test_buy_conservative_true() -> None:
         books.append((1, "TEST", ts, 100.5, True, 100.0, 101.0, 100.0, 100.0))
         trades.append((1, i * 2 + 1, ts + 1000, 100.0, 160.0, False, "trade"))
         trades.append((1, i * 2 + 2, ts + 1000, 101.0, 160.0, True, "trade"))
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     out = aggregate_estimated_fill_sql(con)[1]
     assert out["estimated_maker_fill_samples"] >= MIN_MEANINGFUL_SAMPLES
     assert out["estimated_maker_fill_by_size"]["50"]["5s"]["bid_conservative"] == pytest.approx(
@@ -108,7 +63,7 @@ def test_buy_conservative_false_optimistic_true() -> None:
         ts = 1_000_000 + i * SNAPSHOT_BUCKET_MS
         books.append((1, "TEST", ts, 100.5, True, 100.0, 101.0, 100.0, 100.0))
         trades.append((1, i + 1, ts + 1000, 100.0, 100.0, False, "trade"))
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     out = aggregate_estimated_fill_sql(con)[1]
     assert out["estimated_maker_fill_by_size"]["50"]["5s"]["bid_conservative"] == pytest.approx(
         0.0
@@ -126,7 +81,7 @@ def test_buy_optimistic_at_exact_order_size() -> None:
         ts = 1_000_000 + i * SNAPSHOT_BUCKET_MS
         books.append((1, "TEST", ts, 100.5, True, 100.0, 101.0, 100.0, 100.0))
         trades.append((1, i + 1, ts + 1000, 100.0, 50.0, False, "trade"))
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     out = aggregate_estimated_fill_sql(con)[1]
     assert out["estimated_maker_fill_by_size"]["50"]["5s"]["bid_optimistic"] == pytest.approx(
         1.0
@@ -145,7 +100,7 @@ def test_sell_conservative_true() -> None:
         books.append((1, "TEST", ts, 100.5, True, 100.0, 101.0, 100.0, 100.0))
         # taker buy eligible @ ask
         trades.append((1, i + 1, ts + 1000, 101.0, 160.0, True, "trade"))
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     out = aggregate_estimated_fill_sql(con)[1]
     assert out["estimated_maker_fill_by_size"]["50"]["5s"]["ask_conservative"] == pytest.approx(
         1.0
@@ -161,7 +116,7 @@ def test_direction_taker_buy_excluded_from_buy_maker() -> None:
         books.append((1, "TEST", ts, 100.5, True, 100.0, 101.0, 100.0, 100.0))
         # is_maker_ask=true → taker buy; must NOT fill bid maker
         trades.append((1, i + 1, ts + 1000, 100.0, 1000.0, True, "trade"))
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     out = aggregate_estimated_fill_sql(con)[1]
     assert out["estimated_maker_fill_by_size"]["50"]["5s"]["bid_optimistic"] == pytest.approx(
         0.0
@@ -176,7 +131,7 @@ def test_direction_taker_sell_excluded_from_sell_maker() -> None:
         ts = 1_000_000 + i * SNAPSHOT_BUCKET_MS
         books.append((1, "TEST", ts, 100.5, True, 100.0, 101.0, 100.0, 100.0))
         trades.append((1, i + 1, ts + 1000, 101.0, 1000.0, False, "trade"))
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     out = aggregate_estimated_fill_sql(con)[1]
     assert out["estimated_maker_fill_by_size"]["50"]["5s"]["ask_optimistic"] == pytest.approx(
         0.0
@@ -194,7 +149,7 @@ def test_price_filters() -> None:
         trades.append((1, i * 2 + 1, ts + 1000, 100.01, 1000.0, False, "trade"))
         # Sell: trade_price < best_ask → excluded
         trades.append((1, i * 2 + 2, ts + 1000, 100.99, 1000.0, True, "trade"))
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     out = aggregate_estimated_fill_sql(con)[1]
     assert out["estimated_maker_fill_by_size"]["50"]["5s"]["bid_optimistic"] == pytest.approx(
         0.0
@@ -216,7 +171,7 @@ def test_horizon_boundaries() -> None:
         ts = 1_000_000 + i * spacing
         books.append((1, "TEST", ts, 100.5, True, 100.0, 101.0, 0.0, 0.0))
         trades.append((1, i + 1, ts + 4900, 100.0, 50.0, False, "trade"))
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     out_early = aggregate_estimated_fill_sql(con)[1]
     assert out_early["estimated_maker_fill_by_size"]["50"]["5s"]["bid_optimistic"] == pytest.approx(
         1.0
@@ -232,7 +187,7 @@ def test_horizon_boundaries() -> None:
         ts = 1_000_000 + i * spacing
         books.append((1, "TEST", ts, 100.5, True, 100.0, 101.0, 0.0, 0.0))
         trades.append((1, i + 1, ts + 5100, 100.0, 50.0, False, "trade"))
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     out_mid = aggregate_estimated_fill_sql(con)[1]
     assert out_mid["estimated_maker_fill_by_size"]["50"]["5s"]["bid_optimistic"] == pytest.approx(
         0.0
@@ -248,7 +203,7 @@ def test_horizon_boundaries() -> None:
         ts = 1_000_000 + i * spacing
         books.append((1, "TEST", ts, 100.5, True, 100.0, 101.0, 0.0, 0.0))
         trades.append((1, i + 1, ts + 30100, 100.0, 50.0, False, "trade"))
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     out_late = aggregate_estimated_fill_sql(con)[1]
     assert out_late["estimated_maker_fill_by_size"]["50"]["5s"]["bid_optimistic"] == pytest.approx(
         0.0
@@ -270,7 +225,7 @@ def test_timestamp_equality_semantics() -> None:
         trades.append((1, i * 2 + 1, ts, 100.0, 50.0, False, "trade"))
         # exactly at t+5s → included in 5s
         trades.append((1, i * 2 + 2, ts + 5000, 100.0, 50.0, False, "trade"))
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     out = aggregate_estimated_fill_sql(con)[1]
     assert out["estimated_maker_fill_by_size"]["50"]["5s"]["bid_optimistic"] == pytest.approx(
         1.0
@@ -293,7 +248,7 @@ def test_regular_trade_only_non_regular_excluded() -> None:
         ts = 1_000_000 + i * SNAPSHOT_BUCKET_MS
         books.append((1, "TEST", ts, 100.5, True, 100.0, 101.0, 0.0, 0.0))
         # No regular trades inserted → fill rate 0 with enough samples
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     # Simulate liquidations sitting only in trade_raw (not trade_deduped)
     con.execute(
         """
@@ -323,7 +278,7 @@ def test_usable_book_and_missing_bbo_excluded() -> None:
         (1, "TEST", 1_000_000 + SNAPSHOT_BUCKET_MS, 100.5, True, None, 101.0, 100.0, 100.0),
         (1, "TEST", 1_000_000 + 2 * SNAPSHOT_BUCKET_MS, 100.5, True, 100.0, None, 100.0, 100.0),
     ]
-    _setup_books_trades(con, books=books, trades=[])
+    setup_books_trades(con, books=books, trades=[])
     assert downsample_snapshot_counts(con) == {}
     assert aggregate_estimated_fill_sql(con) == {}
 
@@ -340,7 +295,7 @@ def test_null_vs_zero_fill_semantics() -> None:
     con = duckdb.connect()
     # Insufficient samples with zero eligible volume → null rates
     books = [(1, "TEST", 1_000_000, 100.5, True, 100.0, 101.0, 100.0, 100.0)]
-    _setup_books_trades(con, books=books, trades=[])
+    setup_books_trades(con, books=books, trades=[])
     out = aggregate_estimated_fill_sql(con)[1]
     assert out["estimated_maker_fill_samples"] == 1
     assert out["estimated_maker_fill_sample_quality"] == "insufficient"
@@ -352,7 +307,7 @@ def test_null_vs_zero_fill_semantics() -> None:
     for i in range(MIN_MEANINGFUL_SAMPLES):
         ts = 1_000_000 + i * SNAPSHOT_BUCKET_MS
         books.append((1, "TEST", ts, 100.5, True, 100.0, 101.0, 100.0, 100.0))
-    _setup_books_trades(con, books=books, trades=[])
+    setup_books_trades(con, books=books, trades=[])
     out0 = aggregate_estimated_fill_sql(con)[1]
     assert out0["estimated_maker_fill_samples"] == MIN_MEANINGFUL_SAMPLES
     assert out0["estimated_maker_fill_rate_30s_conservative"] == pytest.approx(0.0)
@@ -367,7 +322,7 @@ def test_market_level_uses_min_of_bid_ask() -> None:
         books.append((1, "TEST", ts, 100.5, True, 100.0, 101.0, 0.0, 0.0))
         # Only bid side fills
         trades.append((1, i + 1, ts + 1000, 100.0, 50.0, False, "trade"))
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     out = aggregate_estimated_fill_sql(con)[1]
     assert out["estimated_maker_fill_by_size"]["50"]["5s"]["bid_optimistic"] == pytest.approx(
         1.0
@@ -388,7 +343,7 @@ def test_size_ladder_25_50_100() -> None:
         # $60 eligible both sides → fills 25 and 50, not 100 (optimistic)
         trades.append((1, i * 2 + 1, ts + 1000, 100.0, 60.0, False, "trade"))
         trades.append((1, i * 2 + 2, ts + 1000, 101.0, 60.0, True, "trade"))
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     out = aggregate_estimated_fill_sql(con)[1]
     assert out["estimated_maker_fill_by_size"]["25"]["5s"]["optimistic"] == pytest.approx(1.0)
     assert out["estimated_maker_fill_by_size"]["50"]["5s"]["optimistic"] == pytest.approx(1.0)
@@ -443,7 +398,7 @@ def test_downsample_caps_24h_window() -> None:
     for i in range(7200):
         ts = start + i * 1000
         books.append((1, "TEST", ts, 100.5, True, 100.0, 101.0, 10.0, 10.0))
-    _setup_books_trades(con, books=books, trades=[])
+    setup_books_trades(con, books=books, trades=[])
     counts = downsample_snapshot_counts(con)
     # ~ceil(window/30s); allow +1 for inclusive endpoint / integer-bucket edge.
     assert counts[1] <= max_estimated_fill_snapshots(2.0) + 1
@@ -460,7 +415,7 @@ def test_explain_no_unconditional_cross_product() -> None:
         books.append((1, "TEST", ts, 100.5, True, 100.0, 101.0, 100.0, 100.0))
         trades.append((1, i + 1, ts + 1000, 100.0, 50.0, False, "trade"))
         trades.append((1, 1000 + i, ts + 1000, 101.0, 50.0, True, "trade"))
-    _setup_books_trades(con, books=books, trades=trades)
+    setup_books_trades(con, books=books, trades=trades)
     plans = estimated_fill_explain_plans(con)
     assert "bid" in plans and "ask" in plans
     for side, plan in plans.items():

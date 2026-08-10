@@ -1,8 +1,11 @@
-"""Estimated Maker Fill — analyzer-only virtual touch-quote opportunity metrics.
+"""Estimated Maker Fill — public analytics API.
 
 Uses already-materialized usable book snapshots and regular trades.
 This is NOT actual fill probability: queue position, cancels/amends, and
 own-order lifecycle are not observed.
+
+Policy constants live in ``estimated_fill_policy``; SQL builders in
+``estimated_fill_sql``. Constants are re-exported here for compatibility.
 """
 
 from __future__ import annotations
@@ -12,21 +15,48 @@ from typing import Any
 
 import duckdb
 
-# Ranking default hypothetical order size (USD).
-DEFAULT_ORDER_USD = 50.0
-ORDER_SIZES_USD = (25.0, 50.0, 100.0)
-HORIZONS_S = (5, 30)
-# Estimated-fill-only downsample; does not change collector book sampling.
-SNAPSHOT_BUCKET_MS = 30_000
-MIN_MEANINGFUL_SAMPLES = 100
+from lighter_mm.analytics.estimated_fill_policy import (
+    DEFAULT_ORDER_USD,
+    HORIZONS_S,
+    MIN_MEANINGFUL_SAMPLES,
+    ORDER_SIZES_USD,
+    PRELIMINARY_SAMPLES,
+    SNAPSHOT_BUCKET_MS,
+)
+from lighter_mm.analytics.estimated_fill_sql import (
+    aggregate_fill_rates_sql,
+    downsample_snapshots_sql,
+    side_eligible_select_sql,
+    side_eligible_sql,
+)
+
+# Re-export policy constants for existing imports.
+__all__ = [
+    "DEFAULT_ORDER_USD",
+    "HORIZONS_S",
+    "MIN_MEANINGFUL_SAMPLES",
+    "ORDER_SIZES_USD",
+    "PRELIMINARY_SAMPLES",
+    "SNAPSHOT_BUCKET_MS",
+    "aggregate_estimated_fill_sql",
+    "attach_estimated_maker_edge",
+    "downsample_snapshot_counts",
+    "empty_estimated_fill_stats",
+    "estimated_fill_explain_plans",
+    "estimated_maker_edge_bps",
+    "maker_fee_rate_to_bps",
+    "max_estimated_fill_snapshots",
+    "sample_quality",
+    "snapshot_bucket_id",
+]
 
 
 def sample_quality(n: int | None) -> str:
     """Classify observation count for Estimated Fill / markout reliability labels."""
     count = int(n or 0)
-    if count < 100:
+    if count < MIN_MEANINGFUL_SAMPLES:
         return "insufficient"
-    if count < 500:
+    if count < PRELIMINARY_SAMPLES:
         return "preliminary"
     return "reliable"
 
@@ -74,7 +104,8 @@ def max_estimated_fill_snapshots(window_hours: float, bucket_ms: int = SNAPSHOT_
     return int(math.ceil(window_ms / float(bucket_ms)))
 
 
-def _empty_estimated_fill_stats() -> dict[str, Any]:
+def empty_estimated_fill_stats() -> dict[str, Any]:
+    """Null/zero Estimated Fill fields for markets without a successful aggregation."""
     detail: dict[str, Any] = {}
     for size in ORDER_SIZES_USD:
         size_key = str(int(size))
@@ -100,130 +131,6 @@ def _empty_estimated_fill_stats() -> dict[str, Any]:
         "estimated_maker_edge_30s_bps": None,
         "estimated_maker_edge_fee_included": False,
     }
-
-
-def _downsample_snapshots_sql(bucket_ms: int = SNAPSHOT_BUCKET_MS) -> str:
-    return f"""
-        CREATE OR REPLACE TABLE estimated_fill_snapshots AS
-        SELECT
-            market_id,
-            symbol,
-            timestamp_ms,
-            best_bid,
-            best_ask,
-            best_bid_size_usd,
-            best_ask_size_usd
-        FROM (
-            SELECT
-                market_id,
-                symbol,
-                timestamp_ms,
-                best_bid,
-                best_ask,
-                best_bid_size_usd,
-                best_ask_size_usd,
-                ROW_NUMBER() OVER (
-                    PARTITION BY market_id, (timestamp_ms // {bucket_ms})
-                    ORDER BY timestamp_ms ASC
-                ) AS rn
-            FROM book_observed
-            WHERE (is_usable = true OR (is_usable IS NULL AND mid IS NOT NULL))
-              AND best_bid IS NOT NULL
-              AND best_ask IS NOT NULL
-              AND best_bid_size_usd IS NOT NULL
-              AND best_ask_size_usd IS NOT NULL
-        ) ranked
-        WHERE rn = 1
-        """
-
-
-def _side_eligible_sql(side: str, horizon_ms: int = 30_000) -> str:
-    """Aggregate eligible aggressive notional per snapshot for one maker side.
-
-    Buy maker (bid): taker sells → is_maker_ask = false, price <= best_bid.
-    Sell maker (ask): taker buys → is_maker_ask = true, price >= best_ask.
-    """
-    if side == "bid":
-        maker_ask_pred = "t.is_maker_ask = false"
-        price_pred = "t.price <= s.best_bid"
-        size_col = "s.best_bid_size_usd"
-        px_col = "s.best_bid"
-    elif side == "ask":
-        maker_ask_pred = "t.is_maker_ask = true"
-        price_pred = "t.price >= s.best_ask"
-        size_col = "s.best_ask_size_usd"
-        px_col = "s.best_ask"
-    else:
-        raise ValueError(f"unknown side: {side}")
-
-    return f"""
-        CREATE OR REPLACE TABLE estimated_fill_{side}_eligible AS
-        SELECT
-            s.market_id,
-            s.timestamp_ms,
-            {px_col} AS touch_px,
-            {size_col} AS touch_size_usd,
-            COALESCE(SUM(t.usd_amount) FILTER (
-                WHERE t.timestamp_ms <= s.timestamp_ms + 5000
-            ), 0.0) AS eligible_usd_5s,
-            COALESCE(SUM(t.usd_amount) FILTER (
-                WHERE t.timestamp_ms <= s.timestamp_ms + {horizon_ms}
-            ), 0.0) AS eligible_usd_30s
-        FROM estimated_fill_snapshots s
-        LEFT JOIN trade_deduped t
-          ON t.market_id = s.market_id
-         AND {maker_ask_pred}
-         AND t.timestamp_ms > s.timestamp_ms
-         AND t.timestamp_ms <= s.timestamp_ms + {horizon_ms}
-         AND t.price IS NOT NULL
-         AND t.usd_amount IS NOT NULL
-         AND {price_pred}
-        GROUP BY s.market_id, s.timestamp_ms, {px_col}, {size_col}
-        """
-
-
-def _fill_flag_expr(eligible_col: str, touch_size_col: str, order_usd: float, mode: str) -> str:
-    if mode == "optimistic":
-        required = f"{order_usd}"
-    elif mode == "conservative":
-        required = f"({touch_size_col} + {order_usd})"
-    else:
-        raise ValueError(mode)
-    return f"CASE WHEN {eligible_col} >= {required} THEN 1.0 ELSE 0.0 END"
-
-
-def _aggregate_fill_rates_sql() -> str:
-    """Market-level fill rates: min(bid_rate, ask_rate) per size/horizon/mode."""
-    selects: list[str] = [
-        "b.market_id",
-        "COUNT(*)::BIGINT AS estimated_maker_fill_samples",
-    ]
-    for size in ORDER_SIZES_USD:
-        size_i = int(size)
-        for horizon, elig in ((5, "eligible_usd_5s"), (30, "eligible_usd_30s")):
-            for mode in ("optimistic", "conservative"):
-                bid_flag = _fill_flag_expr(f"b.{elig}", "b.touch_size_usd", size, mode)
-                ask_flag = _fill_flag_expr(f"a.{elig}", "a.touch_size_usd", size, mode)
-                selects.append(
-                    f"AVG({bid_flag}) AS bid_{mode}_{horizon}s_{size_i}"
-                )
-                selects.append(
-                    f"AVG({ask_flag}) AS ask_{mode}_{horizon}s_{size_i}"
-                )
-                selects.append(
-                    f"LEAST(AVG({bid_flag}), AVG({ask_flag})) AS mkt_{mode}_{horizon}s_{size_i}"
-                )
-
-    select_sql = ",\n            ".join(selects)
-    return f"""
-        SELECT
-            {select_sql}
-        FROM estimated_fill_bid_eligible b
-        INNER JOIN estimated_fill_ask_eligible a
-          ON a.market_id = b.market_id
-         AND a.timestamp_ms = b.timestamp_ms
-        GROUP BY b.market_id
-        """
 
 
 def _rate_or_null(samples: int, rate: float | None) -> float | None:
@@ -368,14 +275,14 @@ def aggregate_estimated_fill_sql(
     if not _book_observed_ready(con) or not _trade_deduped_ready(con):
         return {}
 
-    con.execute(_downsample_snapshots_sql(bucket_ms))
+    con.execute(downsample_snapshots_sql(bucket_ms))
     snap_count = con.execute("SELECT COUNT(*) FROM estimated_fill_snapshots").fetchone()[0]
     if not snap_count:
         return {}
 
-    con.execute(_side_eligible_sql("bid"))
-    con.execute(_side_eligible_sql("ask"))
-    rows = con.execute(_aggregate_fill_rates_sql()).fetchall()
+    con.execute(side_eligible_sql("bid"))
+    con.execute(side_eligible_sql("ask"))
+    rows = con.execute(aggregate_fill_rates_sql()).fetchall()
     cols = [d[0] for d in con.description]
     out: dict[int, dict[str, Any]] = {}
     for row in rows:
@@ -383,15 +290,6 @@ def aggregate_estimated_fill_sql(
         mid = int(rec["market_id"])
         out[mid] = _row_from_agg(rec)
     return out
-
-
-def _side_eligible_select_sql(side: str, horizon_ms: int = 30_000) -> str:
-    """SELECT body for side-eligible aggregation (shared by CREATE / EXPLAIN)."""
-    create_sql = _side_eligible_sql(side, horizon_ms=horizon_ms)
-    marker = f"CREATE OR REPLACE TABLE estimated_fill_{side}_eligible AS"
-    if marker not in create_sql:
-        raise RuntimeError(f"unexpected eligible SQL shape for side={side}")
-    return create_sql.split(marker, 1)[1].strip()
 
 
 def estimated_fill_explain_plans(
@@ -402,10 +300,10 @@ def estimated_fill_explain_plans(
     """EXPLAIN ANALYZE for estimated-fill range joins (no unbounded CROSS_PRODUCT)."""
     if not _book_observed_ready(con) or not _trade_deduped_ready(con):
         return {}
-    con.execute(_downsample_snapshots_sql(bucket_ms))
+    con.execute(downsample_snapshots_sql(bucket_ms))
     plans: dict[str, str] = {}
     for side in ("bid", "ask"):
-        select_sql = _side_eligible_select_sql(side)
+        select_sql = side_eligible_select_sql(side)
         rows = con.execute(f"EXPLAIN ANALYZE {select_sql}").fetchall()
         plans[side] = "\n".join(str(r[1] if len(r) > 1 else r[0]) for r in rows)
     return plans
@@ -419,7 +317,7 @@ def downsample_snapshot_counts(
     """Return per-market downsampled snapshot counts (for tests / diagnostics)."""
     if not _book_observed_ready(con):
         return {}
-    con.execute(_downsample_snapshots_sql(bucket_ms))
+    con.execute(downsample_snapshots_sql(bucket_ms))
     rows = con.execute(
         """
         SELECT market_id, COUNT(*)::BIGINT AS n
