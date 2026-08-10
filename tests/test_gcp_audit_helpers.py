@@ -25,6 +25,7 @@ extract_container_image = _helpers.extract_container_image
 extract_git_sha_env = _helpers.extract_git_sha_env
 extract_trigger_service_account = _helpers.extract_trigger_service_account
 image_digest = _helpers.image_digest
+image_tag_matches_commit = _helpers.image_tag_matches_commit
 normalize_service_account_email = _helpers.normalize_service_account_email
 
 
@@ -101,6 +102,19 @@ def test_provenance_digest_match() -> None:
 def test_provenance_tag_match() -> None:
     image = "asia-northeast1-docker.pkg.dev/p/r/collector:commitsha1"
     assert deployment_provenance_ok(deployed_image=image, commit_sha="commitsha1")
+
+
+def test_image_tag_matches_commit_exact_only() -> None:
+    assert image_tag_matches_commit("asia-northeast1-docker.pkg.dev/p/r/collector:abc123", "abc123")
+    assert not image_tag_matches_commit(
+        "asia-northeast1-docker.pkg.dev/p/r/collector:abc123-old", "abc123"
+    )
+    assert not image_tag_matches_commit(
+        "asia-northeast1-docker.pkg.dev/p/r/collector:prefix-abc123", "abc123"
+    )
+    assert not image_tag_matches_commit(
+        "asia-northeast1-docker.pkg.dev/p/r/collector@sha256:abc123", "abc123"
+    )
 
 
 def test_provenance_git_sha_only_fails_without_tag_or_digest() -> None:
@@ -223,10 +237,30 @@ if audit_print_summary; then exit 1; else exit 0; fi
     assert "is not enabled" in out
 
 
+def test_audit_cloud_build_executor_sa_prefers_service_account_email() -> None:
+    script = f"""
+set -euo pipefail
+source "{AUDIT_LIB}"
+SERVICE_ACCOUNT_EMAIL="197246566540-compute@developer.gserviceaccount.com"
+BUILD_ID="build-123"
+CLOUD_BUILD_TRIGGER_SERVICE_ACCOUNT="trigger-sa@project.iam.gserviceaccount.com"
+gcloud() {{
+  return 1
+}}
+export -f gcloud
+result="$(audit_cloud_build_executor_sa "my-project" "asia-northeast1")"
+printf '%s' "$result"
+"""
+    code, out = _run_bash(script)
+    assert code == 0
+    assert out.strip() == "197246566540-compute@developer.gserviceaccount.com"
+
+
 def test_audit_cloud_build_executor_sa_prefers_build_id() -> None:
     script = f"""
 set -euo pipefail
 source "{AUDIT_LIB}"
+unset SERVICE_ACCOUNT_EMAIL || true
 BUILD_ID="build-123"
 gcloud() {{
   if [[ "$1" == "builds" && "$2" == "describe" ]]; then
@@ -253,6 +287,8 @@ def test_audit_cloud_build_executor_sa_prefers_trigger_sa() -> None:
     script = f"""
 set -euo pipefail
 source "{AUDIT_LIB}"
+unset SERVICE_ACCOUNT_EMAIL || true
+unset BUILD_ID || true
 gcloud() {{
   if [[ "$1" == "builds" && "$2" == "get-default-service-account" ]]; then
     echo "default-sa@developer.gserviceaccount.com"
@@ -274,6 +310,9 @@ def test_audit_cloud_build_executor_sa_uses_gcloud_default() -> None:
     script = f"""
 set -euo pipefail
 source "{AUDIT_LIB}"
+unset SERVICE_ACCOUNT_EMAIL || true
+unset BUILD_ID || true
+unset CLOUD_BUILD_TRIGGER_SERVICE_ACCOUNT || true
 gcloud() {{
   if [[ "$1" == "builds" && "$2" == "get-default-service-account" ]]; then
     echo "197246566540-compute@developer.gserviceaccount.com"

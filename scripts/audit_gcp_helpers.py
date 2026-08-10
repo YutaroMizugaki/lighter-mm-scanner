@@ -90,9 +90,19 @@ def digests_match(deployed_digest: str, expected_digest: str) -> bool:
 
 
 def image_tag_matches_commit(image_ref: str, commit_sha: str) -> bool:
+    """Return True only when the image tag exactly equals commit_sha.
+
+    Digest references (``...@sha256:...``) never count as a tag match.
+    Partial substring matches such as ``abc123-old`` or ``prefix-abc123`` fail.
+    """
     if not image_ref or not commit_sha:
         return False
-    return f":{commit_sha}" in image_ref or f"/collector:{commit_sha}" in image_ref
+    if "@" in image_ref:
+        return False
+    if ":" not in image_ref:
+        return False
+    tag = image_ref.rsplit(":", 1)[-1]
+    return tag == commit_sha
 
 
 def deployment_provenance_check(

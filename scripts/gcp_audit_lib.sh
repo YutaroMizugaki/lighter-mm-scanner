@@ -105,7 +105,13 @@ audit_cloud_build_executor_sa() {
   local region="${2:-${REGION:-asia-northeast1}}"
   local sa=""
 
-  # Preflight inside Cloud Build: current build's executor SA is authoritative.
+  # Cloud Build built-in $SERVICE_ACCOUNT_EMAIL (automapSubstitutions) — no API needed.
+  if [[ -n "${SERVICE_ACCOUNT_EMAIL:-}" ]]; then
+    audit_normalize_service_account_email "${SERVICE_ACCOUNT_EMAIL}"
+    return 0
+  fi
+
+  # Preflight inside Cloud Build: current build's executor SA via describe.
   if [[ -n "${BUILD_ID:-}" ]]; then
     sa="$(gcloud builds describe "${BUILD_ID}" \
       --project="${project_id}" \
