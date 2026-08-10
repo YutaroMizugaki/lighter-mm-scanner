@@ -52,6 +52,8 @@ export type AnalysisStatus = {
   corrupt_parquet_files?: number;
   skipped_files?: Array<{ path: string; error: string }>;
   parquet_health_status?: string;
+  analysis_window_hours?: number | null;
+  run_observation_hours?: number | null;
 };
 
 export type DashboardGeneration = {
@@ -65,6 +67,8 @@ export type Overview = {
   run_id: string | null;
   started_at: string | null;
   observation_hours: number | null;
+  run_observation_hours?: number | null;
+  analysis_window_hours?: number | null;
   observation_target_hours: number | null;
   markets: number;
   markets_analyzed?: number;

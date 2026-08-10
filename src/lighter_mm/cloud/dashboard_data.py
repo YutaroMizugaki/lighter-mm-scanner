@@ -39,6 +39,8 @@ def build_dashboard_payload(
     last_book_sample_at_ms: int | None = None,
     last_book_row_at_ms: int | None = None,
     trades_without_reference_mid: int = 0,
+    analysis_window_hours: float | None = None,
+    run_observation_hours: float | None = None,
 ) -> dict[str, Any]:
     if analysis_result is None:
         if start_ms is not None and end_ms is not None:
@@ -132,7 +134,9 @@ def build_dashboard_payload(
 
     obs_hours = None
     window_hours = result.get("hours") or hours or 72.0
-    if state and state.started_at:
+    if run_observation_hours is not None:
+        obs_hours = float(run_observation_hours)
+    elif state and state.started_at:
         try:
             started = datetime.fromisoformat(state.started_at)
             if started.tzinfo is None:
@@ -149,6 +153,13 @@ def build_dashboard_payload(
                 obs_hours = (datetime.now(UTC) - started).total_seconds() / 3600.0
         except ValueError:
             obs_hours = window_hours
+
+    if analysis_window_hours is not None:
+        ranked_window_hours = float(analysis_window_hours)
+    elif start_ms is not None and end_ms is not None:
+        ranked_window_hours = max((end_ms - start_ms) / 3_600_000.0, 0.0)
+    else:
+        ranked_window_hours = float(window_hours)
 
     top = candidates[0] if candidates else None
     generated_at = datetime.now(UTC).isoformat()
@@ -171,6 +182,8 @@ def build_dashboard_payload(
         "run_id": state.run_id if state else None,
         "started_at": state.started_at if state else None,
         "observation_hours": obs_hours,
+        "run_observation_hours": obs_hours,
+        "analysis_window_hours": ranked_window_hours,
         "observation_target_hours": state.observation_target_hours if state else window_hours,
         "markets": len(scored),
         "markets_analyzed": len(scored),

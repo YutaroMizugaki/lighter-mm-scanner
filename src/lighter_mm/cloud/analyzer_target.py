@@ -66,9 +66,16 @@ def _analysis_window_ms(
     *,
     execution_start_ms: int,
     sources: AnalysisSources | None = None,
+    window_hours: float | None = None,
 ) -> tuple[int, int, int, int]:
-    """Return (start_ms, end_ms, analysis_end_ms, durable_watermark_ms)."""
-    start_ms = _iso_to_ms(state.started_at) or execution_start_ms
+    """Return (start_ms, end_ms, analysis_end_ms, durable_watermark_ms).
+
+    When ``window_hours`` > 0, start is clamped to a rolling window ending at
+    ``end_ms`` (never before ``run.started_at``). Collector retention remains
+    independent (e.g. 72h); this only bounds Analyzer ranking recomputation.
+    ``window_hours`` 0/None keeps legacy full-history behavior.
+    """
+    run_start_ms = _iso_to_ms(state.started_at) or execution_start_ms
     durable_ms = _durable_watermark_ms(state, sources=sources)
     if durable_ms is None:
         raise RuntimeError(
@@ -81,5 +88,10 @@ def _analysis_window_ms(
         end_ms = min(ended_ms, durable_ms)
     else:
         end_ms = min(execution_start_ms, durable_ms)
+
+    start_ms = run_start_ms
+    if window_hours is not None and float(window_hours) > 0:
+        window_ms = int(float(window_hours) * 3600.0 * 1000.0)
+        start_ms = max(run_start_ms, end_ms - window_ms)
 
     return start_ms, end_ms, end_ms, durable_ms

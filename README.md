@@ -83,6 +83,7 @@ Lighter → Collector Worker Pool → immutable Parquet → Private GCS
 - **Command:** `lighter-mm cloud-analyze`
 - **Resources:** 2 CPU / 8 GiB (configurable via `_ANALYZER_CPU` / `_ANALYZER_MEMORY`; DuckDB `DUCKDB_MEMORY_LIMIT=1GiB` is separate from container memory; task timeout 3600s)
 - **Schedule:** `*/30 * * * *` (Cloud Scheduler → Cloud Run Job)
+- **Ranking window:** last `SCHEDULED_ANALYSIS_WINDOW_HOURS` (default 24h); Collector retention remains `RUN_TARGET_HOURS` (72h)
 - **GCS mount:** `/mnt/lighter-mm` (read-only)
 - **Publishes:** `current.json` + `generations/{id}/*` (and legacy `latest.json` mirror), `analysis_status.json`
 - **Analysis window:** end time is capped at `state.last_durable_event_ms` (durable market-event watermark), never execution time

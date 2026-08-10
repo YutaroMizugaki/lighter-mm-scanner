@@ -75,7 +75,8 @@ export default async function HomePage() {
   const marketsFetchFailed = !marketsResult.ok;
 
   const target = overview.observation_target_hours;
-  const obs = overview.observation_hours;
+  const obs = overview.run_observation_hours ?? overview.observation_hours;
+  const analysisWindow = overview.analysis_window_hours;
   const top = overview.top_candidate;
   const healthWarnings = [...(overview.health_warnings || [])];
   if (marketsFetchFailed) {
@@ -221,6 +222,11 @@ export default async function HomePage() {
               {obs != null ? `${obs.toFixed(1)}h` : "—"}
               {target != null && target > 0 ? ` / ${target}h` : ""}
             </div>
+            {analysisWindow != null && (
+              <div className="muted" style={{ fontSize: "0.8rem", marginTop: "0.35rem" }}>
+                Ranking window {analysisWindow.toFixed(1)}h
+              </div>
+            )}
           </div>
           <div className="kpi">
             <div className="label">Markets</div>

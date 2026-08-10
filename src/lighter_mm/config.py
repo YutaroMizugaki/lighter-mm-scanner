@@ -69,6 +69,9 @@ class Settings(BaseSettings):
     analysis_stale_minutes: float = Field(default=30.0, ge=5.0)
     max_final_analysis_attempts: int = Field(default=3, ge=1)
     sqlite_dq_flush_seconds: float = Field(default=60.0, ge=5.0)
+    # Scheduled/final dashboard ranking window. Collector still retains run_target_hours
+    # (e.g. 72h). 0 disables rolling and reverts to full-history analysis (legacy).
+    scheduled_analysis_window_hours: float = Field(default=24.0, ge=0.0)
 
     # 0 => continuous; >0 => stop after N hours (cloud deploy sets 72)
     run_target_hours: float = Field(default=0.0)
@@ -155,6 +158,10 @@ class Settings(BaseSettings):
                 "LIGHTER_MM_DUCKDB_MEMORY_LIMIT",
             ),
             "duckdb_threads": ("DUCKDB_THREADS", "LIGHTER_MM_DUCKDB_THREADS"),
+            "scheduled_analysis_window_hours": (
+                "SCHEDULED_ANALYSIS_WINDOW_HOURS",
+                "LIGHTER_MM_SCHEDULED_ANALYSIS_WINDOW_HOURS",
+            ),
         }
         for field, names in mapping.items():
             if field not in data or data.get(field) in (None, ""):
