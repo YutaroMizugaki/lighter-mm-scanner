@@ -337,6 +337,19 @@ Cloud Run Worker Pool @ 1 vCPU / 1Gi, always-on, is the main compute cost. Keep 
 - **Last Sync** — from `collector_status.json` (`last_successful_sync`)
 - **Last Analysis** — from `analysis_status.json` (`last_successful_analysis_at`)
 
+### Analyzer success criteria (do not use Cloud Run COMPLETE alone)
+
+Cloud Run Job execution `COMPLETE 1/1` is **not** proof that analysis succeeded
+(lock-busy exits also return 0). Formal analysis success requires all of:
+
+1. `analysis_status.json.status` in `{OK, DEGRADED}`
+2. `analysis_status.json.last_successful_analysis_at` is non-null
+3. `current.json` exists
+
+Container memory for the Analyzer Job is `_ANALYZER_MEMORY=4Gi` (DuckDB remains
+`DUCKDB_MEMORY_LIMIT=1GiB`). After an OOM, `analysis_status` may remain `RUNNING`
+until the analyzer lock lease expires and a later execution recovers.
+
 ### Dashboard Last Analysis stops moving
 
 Check Scheduler configuration:
