@@ -47,7 +47,7 @@ Defaults used by this tool (safety margin):
 ```
 Phase 1  Data collection   ← this repo
 Phase 2  Historical analysis
-Phase 3  Paper market maker (not implemented)
+Phase 3  Paper market maker (implemented, historical conservative queue simulation)
 Phase 4  Small live MM (not implemented)
 ```
 

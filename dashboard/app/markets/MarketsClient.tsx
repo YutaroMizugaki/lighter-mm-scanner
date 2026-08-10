@@ -5,7 +5,7 @@ import QualityChip from "@/components/QualityChip";
 import RankBadge from "@/components/RankBadge";
 import ScoreBar from "@/components/ScoreBar";
 import SignedValue from "@/components/SignedValue";
-import { fmt } from "@/lib/format";
+import { fmt, fmtPaperCount, fmtPaperUsd } from "@/lib/format";
 import {
   ESTIMATED_EDGE_TOOLTIP,
   ESTIMATED_FILL_TOOLTIP,
@@ -95,6 +95,8 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
               <th title={ESTIMATED_EDGE_TOOLTIP}>Est. Edge</th>
               <th title={TOOLTIPS.coverage}>Coverage</th>
               <th title={TOOLTIPS.sampleQuality}>Quality</th>
+              <th className="paper-mm-col">Paper PnL</th>
+              <th className="paper-mm-col">Round Trips</th>
             </tr>
           </thead>
           <tbody>
@@ -149,6 +151,12 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
                       m.estimated_maker_fill_sample_quality ?? m.markout_sample_quality
                     }
                   />
+                </td>
+                <td className="tabular paper-mm-col">
+                  {fmtPaperUsd(m.paper_mm_total_pnl_usd, m.paper_mm_status, true)}
+                </td>
+                <td className="tabular paper-mm-col">
+                  {fmtPaperCount(m.paper_mm_round_trips, m.paper_mm_status)}
                 </td>
               </tr>
             ))}
