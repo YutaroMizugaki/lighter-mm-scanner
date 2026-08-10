@@ -83,6 +83,34 @@ def image_tag_matches_commit(image_ref: str, commit_sha: str) -> bool:
     return f":{commit_sha}" in image_ref or f"/collector:{commit_sha}" in image_ref
 
 
+def deployment_provenance_check(
+    *,
+    deployed_image: str,
+    commit_sha: str,
+    ar_digest: str = "",
+    git_sha_env: str = "",
+) -> tuple[bool, str]:
+    """Return (ok, reason) for deployment image provenance.
+
+  When both Artifact Registry and deployed image digests are available, they must match.
+  GIT_SHA env is supplementary and cannot override a digest mismatch.
+    """
+    if not deployed_image:
+        return False, "empty_image"
+    deployed_d = image_digest(deployed_image)
+    if ar_digest and deployed_d:
+        if digests_match(deployed_d, ar_digest):
+            return True, "digest_match"
+        return False, "digest_mismatch"
+    if image_tag_matches_commit(deployed_image, commit_sha):
+        if git_sha_env and git_sha_env == commit_sha:
+            return True, "tag_match_git_sha_confirmed"
+        return True, "tag_match"
+    if git_sha_env and git_sha_env == commit_sha:
+        return True, "git_sha_env"
+    return False, "no_match"
+
+
 def deployment_provenance_ok(
     *,
     deployed_image: str,
@@ -91,16 +119,22 @@ def deployment_provenance_ok(
     git_sha_env: str = "",
 ) -> bool:
     """Return True when deployed image digest/tag/env matches the expected commit."""
-    if not deployed_image:
-        return False
-    deployed_d = image_digest(deployed_image)
-    if ar_digest and deployed_d and digests_match(deployed_d, ar_digest):
-        return True
-    if image_tag_matches_commit(deployed_image, commit_sha):
-        return True
-    if git_sha_env and git_sha_env == commit_sha:
-        return True
-    return False
+    ok, _ = deployment_provenance_check(
+        deployed_image=deployed_image,
+        commit_sha=commit_sha,
+        ar_digest=ar_digest,
+        git_sha_env=git_sha_env,
+    )
+    return ok
+
+
+def extract_trigger_service_account(trigger_json: dict[str, Any]) -> str:
+    """Return explicit serviceAccount from a Cloud Build trigger describe JSON."""
+    for key in ("serviceAccount", "serviceAccountEmail"):
+        val = trigger_json.get(key)
+        if isinstance(val, str) and val:
+            return val
+    return ""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -128,17 +162,30 @@ def main(argv: list[str] | None = None) -> int:
         commit_sha = args[2]
         ar_digest = args[3] if len(args) > 3 else ""
         git_sha_env = args[4] if len(args) > 4 else ""
-        print(
-            "yes"
-            if deployment_provenance_ok(
-                deployed_image=deployed_image,
-                commit_sha=commit_sha,
-                ar_digest=ar_digest,
-                git_sha_env=git_sha_env,
-            )
-            else "no",
-            end="",
+        ok, _ = deployment_provenance_check(
+            deployed_image=deployed_image,
+            commit_sha=commit_sha,
+            ar_digest=ar_digest,
+            git_sha_env=git_sha_env,
         )
+        print("yes" if ok else "no", end="")
+        return 0
+    if cmd == "provenance-reason" and len(args) >= 3:
+        deployed_image = args[1]
+        commit_sha = args[2]
+        ar_digest = args[3] if len(args) > 3 else ""
+        git_sha_env = args[4] if len(args) > 4 else ""
+        ok, reason = deployment_provenance_check(
+            deployed_image=deployed_image,
+            commit_sha=commit_sha,
+            ar_digest=ar_digest,
+            git_sha_env=git_sha_env,
+        )
+        print(reason if ok else f"fail:{reason}", end="")
+        return 0
+    if cmd == "trigger-sa":
+        data = json.load(sys.stdin)
+        print(extract_trigger_service_account(data), end="")
         return 0
 
     return 2

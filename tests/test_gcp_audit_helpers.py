@@ -19,9 +19,11 @@ sys.modules["audit_gcp_helpers"] = _helpers
 _spec.loader.exec_module(_helpers)
 
 deployment_provenance_ok = _helpers.deployment_provenance_ok
+deployment_provenance_check = _helpers.deployment_provenance_check
 digests_match = _helpers.digests_match
 extract_container_image = _helpers.extract_container_image
 extract_git_sha_env = _helpers.extract_git_sha_env
+extract_trigger_service_account = _helpers.extract_trigger_service_account
 image_digest = _helpers.image_digest
 
 
@@ -100,13 +102,39 @@ def test_provenance_tag_match() -> None:
     assert deployment_provenance_ok(deployed_image=image, commit_sha="commitsha1")
 
 
-def test_provenance_git_sha_env_match() -> None:
+def test_provenance_git_sha_env_match_without_ar_digest() -> None:
     image = "asia-northeast1-docker.pkg.dev/p/r/collector@sha256:xyz"
     assert deployment_provenance_ok(
         deployed_image=image,
         commit_sha="commitsha1",
         git_sha_env="commitsha1",
     )
+
+
+def test_provenance_digest_mismatch_fails_even_when_git_sha_matches() -> None:
+    image = "asia-northeast1-docker.pkg.dev/p/r/collector@sha256:deployed"
+    ok, reason = deployment_provenance_check(
+        deployed_image=image,
+        commit_sha="commitsha1",
+        ar_digest="sha256:expected",
+        git_sha_env="commitsha1",
+    )
+    assert not ok
+    assert reason == "digest_mismatch"
+
+
+def test_audit_verify_deployment_digest_mismatch_fails_despite_git_sha() -> None:
+    image = "asia-northeast1-docker.pkg.dev/p/r/collector@sha256:deployed"
+    script = f"""
+set -euo pipefail
+source "{AUDIT_LIB}"
+audit_reset_counters
+audit_verify_deployment_image "worker pool" "{image}" "commitsha1" "sha256:expected" "commitsha1" || true
+if audit_print_summary; then exit 1; else exit 0; fi
+"""
+    code, out = _run_bash(script)
+    assert code == 0
+    assert "FAIL worker pool image digest does not match Artifact Registry" in out
 
 
 def test_audit_verify_deployment_digest_bash() -> None:
@@ -180,17 +208,51 @@ if audit_print_summary; then exit 1; else exit 0; fi
     assert "is not enabled" in out
 
 
-def test_audit_cloud_build_executor_sa_prefers_env() -> None:
+def test_audit_cloud_build_executor_sa_prefers_build_id() -> None:
     script = f"""
 set -euo pipefail
 source "{AUDIT_LIB}"
-CLOUD_BUILD_SERVICE_ACCOUNT="197246566540-compute@developer.gserviceaccount.com"
-result="$(audit_cloud_build_executor_sa "my-project")"
+BUILD_ID="build-123"
+gcloud() {{
+  if [[ "$1" == "builds" && "$2" == "describe" ]]; then
+    echo "build-executor@project.iam.gserviceaccount.com"
+    return 0
+  fi
+  if [[ "$1" == "builds" && "$2" == "get-default-service-account" ]]; then
+    echo "default-sa@developer.gserviceaccount.com"
+    return 0
+  fi
+  return 1
+}}
+export -f gcloud
+CLOUD_BUILD_TRIGGER_SERVICE_ACCOUNT="trigger-sa@project.iam.gserviceaccount.com"
+result="$(audit_cloud_build_executor_sa "my-project" "asia-northeast1")"
 printf '%s' "$result"
 """
     code, out = _run_bash(script)
     assert code == 0
-    assert out.strip() == "197246566540-compute@developer.gserviceaccount.com"
+    assert out.strip() == "build-executor@project.iam.gserviceaccount.com"
+
+
+def test_audit_cloud_build_executor_sa_prefers_trigger_sa() -> None:
+    script = f"""
+set -euo pipefail
+source "{AUDIT_LIB}"
+gcloud() {{
+  if [[ "$1" == "builds" && "$2" == "get-default-service-account" ]]; then
+    echo "default-sa@developer.gserviceaccount.com"
+    return 0
+  fi
+  return 1
+}}
+export -f gcloud
+CLOUD_BUILD_TRIGGER_SERVICE_ACCOUNT="trigger-sa@project.iam.gserviceaccount.com"
+result="$(audit_cloud_build_executor_sa "my-project" "asia-northeast1")"
+printf '%s' "$result"
+"""
+    code, out = _run_bash(script)
+    assert code == 0
+    assert out.strip() == "trigger-sa@project.iam.gserviceaccount.com"
 
 
 def test_audit_cloud_build_executor_sa_uses_gcloud_default() -> None:
@@ -211,6 +273,48 @@ printf '%s' "$result"
     code, out = _run_bash(script)
     assert code == 0
     assert out.strip() == "197246566540-compute@developer.gserviceaccount.com"
+
+
+def test_audit_api_enabled_iam_not_passed_by_unrelated_probe() -> None:
+    script = f"""
+set -euo pipefail
+source "{AUDIT_LIB}"
+audit_reset_counters
+gcloud() {{
+  if [[ "$1" == "services" && "$2" == "list" ]]; then
+    echo "PERMISSION_DENIED: missing serviceusage.services.list" >&2
+    return 1
+  fi
+  if [[ "$1" == "logging" ]]; then
+    return 0
+  fi
+  if [[ "$1" == "iam" && "$2" == "service-accounts" && "$3" == "list" ]]; then
+    return 1
+  fi
+  return 1
+}}
+export -f gcloud
+audit_api_enabled "proj" "iam.googleapis.com" "IAM API" || true
+if audit_print_summary; then exit 0; else exit 1; fi
+"""
+    code, out = _run_bash(script)
+    assert code == 0
+    assert "UNKNOWN IAM API" in out
+    assert "PASS IAM API" not in out
+    assert "is not enabled" not in out
+
+
+def test_extract_trigger_service_account() -> None:
+    payload = {
+        "name": "lighter-mm-main",
+        "serviceAccount": "trigger-sa@project.iam.gserviceaccount.com",
+    }
+    assert (
+        extract_trigger_service_account(payload)
+        == "trigger-sa@project.iam.gserviceaccount.com"
+    )
+    assert extract_trigger_service_account({"serviceAccountEmail": "legacy@x"}) == "legacy@x"
+    assert extract_trigger_service_account({}) == ""
 
 
 def test_helpers_cli_image_command() -> None:

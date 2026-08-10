@@ -92,18 +92,31 @@ audit_cloud_build_sa() {
 audit_cloud_build_executor_sa() {
   local project_id="$1"
   local region="${2:-${REGION:-asia-northeast1}}"
+  local sa=""
 
-  if [[ -n "${CLOUD_BUILD_SERVICE_ACCOUNT:-}" ]]; then
-    printf '%s' "${CLOUD_BUILD_SERVICE_ACCOUNT}"
+  # Preflight inside Cloud Build: current build's executor SA is authoritative.
+  if [[ -n "${BUILD_ID:-}" ]]; then
+    sa="$(gcloud builds describe "${BUILD_ID}" \
+      --project="${project_id}" \
+      --region="${region}" \
+      --format='value(serviceAccount)' 2>/dev/null || true)"
+    if [[ -n "${sa}" ]]; then
+      printf '%s' "${sa}"
+      return 0
+    fi
+  fi
+
+  # gcp_doctor --from-trigger: explicit trigger serviceAccount.
+  if [[ -n "${CLOUD_BUILD_TRIGGER_SERVICE_ACCOUNT:-}" ]]; then
+    printf '%s' "${CLOUD_BUILD_TRIGGER_SERVICE_ACCOUNT}"
     return 0
   fi
 
-  local default_sa=""
-  if default_sa="$(gcloud builds get-default-service-account \
+  if sa="$(gcloud builds get-default-service-account \
       --project="${project_id}" \
       --region="${region}" 2>/dev/null)"; then
-    if [[ -n "${default_sa}" ]]; then
-      printf '%s' "${default_sa}"
+    if [[ -n "${sa}" ]]; then
+      printf '%s' "${sa}"
       return 0
     fi
   fi
@@ -141,7 +154,7 @@ audit_api_probe() {
       gcloud builds list --project="${project_id}" --region="${REGION:-asia-northeast1}" --limit=1 >/dev/null 2>&1
       ;;
     iam.googleapis.com)
-      gcloud projects get-iam-policy "${project_id}" --format=json --limit=1 >/dev/null 2>&1
+      gcloud iam service-accounts list --project="${project_id}" --limit=1 >/dev/null 2>&1
       ;;
     cloudresourcemanager.googleapis.com)
       gcloud projects describe "${project_id}" >/dev/null 2>&1
@@ -492,7 +505,7 @@ audit_verify_deployment_image() {
   local commit_sha="$3"
   local ar_digest="${4:-}"
   local git_sha_env="${5:-}"
-  local helpers
+  local helpers reason
   helpers="$(_audit_gcp_helpers)"
 
   if [[ -z "${deployed_image}" ]]; then
@@ -500,21 +513,33 @@ audit_verify_deployment_image() {
     return 1
   fi
 
-  local ok
-  ok="$(python3 "${helpers}" provenance-ok "${deployed_image}" "${commit_sha}" "${ar_digest}" "${git_sha_env}")"
-  if [[ "${ok}" == "yes" ]]; then
-    if [[ -n "${ar_digest}" ]]; then
+  reason="$(python3 "${helpers}" provenance-reason "${deployed_image}" "${commit_sha}" "${ar_digest}" "${git_sha_env}")"
+  case "${reason}" in
+    digest_match)
       audit_pass "${label} image digest matches Artifact Registry (${commit_sha})"
-    elif [[ -n "${git_sha_env}" && "${git_sha_env}" == "${commit_sha}" ]]; then
-      audit_pass "${label} GIT_SHA env matches ${commit_sha}"
-    else
-      audit_pass "${label} image references commit ${commit_sha}: ${deployed_image}"
-    fi
-    return 0
-  fi
-
-  audit_fail "${label} image does not match commit ${commit_sha}: ${deployed_image}"
-  return 1
+      return 0
+      ;;
+    tag_match_git_sha_confirmed)
+      audit_pass "${label} image tag matches commit ${commit_sha} (GIT_SHA env confirmed)"
+      return 0
+      ;;
+    tag_match)
+      audit_pass "${label} image tag matches commit ${commit_sha}"
+      return 0
+      ;;
+    git_sha_env)
+      audit_pass "${label} GIT_SHA env matches ${commit_sha} (image digest unavailable)"
+      return 0
+      ;;
+    fail:digest_mismatch)
+      audit_fail "${label} image digest does not match Artifact Registry for ${commit_sha}: ${deployed_image}"
+      return 1
+      ;;
+    *)
+      audit_fail "${label} image does not match commit ${commit_sha}: ${deployed_image}"
+      return 1
+      ;;
+  esac
 }
 
 audit_image_contains_sha() {

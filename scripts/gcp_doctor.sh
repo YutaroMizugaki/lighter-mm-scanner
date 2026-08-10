@@ -110,6 +110,11 @@ print(subs.get('${key}', ''), end='')
     SCHEDULER_SA="${SCHEDULER_SA:-$(_sub _SCHEDULER_SERVICE_ACCOUNT)}"
     WORKER_POOL="${WORKER_POOL:-$(_sub _WORKER_POOL)}"
     ANALYZER_JOB="${ANALYZER_JOB:-$(_sub _ANALYZER_JOB)}"
+    trigger_sa="$(printf '%s' "${trigger_json}" | python3 "${SCRIPT_DIR}/audit_gcp_helpers.py" trigger-sa)"
+    if [[ -n "${trigger_sa}" ]]; then
+      CLOUD_BUILD_TRIGGER_SERVICE_ACCOUNT="${trigger_sa}"
+      audit_pass "trigger serviceAccount ${trigger_sa}"
+    fi
     audit_pass "loaded trigger ${FROM_TRIGGER}"
   fi
 fi
