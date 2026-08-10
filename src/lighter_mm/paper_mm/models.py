@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -39,6 +40,12 @@ class PaperFill:
     is_partial: bool
     markout_5s_resolved: bool = False
     markout_30s_resolved: bool = False
+
+
+@dataclass
+class PendingPaperMarkout:
+    fill: PaperFill
+    remaining_horizons_ms: set[int]
 
 
 @dataclass
@@ -99,6 +106,7 @@ class PaperMmState:
     paper_fills: list[PaperFill] = field(default_factory=list)
     markout_5s_bps: list[float] = field(default_factory=list)
     markout_30s_bps: list[float] = field(default_factory=list)
+    pending_markouts: deque[PendingPaperMarkout] = field(default_factory=deque)
 
     last_mid: float | None = None
     last_mid_ts_ms: int | None = None

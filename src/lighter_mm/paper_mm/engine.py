@@ -5,7 +5,11 @@ from __future__ import annotations
 import math
 
 from lighter_mm.engine.mid_history import MidHistory
-from lighter_mm.paper_mm.markout import drain_pending_paper_markouts, resolve_due_paper_markouts
+from lighter_mm.paper_mm.markout import (
+    drain_pending_paper_markouts,
+    register_pending_markout,
+    resolve_due_paper_markouts,
+)
 from lighter_mm.paper_mm.models import (
     BookSnapshot,
     FifoLot,
@@ -128,17 +132,17 @@ def _apply_fill(
     fee = usd * fee_bps / 10000.0
     state.fees_usd += fee
     state.filled_notional_usd += usd
-    state.paper_fills.append(
-        PaperFill(
-            side=side,
-            qty_base=qty_base,
-            price=price,
-            usd=usd,
-            timestamp_ms=timestamp_ms,
-            reference_mid=reference_mid,
-            is_partial=is_partial_order_fill,
-        )
+    fill = PaperFill(
+        side=side,
+        qty_base=qty_base,
+        price=price,
+        usd=usd,
+        timestamp_ms=timestamp_ms,
+        reference_mid=reference_mid,
+        is_partial=is_partial_order_fill,
     )
+    state.paper_fills.append(fill)
+    register_pending_markout(state, fill)
 
     if side == "bid":
         state.bid_fills += 1
