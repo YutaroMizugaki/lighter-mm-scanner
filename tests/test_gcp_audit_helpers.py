@@ -25,6 +25,7 @@ extract_container_image = _helpers.extract_container_image
 extract_git_sha_env = _helpers.extract_git_sha_env
 extract_trigger_service_account = _helpers.extract_trigger_service_account
 image_digest = _helpers.image_digest
+normalize_service_account_email = _helpers.normalize_service_account_email
 
 
 def _run_bash(script: str) -> tuple[int, str]:
@@ -102,13 +103,27 @@ def test_provenance_tag_match() -> None:
     assert deployment_provenance_ok(deployed_image=image, commit_sha="commitsha1")
 
 
-def test_provenance_git_sha_env_match_without_ar_digest() -> None:
+def test_provenance_git_sha_only_fails_without_tag_or_digest() -> None:
     image = "asia-northeast1-docker.pkg.dev/p/r/collector@sha256:xyz"
-    assert deployment_provenance_ok(
+    ok, reason = deployment_provenance_check(
         deployed_image=image,
         commit_sha="commitsha1",
         git_sha_env="commitsha1",
     )
+    assert not ok
+    assert reason == "no_match"
+
+
+def test_provenance_wrong_digest_git_sha_only_fails() -> None:
+    image = "asia-northeast1-docker.pkg.dev/p/r/collector@sha256:wrong"
+    ok, reason = deployment_provenance_check(
+        deployed_image=image,
+        commit_sha="commitsha1",
+        ar_digest="",
+        git_sha_env="commitsha1",
+    )
+    assert not ok
+    assert reason == "no_match"
 
 
 def test_provenance_digest_mismatch_fails_even_when_git_sha_matches() -> None:
@@ -215,7 +230,7 @@ source "{AUDIT_LIB}"
 BUILD_ID="build-123"
 gcloud() {{
   if [[ "$1" == "builds" && "$2" == "describe" ]]; then
-    echo "build-executor@project.iam.gserviceaccount.com"
+    echo "projects/my-project/serviceAccounts/build-executor@project.iam.gserviceaccount.com"
     return 0
   fi
   if [[ "$1" == "builds" && "$2" == "get-default-service-account" ]]; then
@@ -246,7 +261,7 @@ gcloud() {{
   return 1
 }}
 export -f gcloud
-CLOUD_BUILD_TRIGGER_SERVICE_ACCOUNT="trigger-sa@project.iam.gserviceaccount.com"
+CLOUD_BUILD_TRIGGER_SERVICE_ACCOUNT="projects/my-project/serviceAccounts/trigger-sa@project.iam.gserviceaccount.com"
 result="$(audit_cloud_build_executor_sa "my-project" "asia-northeast1")"
 printf '%s' "$result"
 """
@@ -307,7 +322,7 @@ if audit_print_summary; then exit 0; else exit 1; fi
 def test_extract_trigger_service_account() -> None:
     payload = {
         "name": "lighter-mm-main",
-        "serviceAccount": "trigger-sa@project.iam.gserviceaccount.com",
+        "serviceAccount": "projects/my-project/serviceAccounts/trigger-sa@project.iam.gserviceaccount.com",
     }
     assert (
         extract_trigger_service_account(payload)
@@ -315,6 +330,14 @@ def test_extract_trigger_service_account() -> None:
     )
     assert extract_trigger_service_account({"serviceAccountEmail": "legacy@x"}) == "legacy@x"
     assert extract_trigger_service_account({}) == ""
+
+
+def test_normalize_service_account_email() -> None:
+    resource = "projects/my-project/serviceAccounts/build-executor@project.iam.gserviceaccount.com"
+    assert normalize_service_account_email(resource) == "build-executor@project.iam.gserviceaccount.com"
+    assert normalize_service_account_email("plain@project.iam.gserviceaccount.com") == (
+        "plain@project.iam.gserviceaccount.com"
+    )
 
 
 def test_helpers_cli_image_command() -> None:

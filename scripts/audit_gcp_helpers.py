@@ -8,6 +8,7 @@ import sys
 from typing import Any
 
 _IMAGE_DIGEST_RE = re.compile(r"@([^@]+)$")
+_SERVICE_ACCOUNT_RESOURCE_RE = re.compile(r"^projects/[^/]+/serviceAccounts/(.+)$")
 
 
 def _dig_into(obj: Any, *keys: str) -> Any:
@@ -55,6 +56,17 @@ def extract_git_sha_env(describe_json: dict[str, Any]) -> str:
             val = item.get("value")
             return val if isinstance(val, str) else ""
     return ""
+
+
+def normalize_service_account_email(service_account: str) -> str:
+    """Normalize a service account resource name or email to plain email form."""
+    if not service_account:
+        return ""
+    value = service_account.strip()
+    match = _SERVICE_ACCOUNT_RESOURCE_RE.match(value)
+    if match:
+        return match.group(1)
+    return value
 
 
 def image_digest(image_ref: str) -> str:
@@ -106,8 +118,6 @@ def deployment_provenance_check(
         if git_sha_env and git_sha_env == commit_sha:
             return True, "tag_match_git_sha_confirmed"
         return True, "tag_match"
-    if git_sha_env and git_sha_env == commit_sha:
-        return True, "git_sha_env"
     return False, "no_match"
 
 
@@ -133,7 +143,7 @@ def extract_trigger_service_account(trigger_json: dict[str, Any]) -> str:
     for key in ("serviceAccount", "serviceAccountEmail"):
         val = trigger_json.get(key)
         if isinstance(val, str) and val:
-            return val
+            return normalize_service_account_email(val)
     return ""
 
 
@@ -186,6 +196,9 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "trigger-sa":
         data = json.load(sys.stdin)
         print(extract_trigger_service_account(data), end="")
+        return 0
+    if cmd == "normalize-sa" and len(args) >= 2:
+        print(normalize_service_account_email(args[1]), end="")
         return 0
 
     return 2

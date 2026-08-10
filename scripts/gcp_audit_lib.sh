@@ -89,6 +89,17 @@ audit_cloud_build_sa() {
 }
 
 # Resolve the service account that actually runs Cloud Build (not always the legacy SA).
+audit_normalize_service_account_email() {
+  local sa="${1:-}"
+  local helpers normalized
+  if [[ -z "${sa}" ]]; then
+    return 0
+  fi
+  helpers="$(_audit_gcp_helpers)"
+  normalized="$(python3 "${helpers}" normalize-sa "${sa}")"
+  printf '%s' "${normalized}"
+}
+
 audit_cloud_build_executor_sa() {
   local project_id="$1"
   local region="${2:-${REGION:-asia-northeast1}}"
@@ -101,14 +112,14 @@ audit_cloud_build_executor_sa() {
       --region="${region}" \
       --format='value(serviceAccount)' 2>/dev/null || true)"
     if [[ -n "${sa}" ]]; then
-      printf '%s' "${sa}"
+      audit_normalize_service_account_email "${sa}"
       return 0
     fi
   fi
 
   # gcp_doctor --from-trigger: explicit trigger serviceAccount.
   if [[ -n "${CLOUD_BUILD_TRIGGER_SERVICE_ACCOUNT:-}" ]]; then
-    printf '%s' "${CLOUD_BUILD_TRIGGER_SERVICE_ACCOUNT}"
+    audit_normalize_service_account_email "${CLOUD_BUILD_TRIGGER_SERVICE_ACCOUNT}"
     return 0
   fi
 
@@ -116,12 +127,15 @@ audit_cloud_build_executor_sa() {
       --project="${project_id}" \
       --region="${region}" 2>/dev/null)"; then
     if [[ -n "${sa}" ]]; then
-      printf '%s' "${sa}"
+      audit_normalize_service_account_email "${sa}"
       return 0
     fi
   fi
 
-  audit_cloud_build_sa "${project_id}"
+  sa="$(audit_cloud_build_sa "${project_id}")"
+  if [[ -n "${sa}" ]]; then
+    audit_normalize_service_account_email "${sa}"
+  fi
 }
 
 _audit_lib_dir() {
@@ -525,10 +539,6 @@ audit_verify_deployment_image() {
       ;;
     tag_match)
       audit_pass "${label} image tag matches commit ${commit_sha}"
-      return 0
-      ;;
-    git_sha_env)
-      audit_pass "${label} GIT_SHA env matches ${commit_sha} (image digest unavailable)"
       return 0
       ;;
     fail:digest_mismatch)
