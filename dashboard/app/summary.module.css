@@ -1,0 +1,40 @@
+.panel {
+  padding: var(--space-4);
+}
+
+.panel :global(.section-header) {
+  margin-bottom: var(--space-3);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.grid :global(.metric-card),
+.grid :global(.data-freshness) {
+  min-height: 80px;
+}
+
+.grid :global(.metric-card) {
+  padding: var(--space-2) var(--space-3);
+}
+
+.grid :global(.data-freshness) {
+  margin-top: 0;
+  padding: var(--space-2) var(--space-3);
+  align-items: center;
+}
+
+@media (max-width: 1024px) {
+  .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 480px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
