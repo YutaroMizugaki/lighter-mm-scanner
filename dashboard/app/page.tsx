@@ -13,14 +13,13 @@ import {
   getOverviewResult,
   resolveDashboardBundle,
 } from "@/lib/api";
-import { fmt, fmtJst } from "@/lib/format";
+import { fmt } from "@/lib/format";
 import {
   effectiveCollectorStatus,
   effectivePublicAnalysisStatus,
   statusHealthNote,
 } from "@/lib/status";
 import {
-  formatRelativeAge,
   publicAnalysisPendingMessage,
   publicDataUnavailableMessage,
 } from "@/lib/public";
@@ -115,8 +114,6 @@ export default async function HomePage() {
     collectorNote || "",
   ].filter(Boolean);
 
-  const relativeUpdated = formatRelativeAge(lastAnalysisAt);
-
   return (
     <>
       <Hero />
@@ -135,12 +132,6 @@ export default async function HomePage() {
                 ? `${overview.coverage_pct.toFixed(1)}%`
                 : "—"
             }
-          />
-          <MetricCard
-            label="Last Analysis"
-            value={relativeUpdated}
-            subtext={fmtJst(lastAnalysisAt)}
-            title={fmtJst(lastAnalysisAt)}
           />
         </div>
         <DataFreshness
