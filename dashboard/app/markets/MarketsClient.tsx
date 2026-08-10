@@ -1,16 +1,19 @@
 "use client";
 
-import Link from "next/link";
-import { useMemo, useState } from "react";
-import { EstimatedEdgeValue } from "@/components/EstimatedEdgeValue";
-import { EstimatedFillValue } from "@/components/EstimatedFillValue";
-import { SampleQualityValue } from "@/components/SampleQualityValue";
+import EstimatedFillValue from "@/components/EstimatedFillValue";
+import QualityChip from "@/components/QualityChip";
+import RankBadge from "@/components/RankBadge";
+import ScoreBar from "@/components/ScoreBar";
+import SignedValue from "@/components/SignedValue";
 import { fmt } from "@/lib/format";
 import {
   ESTIMATED_EDGE_TOOLTIP,
   ESTIMATED_FILL_TOOLTIP,
 } from "@/lib/marketMetrics";
+import { formatActivity, formatDepth, TOOLTIPS } from "@/lib/public";
 import type { MarketRow } from "@/lib/types";
+import Link from "next/link";
+import { useMemo, useState } from "react";
 
 export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
   const [q, setQ] = useState("");
@@ -50,7 +53,11 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
           onChange={(e) => setQ(e.target.value)}
           aria-label="Search symbol"
         />
-        <select value={sort} onChange={(e) => setSort(e.target.value as typeof sort)}>
+        <select
+          value={sort}
+          onChange={(e) => setSort(e.target.value as typeof sort)}
+          aria-label="Sort markets"
+        >
           <option value="score">Sort: Score</option>
           <option value="spread">Sort: Spread</option>
           <option value="fill30">Sort: Est. Fill 30s</option>
@@ -69,59 +76,80 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
         </label>
       </div>
       <p className="muted" style={{ marginTop: 0, maxWidth: 920 }} title={ESTIMATED_FILL_TOOLTIP}>
-        Est. Fill = Estimated Maker Fill ($50 conservative). Hover column header for definition.
-        Market-level Trades/TPM are activity, not fill.
+        Est. Fill = Estimated Maker Fill ($50 / 30s / Conservative). Depth and TPM are market
+        activity / liquidity — not fill probability.
       </p>
-      <div style={{ overflowX: "auto", maxHeight: 640 }}>
-        <table>
+      <div className="table-scroll" style={{ maxHeight: 640 }}>
+        <table className="market-table">
           <thead>
             <tr>
-              <th>#</th>
-              <th>Symbol</th>
+              <th className="sticky-col">Market</th>
               <th>Rank</th>
-              <th>Score</th>
+              <th title={TOOLTIPS.score}>Score</th>
+              <th title={ESTIMATED_FILL_TOOLTIP}>Est. Fill</th>
               <th>Spread</th>
-              <th title={ESTIMATED_FILL_TOOLTIP}>Est. Fill 30s</th>
-              <th>M5</th>
-              <th>M30</th>
+              <th title={TOOLTIPS.depth10bp}>Depth</th>
+              <th title={TOOLTIPS.tradesPerMin}>Activity</th>
+              <th title={TOOLTIPS.makerMarkout}>M5</th>
+              <th title={TOOLTIPS.makerMarkout}>M30</th>
               <th title={ESTIMATED_EDGE_TOOLTIP}>Est. Edge</th>
-              <th>Sample Q</th>
-              <th title="Market-level trade prints (not Estimated Maker Fill)">Trades</th>
-              <th>Coverage</th>
+              <th title={TOOLTIPS.coverage}>Coverage</th>
+              <th title={TOOLTIPS.sampleQuality}>Quality</th>
             </tr>
           </thead>
           <tbody>
-            {rows.map((m, i) => (
+            {rows.map((m) => (
               <tr key={m.symbol}>
-                <td>{i + 1}</td>
-                <td>
+                <td className="sticky-col">
                   <Link href={`/markets/${encodeURIComponent(m.symbol)}`}>{m.symbol}</Link>
                 </td>
                 <td>
-                  <span className={`badge ${m.letter_rank}`}>{m.letter_rank}</span>
+                  <RankBadge letter={m.letter_rank} />
                 </td>
-                <td>{fmt(m.score, 1)}</td>
-                <td>{fmt(m.median_spread_bps)}</td>
+                <td>
+                  <ScoreBar score={m.score} />
+                </td>
                 <td>
                   <EstimatedFillValue
                     rate={m.estimated_maker_fill_rate_30s_conservative}
                     quality={m.estimated_maker_fill_sample_quality}
+                    compact
                   />
                 </td>
-                <td>{fmt(m.maker_markout_5s_median_bps, 2, true)}</td>
-                <td>{fmt(m.maker_markout_30s_median_bps, 2, true)}</td>
-                <td>
-                  <EstimatedEdgeValue edgeBps={m.estimated_maker_edge_30s_bps} />
+                <td className="tabular">
+                  {fmt(m.median_spread_bps)}
+                  <span className="unit"> bp</span>
+                </td>
+                <td className="tabular" title={TOOLTIPS.depth10bp}>
+                  {formatDepth(m.median_two_sided_depth_10bps_usd)}
+                </td>
+                <td className="tabular" title={TOOLTIPS.tradesPerMin}>
+                  {formatActivity(m.trades_per_minute_median)}
                 </td>
                 <td>
-                  <SampleQualityValue
+                  <SignedValue value={m.maker_markout_5s_median_bps} />
+                </td>
+                <td>
+                  <SignedValue value={m.maker_markout_30s_median_bps} />
+                </td>
+                <td title={ESTIMATED_EDGE_TOOLTIP}>
+                  <span className="tabular">
+                    <SignedValue value={m.estimated_maker_edge_30s_bps} />
+                  </span>
+                  {m.estimated_maker_edge_fee_included === false && (
+                    <span className="edge-meta">fee excl.</span>
+                  )}
+                </td>
+                <td className="tabular" title={TOOLTIPS.coverage}>
+                  {m.data_coverage_pct != null ? `${fmt(m.data_coverage_pct, 1)}%` : "—"}
+                </td>
+                <td>
+                  <QualityChip
                     quality={
                       m.estimated_maker_fill_sample_quality ?? m.markout_sample_quality
                     }
                   />
                 </td>
-                <td>{fmt(m.total_trade_count, 0)}</td>
-                <td>{fmt(m.data_coverage_pct, 1)}</td>
               </tr>
             ))}
           </tbody>

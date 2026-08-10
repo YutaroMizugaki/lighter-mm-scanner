@@ -1,4 +1,4 @@
-import type { AnalysisStatus, CollectorStatus, Overview } from "./types";
+import type { AnalysisStatus, CollectorStatus, FetchResult, Overview } from "./types";
 
 function ageMinutes(stamp: string | null | undefined): number | null {
   if (!stamp) return null;
@@ -146,13 +146,86 @@ export function statusHealthNote(
     return "No active collector run is available to analyze.";
   }
   if (status === "ERROR") {
-    return "Analyzer run failed — see error details below.";
+    return "The latest analysis run failed. Prior valid results may still be shown.";
   }
   if (status === "DEGRADED") {
-    return "一部の収集データを読み込めませんでした。破損ファイルを除外して解析を継続しています。";
+    return "Some source data could not be processed. The latest valid analysis is still shown.";
   }
   if (status === "STALE") {
     return "Analysis results are older than 30m (expected cadence: 30m).";
   }
   return null;
+}
+
+export function overviewAnalysisTimestamp(overview: Overview): string | null {
+  return overview.generated_at || overview.last_update || null;
+}
+
+function fallbackAnalysisStatusFromOverview(
+  overview: Overview,
+  staleMinutes = 30,
+): { status: string; stale: boolean } {
+  const stamp = overviewAnalysisTimestamp(overview);
+  const baked = overview.status || "ERROR";
+  if (!stamp) {
+    return { status: baked, stale: true };
+  }
+  const ageMin = ageMinutes(stamp);
+  const stale = ageMin !== null && ageMin > staleMinutes;
+
+  if (baked === "ERROR") return { status: "ERROR", stale: false };
+  if (baked === "DEGRADED") {
+    return stale ? { status: "STALE", stale: true } : { status: "DEGRADED", stale: false };
+  }
+  if (stale && (baked === "OK" || baked === "COMPLETED")) {
+    return { status: "STALE", stale: true };
+  }
+  if (baked === "OK" || baked === "COMPLETED") {
+    return { status: baked, stale: false };
+  }
+  if (baked === "RUNNING") {
+    return stale ? { status: "STALE", stale: true } : { status: "RUNNING", stale: false };
+  }
+  return { status: baked, stale: stale };
+}
+
+export type PublicAnalysisPresentation = {
+  status: string;
+  stale: boolean;
+  lastAnalysisAt: string | null;
+  analysisStatusFetchFailed: boolean;
+  analysisData: AnalysisStatus | null;
+};
+
+/**
+ * Public homepage analysis freshness — prefers analysis_status.json, falls back to overview
+ * when the status file cannot be fetched but latest.json is available.
+ */
+export function effectivePublicAnalysisStatus(
+  analysisResult: FetchResult<AnalysisStatus>,
+  overview: Overview,
+  staleMinutes = 30,
+): PublicAnalysisPresentation {
+  if (analysisResult.ok) {
+    const analysis = analysisResult.data;
+    const freshness = effectiveAnalysisStatus(analysis, staleMinutes);
+    const lastAnalysisAt =
+      analysisDisplayTimestamp(analysis) ?? overviewAnalysisTimestamp(overview);
+    return {
+      status: freshness.status,
+      stale: freshness.stale,
+      lastAnalysisAt,
+      analysisStatusFetchFailed: false,
+      analysisData: analysis,
+    };
+  }
+
+  const fallback = fallbackAnalysisStatusFromOverview(overview, staleMinutes);
+  return {
+    status: fallback.status,
+    stale: fallback.stale,
+    lastAnalysisAt: overviewAnalysisTimestamp(overview),
+    analysisStatusFetchFailed: true,
+    analysisData: null,
+  };
 }

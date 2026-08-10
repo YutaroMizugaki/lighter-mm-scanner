@@ -1,29 +1,28 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import Link from "next/link";
+import AppFooter from "@/components/AppFooter";
+import AppHeader from "@/components/AppHeader";
 
 export const metadata: Metadata = {
-  title: "Lighter MM Scanner",
-  description: "Read-only Lighter market-making opportunity research dashboard",
+  title: "Lighter MM Scanner — Market Making Research",
+  description:
+    "Research Lighter markets using spread, liquidity, estimated maker fill, maker markout and data quality.",
+  openGraph: {
+    title: "Lighter MM Scanner — Market Making Research",
+    description:
+      "Research Lighter markets using spread, liquidity, estimated maker fill, maker markout and data quality.",
+    type: "website",
+  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <body>
-        <main>
-          <header className="app">
-            <h1>Lighter MM Scanner</h1>
-            <nav>
-              <Link href="/">Overview</Link>
-              <Link href="/markets">All Markets</Link>
-              <Link href="/candidates">Candidates</Link>
-            </nav>
-          </header>
+        <main className="app-shell">
+          <AppHeader />
           {children}
-          <p className="note">
-            読み取り専用のリサーチツールです。売買・ウォレット接続・APIキーは使用しません。表示されるスプレッドや取引回数は利益を保証するものではありません。実際のマーケットメイクでは、約定確率・逆選択・在庫リスクを別途検証してください。
-          </p>
+          <AppFooter />
         </main>
       </body>
     </html>
