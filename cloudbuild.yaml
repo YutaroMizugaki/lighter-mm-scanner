@@ -23,7 +23,7 @@ substitutions:
   _ANALYZER_CPU: "2"
   _ANALYZER_MEMORY: 8Gi
   _ANALYZER_TASK_TIMEOUT: "3600"
-  _ANALYZER_SCHEDULE: "*/15 * * * *"
+  _ANALYZER_SCHEDULE: "*/30 * * * *"
   _ANALYZER_MOUNT_PATH: /mnt/lighter-mm
   _SCHEDULER_SERVICE_ACCOUNT: ""
 

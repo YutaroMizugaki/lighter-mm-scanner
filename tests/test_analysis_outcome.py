@@ -63,6 +63,29 @@ def test_active_running_not_stale() -> None:
     assert is_stale_running(status, stale_minutes=30.0, now=now) is False
 
 
+def test_running_with_fresh_heartbeat_not_stale_after_long_start() -> None:
+    now = datetime(2026, 8, 10, 12, 0, 0, tzinfo=UTC)
+    status = {
+        "status": "RUNNING",
+        "run_id": "run1",
+        "started_at": (now - timedelta(minutes=60)).isoformat(),
+        "heartbeat_at": (now - timedelta(minutes=1)).isoformat(),
+        "generated_at": (now - timedelta(minutes=60)).isoformat(),
+    }
+    assert is_stale_running(status, stale_minutes=30.0, now=now) is False
+
+
+def test_running_with_stale_heartbeat_is_stale() -> None:
+    now = datetime(2026, 8, 10, 12, 0, 0, tzinfo=UTC)
+    status = {
+        "status": "RUNNING",
+        "run_id": "run1",
+        "started_at": (now - timedelta(minutes=60)).isoformat(),
+        "heartbeat_at": (now - timedelta(minutes=31)).isoformat(),
+    }
+    assert is_stale_running(status, stale_minutes=30.0, now=now) is True
+
+
 def test_ok_without_current_json_is_not_success() -> None:
     status = {
         "status": "OK",

@@ -68,7 +68,7 @@ Env vars: see `.env.example` (`ENVIRONMENT`, `GCS_BUCKET`, `RUN_TARGET_HOURS`, `
 
 ```text
 Lighter → Collector Worker Pool → immutable Parquet → Private GCS
-      → Analyzer Job (*/15) → Public JSON → Vercel
+      → Analyzer Job (*/30) → Public JSON → Vercel
 ```
 
 ### Collector deployment
@@ -81,8 +81,8 @@ Lighter → Collector Worker Pool → immutable Parquet → Private GCS
 ### Analyzer Job deployment
 
 - **Command:** `lighter-mm cloud-analyze`
-- **Resources:** 2 CPU / 4 GiB (configurable via `_ANALYZER_CPU` / `_ANALYZER_MEMORY`; DuckDB `DUCKDB_MEMORY_LIMIT=1GiB` is separate from container memory)
-- **Schedule:** `*/15 * * * *` (Cloud Scheduler → Cloud Run Job)
+- **Resources:** 2 CPU / 8 GiB (configurable via `_ANALYZER_CPU` / `_ANALYZER_MEMORY`; DuckDB `DUCKDB_MEMORY_LIMIT=1GiB` is separate from container memory; task timeout 3600s)
+- **Schedule:** `*/30 * * * *` (Cloud Scheduler → Cloud Run Job)
 - **GCS mount:** `/mnt/lighter-mm` (read-only)
 - **Publishes:** `current.json` + `generations/{id}/*` (and legacy `latest.json` mirror), `analysis_status.json`
 - **Analysis window:** end time is capped at `state.last_durable_event_ms` (durable market-event watermark), never execution time

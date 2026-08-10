@@ -24,10 +24,10 @@ def parse_analysis_timestamp(value: str | None) -> datetime | None:
 
 
 def running_reference_timestamp(status: dict[str, Any] | None) -> str | None:
-    """Prefer started_at, then generated_at, for RUNNING age checks."""
+    """Prefer heartbeat_at, then started_at, then generated_at for RUNNING age."""
     if not status:
         return None
-    raw = status.get("started_at") or status.get("generated_at")
+    raw = status.get("heartbeat_at") or status.get("started_at") or status.get("generated_at")
     return str(raw) if raw else None
 
 
@@ -37,11 +37,11 @@ def is_stale_running(
     stale_minutes: float,
     now: datetime | None = None,
 ) -> bool:
-    """True when status is RUNNING and older than analysis_stale_minutes.
+    """True when status is RUNNING and the running reference is older than stale_minutes.
 
-    Aligns with analyzer_lock_lease_seconds (default 1800s / 30m): a process that
-    dies without renewing will leave RUNNING behind, and after the stale window
-    (and typically after lease expiry) the next execution can recover via CAS.
+    With heartbeat_at, a healthy Analyzer that runs longer than analysis_stale_minutes
+    (e.g. ~19–30+ min on 72h data) is not considered stale while heartbeats continue.
+    Legacy RUNNING payloads without heartbeat_at fall back to started_at/generated_at.
     """
     if not status or status.get("status") != "RUNNING":
         return False

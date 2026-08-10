@@ -84,7 +84,10 @@ def test_volatility_sql_uses_join_not_correlated_subquery() -> None:
     from lighter_mm.analytics import book_metrics
 
     src = inspect.getsource(book_metrics._volatility_sql)
-    assert "INNER JOIN" in src
-    assert "book_mids" in src
+    fwd = inspect.getsource(book_metrics._forward_horizon_sql)
+    assert "INNER JOIN" in fwd
+    assert "book_mids" in src or "_resolve_mid_relation" in src
+    assert "_forward_horizon_sql" in src
     # Ensure the old scalar subquery pattern is gone.
     assert "ORDER BY b.timestamp_ms ASC\n                    LIMIT 1" not in src
+    assert "ORDER BY b.timestamp_ms ASC\n                    LIMIT 1" not in fwd

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import tempfile
 from datetime import UTC, datetime
@@ -19,6 +20,17 @@ from lighter_mm.runtime_verify.models import (
 )
 from lighter_mm.runtime_verify.parquet_probe import probe_book_parquet
 from lighter_mm.runtime_verify.time_utils import parse_iso
+
+
+def cron_interval_minutes(schedule: str | None) -> float | None:
+    """Parse minute-step cron like ``*/30 * * * *`` into interval minutes."""
+    if not schedule:
+        return None
+    match = re.match(r"^\*/(\d+)\s+\S+\s+\S+\s+\S+\s+\S+$", schedule.strip())
+    if not match:
+        return None
+    step = int(match.group(1))
+    return float(step) if step > 0 else None
 
 
 def _run(cmd: list[str]) -> str:
@@ -65,7 +77,7 @@ def fetch_runtime_snapshot(
         gcs_bucket=gcs_bucket,
         gcs_public_bucket=gcs_public_bucket,
         public_prefix=public_prefix,
-        analysis_interval_minutes=overrides.get("analysis_interval_minutes", 15.0),
+        analysis_interval_minutes=overrides.get("analysis_interval_minutes", 30.0),
         parquet_rotation_minutes=overrides.get("parquet_rotation_minutes", 15.0),
         gcs_upload_interval_minutes=overrides.get("gcs_upload_interval_minutes", 15.0),
         status_ok_minutes=overrides.get("status_ok_minutes", 20.0),
@@ -141,6 +153,11 @@ def fetch_runtime_snapshot(
             schedule=sch.get("schedule"),
             target_uri=(sch.get("httpTarget") or {}).get("uri"),
         )
+        # Prefer live Scheduler cadence over static default when not overridden.
+        if "analysis_interval_minutes" not in overrides:
+            parsed = cron_interval_minutes(snap.scheduler.schedule)
+            if parsed is not None:
+                snap.analysis_interval_minutes = parsed
 
     exec_json = _run(
         [

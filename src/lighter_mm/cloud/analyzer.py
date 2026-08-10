@@ -57,6 +57,7 @@ def _log_lock_busy_diagnostics(
     status = (existing or {}).get("status")
     started_at = (existing or {}).get("started_at")
     generated_at = (existing or {}).get("generated_at")
+    heartbeat_at = (existing or {}).get("heartbeat_at")
     ref_ts = running_reference_timestamp(existing)
     stale = is_stale_running(existing, stale_minutes=stale_minutes)
     holder = (lock_payload or {}).get("holder_id")
@@ -64,12 +65,13 @@ def _log_lock_busy_diagnostics(
     lock_run_id = (lock_payload or {}).get("run_id")
     log.warning(
         "analyzer_lock_busy run_id=%s existing_status=%s started_at=%s "
-        "generated_at=%s ref_ts=%s lock_holder=%s lock_run_id=%s "
+        "generated_at=%s heartbeat_at=%s ref_ts=%s lock_holder=%s lock_run_id=%s "
         "lock_expires_at=%s stale_running=%s stale_minutes=%s",
         run_id,
         status,
         started_at,
         generated_at,
+        heartbeat_at,
         ref_ts,
         holder,
         lock_run_id,
@@ -164,17 +166,7 @@ def run_cloud_analyze(settings: Settings) -> int:
 
     lost_lock = threading.Event()
     stop = threading.Event()
-
-    def _renew_loop() -> None:
-        while not stop.wait(settings.analyzer_lock_renew_interval_seconds):
-            if not lock.renew(run_id, git_sha=settings.git_sha):
-                log.error("lost analyzer lock during analysis")
-                lost_lock.set()
-                return
-
-    renew_thread = threading.Thread(target=_renew_loop, name="analyzer-lock-renew", daemon=True)
-    renew_thread.start()
-
+    background_stopped = False
     execution_start_ms = int(time.time() * 1000)
     execution_start = time.time()
     started_at = now_iso()
@@ -182,6 +174,48 @@ def run_cloud_analyze(settings: Settings) -> int:
     last_ok = _last_successful_analysis_at(backend, sync)
     final_claimed = False
     last_parquet_health: dict[str, Any] = {}
+
+    def _stop_background(*, join_timeout: float = 5.0) -> None:
+        """Stop renew/heartbeat before any final status publish (no RUNNING overwrite)."""
+        nonlocal background_stopped
+        if background_stopped:
+            return
+        stop.set()
+        renew_thread.join(timeout=join_timeout)
+        background_stopped = True
+
+    def _renew_and_heartbeat_loop() -> None:
+        while not stop.wait(settings.analyzer_lock_renew_interval_seconds):
+            if not lock.renew(run_id, git_sha=settings.git_sha):
+                log.error("lost analyzer lock during analysis")
+                lost_lock.set()
+                return
+            if stop.is_set():
+                return
+            try:
+                beat_at = now_iso()
+                _publish_analysis_status(
+                    backend,
+                    sync,
+                    status="RUNNING",
+                    run_id=run_id,
+                    generated_at=beat_at,
+                    started_at=started_at,
+                    heartbeat_at=beat_at,
+                    last_successful_analysis_at=last_ok,
+                    git_sha=settings.git_sha,
+                    analyzer_version=settings.analyzer_version,
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Heartbeat write failure must not abort analysis; lock renew is separate.
+                log.warning("analyzer heartbeat publish failed: %s", exc)
+
+    renew_thread = threading.Thread(
+        target=_renew_and_heartbeat_loop,
+        name="analyzer-lock-renew-heartbeat",
+        daemon=True,
+    )
+    renew_thread.start()
 
     try:
         if request_type == "final":
@@ -203,6 +237,7 @@ def run_cloud_analyze(settings: Settings) -> int:
             run_id=run_id,
             generated_at=generated_at,
             started_at=started_at,
+            heartbeat_at=started_at,
             last_successful_analysis_at=last_ok,
             git_sha=settings.git_sha,
             analyzer_version=settings.analyzer_version,
@@ -299,6 +334,8 @@ def run_cloud_analyze(settings: Settings) -> int:
             "DEGRADED" if parquet_health.get("status") == "degraded" else "OK"
         )
         _check_leadership(lost_lock, phase="final status publish")
+        # Stop heartbeat before final publish so RUNNING cannot overwrite OK/DEGRADED.
+        _stop_background()
         _publish_analysis_status(
             backend,
             sync,
@@ -353,6 +390,7 @@ def run_cloud_analyze(settings: Settings) -> int:
         return 0
     except LostLeadershipError as exc:
         log.error("analysis aborted: %s", exc)
+        _stop_background()
         if request_type == "final" and final_claimed:
             _finalize_final_request_failure(
                 backend,
@@ -371,6 +409,7 @@ def run_cloud_analyze(settings: Settings) -> int:
             exc,
             duration_seconds,
         )
+        _stop_background()
         if not lost_lock.is_set():
             _publish_analysis_status(
                 backend,
@@ -399,6 +438,5 @@ def run_cloud_analyze(settings: Settings) -> int:
             )
         return 1
     finally:
-        stop.set()
-        renew_thread.join(timeout=5.0)
+        _stop_background()
         lock.release()

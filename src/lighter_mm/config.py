@@ -57,7 +57,7 @@ class Settings(BaseSettings):
     parquet_flush_seconds: float = 5.0
     parquet_rotation_minutes: int = Field(default=15, ge=1)
     gcs_upload_interval_minutes: int = Field(default=15, ge=1)
-    analysis_interval_minutes: int = Field(default=15, ge=1)
+    analysis_interval_minutes: int = Field(default=30, ge=1)
     trade_id_cache_size: int = 50_000
 
     # Analyzer Cloud Run Job
