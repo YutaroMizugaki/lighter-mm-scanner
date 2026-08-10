@@ -54,3 +54,10 @@ def test_cloudbuild_analyzer_memory_is_8gi() -> None:
     assert "DUCKDB_THREADS=2" in text
     # Collector memory substitution must remain distinct / unchanged.
     assert "_MEMORY: 1Gi" in text
+
+
+def test_cloudbuild_analyzer_task_timeout_is_3600() -> None:
+    """Full-window analysis needs >600s (parquet materialize alone ~7min)."""
+    text = CLOUDBUILD.read_text(encoding="utf-8")
+    assert '_ANALYZER_TASK_TIMEOUT: "3600"' in text
+    assert '--task-timeout="${_ANALYZER_TASK_TIMEOUT}"' in text

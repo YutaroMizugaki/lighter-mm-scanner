@@ -417,6 +417,20 @@ def analyze_range(
     )
 
     t_vol = time.monotonic()
+    # Thin mid series for horizon joins — avoids re-scanning wide book_observed rows.
+    con.execute(
+        """
+        CREATE OR REPLACE TABLE book_mids AS
+        SELECT market_id, timestamp_ms, mid
+        FROM book_observed
+        WHERE mid IS NOT NULL AND mid > 0
+        """
+    )
+    log.info(
+        "analysis phase=volatility_prepare elapsed=%.3fs rss_mb=%.1f",
+        time.monotonic() - t_vol,
+        _rss_mb(),
+    )
     volatility = _volatility_sql(con, settings)
     rss = _rss_mb()
     if benchmark_profile:

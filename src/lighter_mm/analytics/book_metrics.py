@@ -325,12 +325,19 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
     horizons = [(1, "1s"), (5, "5s"), (30, "30s"), (60, "60s")]
     out: dict[int, dict[str, Any]] = {}
 
+    # Prefer the thin book_mids table when present (Analyzer materializes it).
+    mid_relation = "book_mids"
+    try:
+        con.execute("SELECT 1 FROM book_mids LIMIT 1")
+    except Exception:  # noqa: BLE001
+        mid_relation = "book_observed"
+
     # 1s proxy: consecutive sample moves (same as before).
-    sql_consec = """
+    sql_consec = f"""
     WITH mids AS (
         SELECT market_id, timestamp_ms, mid,
             LAG(mid) OVER (PARTITION BY market_id ORDER BY timestamp_ms) AS prev_mid
-        FROM book_observed
+        FROM {mid_relation}
         WHERE mid IS NOT NULL AND mid > 0
     ),
     moves AS (
@@ -364,7 +371,7 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
         sql = f"""
         WITH origins AS (
             SELECT market_id, timestamp_ms AS origin_ts, mid AS mid0
-            FROM book_observed
+            FROM {mid_relation}
             WHERE mid IS NOT NULL AND mid > 0
         ),
         candidates AS (
@@ -375,7 +382,7 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
                 b.timestamp_ms AS ts1,
                 b.mid AS mid1
             FROM origins o
-            INNER JOIN book_observed b
+            INNER JOIN {mid_relation} b
               ON b.market_id = o.market_id
              AND b.timestamp_ms >= o.origin_ts + {horizon_ms}
              AND b.timestamp_ms <= o.origin_ts + {horizon_ms} + {tolerance_ms}
@@ -408,6 +415,7 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
         FROM moves
         GROUP BY market_id
         """
+        log.info("volatility horizon=%s using=%s starting", label, mid_relation)
         for row in con.execute(sql).fetchall():
             mid, sample_count, p50, p90, p95 = row
             out.setdefault(int(mid), {})
@@ -418,6 +426,7 @@ def _volatility_sql(con: duckdb.DuckDBPyConnection, settings: Settings) -> dict[
                 f"p95_abs_mid_move_{label}_bps": p95,
                 f"median_abs_mid_move_{label}_bps": p50,
             })
+        log.info("volatility horizon=%s done", label)
     return out
 
 def _spread_persistence(book, thresholds):  # noqa: ANN001
