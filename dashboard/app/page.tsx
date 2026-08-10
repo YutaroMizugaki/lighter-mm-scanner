@@ -23,6 +23,7 @@ import {
   publicAnalysisPendingMessage,
   publicDataUnavailableMessage,
 } from "@/lib/public";
+import styles from "./summary.module.css";
 
 export default async function HomePage() {
   const bundle = await resolveDashboardBundle();
@@ -118,11 +119,15 @@ export default async function HomePage() {
     <>
       <Hero />
 
-      <section className="panel" aria-labelledby="summary-heading">
+      <section
+        className={`panel ${styles.panel}`}
+        aria-labelledby="summary-heading"
+      >
         <div className="section-header">
           <h2 id="summary-heading">Market summary</h2>
         </div>
-        <div className="summary-grid">
+
+        <div className={styles.grid}>
           <MetricCard label="Markets analyzed" value={analyzed ?? "—"} />
           <MetricCard label="Candidates" value={overview.candidates ?? 0} />
           <MetricCard
@@ -133,11 +138,12 @@ export default async function HomePage() {
                 : "—"
             }
           />
+
+          <DataFreshness
+            status={analysisFreshness.status}
+            lastAnalysisAt={lastAnalysisAt}
+          />
         </div>
-        <DataFreshness
-          status={analysisFreshness.status}
-          lastAnalysisAt={lastAnalysisAt}
-        />
       </section>
 
       <TopOpportunities markets={markets} fetchFailed={marketsFetchFailed} />
