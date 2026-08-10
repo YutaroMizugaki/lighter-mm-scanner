@@ -9,12 +9,12 @@ import ScoreBar from "./ScoreBar";
 import SignedValue from "./SignedValue";
 
 type Props = {
-  markets: MarketRow[];
+  candidates: MarketRow[];
   fetchFailed?: boolean;
 };
 
-export default function TopOpportunities({ markets, fetchFailed = false }: Props) {
-  const top = markets.filter((m) => m.is_candidate).slice(0, 5);
+export default function TopOpportunities({ candidates, fetchFailed = false }: Props) {
+  const top = candidates.slice(0, 5);
 
   return (
     <section className="panel" aria-labelledby="top-opps-heading">

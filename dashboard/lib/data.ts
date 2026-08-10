@@ -14,6 +14,7 @@ export type {
 export {
   fetchJson,
   getAnalysisStatusResult,
+  getCandidatesResult,
   getCollectorStatusResult,
   getMarket,
   getMarkets,

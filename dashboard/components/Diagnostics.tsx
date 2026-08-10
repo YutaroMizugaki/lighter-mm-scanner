@@ -10,7 +10,7 @@ type Props = {
   lastAnalysisAt: string | null;
   analysisData: AnalysisStatus | null;
   collectorData: CollectorStatus | null;
-  marketsFetchFailed?: boolean;
+  marketDataFetchFailed?: boolean;
 };
 
 export default function Diagnostics({
@@ -21,7 +21,7 @@ export default function Diagnostics({
   lastAnalysisAt,
   analysisData,
   collectorData,
-  marketsFetchFailed = false,
+  marketDataFetchFailed = false,
 }: Props) {
   const ws = overview.ws ?? collectorData?.ws ?? null;
   const corruptSkipped = analysisData?.corrupt_parquet_files ?? 0;
@@ -85,7 +85,7 @@ export default function Diagnostics({
               <dd className="tabular">
                 sub {subErrors} · trade parse {tradeParseErrors} · sync failures{" "}
                 {syncFailures}
-                {marketsFetchFailed ? " · markets fetch failed" : ""}
+                {marketDataFetchFailed ? " · market aggregate fetch failed" : ""}
               </dd>
             </div>
           </dl>

@@ -8,22 +8,38 @@ import type {
   Overview,
 } from "./types";
 
+type FetchPolicy = "live" | "generation";
+
 function baseUrl(): string {
   return (process.env.NEXT_PUBLIC_DATA_BASE_URL || "").replace(/\/$/, "");
 }
 
-export async function fetchJson<T>(path: string): Promise<FetchResult<T>> {
+export async function fetchJson<T>(
+  path: string,
+  policy: FetchPolicy = "live",
+): Promise<FetchResult<T>> {
   const base = baseUrl();
   if (!base) return { ok: false, error: "NEXT_PUBLIC_DATA_BASE_URL is not set" };
-  // Cache-bust query: GCS public objects previously defaulted to max-age=3600,
-  // so the edge kept serving a frozen latest.json for up to an hour.
-  const url = `${base}/${path.replace(/^\//, "")}?t=${Date.now()}`;
+
+  const normalizedPath = path.replace(/^\/+/, "");
+  const live = policy === "live";
+  const url = live
+    ? `${base}/${normalizedPath}?t=${Date.now()}`
+    : `${base}/${normalizedPath}`;
+
   try {
-    const res = await fetch(url, {
-      cache: "no-store",
-      next: { revalidate: 0 },
-      headers: { "Cache-Control": "no-cache" },
-    });
+    const res = await fetch(
+      url,
+      live
+        ? {
+            cache: "no-store",
+            next: { revalidate: 0 },
+            headers: { "Cache-Control": "no-cache" },
+          }
+        : {
+            next: { revalidate: false },
+          },
+    );
     if (!res.ok) {
       return {
         ok: false,
@@ -49,23 +65,29 @@ export async function resolveDashboardBundle(): Promise<DashboardBundle> {
   return { prefix: "", legacy: true };
 }
 
-export async function getOverview(): Promise<Overview | null> {
-  const bundle = await resolveDashboardBundle();
-  const result = await fetchJson<Overview>(`${bundle.prefix}latest.json`);
-  if (result.ok) return result.data;
-  if (!bundle.legacy) {
-    const legacy = await fetchJson<Overview>("latest.json");
-    return legacy.ok ? legacy.data : null;
-  }
-  return null;
+export async function getOverview(
+  bundle?: DashboardBundle,
+): Promise<Overview | null> {
+  const result = await getOverviewResult(bundle);
+  return result.ok ? result.data : null;
 }
 
-export async function getOverviewResult(): Promise<FetchResult<Overview>> {
-  const bundle = await resolveDashboardBundle();
-  const result = await fetchJson<Overview>(`${bundle.prefix}latest.json`);
+export async function getOverviewResult(
+  bundle?: DashboardBundle,
+): Promise<FetchResult<Overview>> {
+  const resolved = bundle ?? (await resolveDashboardBundle());
+
+  if (resolved.legacy) {
+    return fetchJson<Overview>("latest.json", "live");
+  }
+
+  const result = await fetchJson<Overview>(
+    `${resolved.prefix}latest.json`,
+    "generation",
+  );
   if (result.ok) return result;
-  if (!bundle.legacy) return fetchJson<Overview>("latest.json");
-  return result;
+
+  return fetchJson<Overview>("latest.json", "live");
 }
 
 export async function getCollectorStatusResult(): Promise<FetchResult<CollectorStatus>> {
@@ -80,12 +102,36 @@ export async function getMarketsResult(
   bundle?: DashboardBundle,
 ): Promise<FetchResult<{ markets: MarketRow[] }>> {
   const resolved = bundle ?? (await resolveDashboardBundle());
+
+  if (resolved.legacy) {
+    return fetchJson<{ markets: MarketRow[] }>("markets.json", "live");
+  }
+
   const result = await fetchJson<{ markets: MarketRow[] }>(
     `${resolved.prefix}markets.json`,
+    "generation",
   );
   if (result.ok) return result;
-  if (!resolved.legacy) return fetchJson<{ markets: MarketRow[] }>("markets.json");
-  return result;
+
+  return fetchJson<{ markets: MarketRow[] }>("markets.json", "live");
+}
+
+export async function getCandidatesResult(
+  bundle?: DashboardBundle,
+): Promise<FetchResult<{ candidates: MarketRow[] }>> {
+  const resolved = bundle ?? (await resolveDashboardBundle());
+
+  if (resolved.legacy) {
+    return fetchJson<{ candidates: MarketRow[] }>("candidates.json", "live");
+  }
+
+  const result = await fetchJson<{ candidates: MarketRow[] }>(
+    `${resolved.prefix}candidates.json`,
+    "generation",
+  );
+  if (result.ok) return result;
+
+  return fetchJson<{ candidates: MarketRow[] }>("candidates.json", "live");
 }
 
 /** Compatibility helper — prefer getMarketsResult() when failure must surface. */
@@ -99,13 +145,19 @@ export async function getMarket(
   bundle?: DashboardBundle,
 ): Promise<MarketRow | null> {
   const resolved = bundle ?? (await resolveDashboardBundle());
-  const result = await fetchJson<MarketRow>(
-    `${resolved.prefix}market/${encodeURIComponent(symbol)}.json`,
-  );
-  if (result.ok) return result.data;
-  if (!resolved.legacy) {
-    const legacy = await fetchJson<MarketRow>(`market/${encodeURIComponent(symbol)}.json`);
+  const encoded = encodeURIComponent(symbol);
+
+  if (resolved.legacy) {
+    const legacy = await fetchJson<MarketRow>(`market/${encoded}.json`, "live");
     return legacy.ok ? legacy.data : null;
   }
-  return null;
+
+  const result = await fetchJson<MarketRow>(
+    `${resolved.prefix}market/${encoded}.json`,
+    "generation",
+  );
+  if (result.ok) return result.data;
+
+  const legacy = await fetchJson<MarketRow>(`market/${encoded}.json`, "live");
+  return legacy.ok ? legacy.data : null;
 }

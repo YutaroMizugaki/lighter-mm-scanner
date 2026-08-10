@@ -4,7 +4,7 @@ import QualityChip from "@/components/QualityChip";
 import RankBadge from "@/components/RankBadge";
 import ScoreBar from "@/components/ScoreBar";
 import SignedValue from "@/components/SignedValue";
-import { getMarketsResult } from "@/lib/api";
+import { getCandidatesResult } from "@/lib/api";
 import { fmt } from "@/lib/format";
 import {
   ESTIMATED_EDGE_TOOLTIP,
@@ -14,14 +14,14 @@ import { formatDepth, publicDataUnavailableMessage, TOOLTIPS } from "@/lib/publi
 import Link from "next/link";
 
 export default async function CandidatesPage() {
-  const result = await getMarketsResult();
+  const result = await getCandidatesResult();
 
   if (!result.ok) {
     const msg = publicDataUnavailableMessage("markets");
     return <PublicErrorState title={msg.title} body={msg.body} />;
   }
 
-  const markets = (result.data.markets ?? []).filter((m) => m.is_candidate);
+  const candidates = result.data.candidates ?? [];
 
   return (
     <section className="panel">
@@ -32,7 +32,7 @@ export default async function CandidatesPage() {
           ($50 / 30s / Conservative), not market-level trade count.
         </p>
       </div>
-      {markets.length === 0 ? (
+      {candidates.length === 0 ? (
         <>
           <p>No markets currently meet all candidate thresholds.</p>
           <p>
@@ -57,7 +57,7 @@ export default async function CandidatesPage() {
               </tr>
             </thead>
             <tbody>
-              {markets.map((m) => (
+              {candidates.map((m) => (
                 <tr key={m.symbol}>
                   <td className="sticky-col">
                     <Link href={`/markets/${encodeURIComponent(m.symbol)}`}>{m.symbol}</Link>
