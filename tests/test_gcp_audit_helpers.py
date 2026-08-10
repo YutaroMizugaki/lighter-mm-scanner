@@ -61,6 +61,37 @@ def test_extract_image_from_worker_pool_spec_template() -> None:
     assert extract_git_sha_env(payload) == "deadbeef"
 
 
+def test_extract_image_from_job_v1_nested_spec() -> None:
+    """Cloud Run Job v1 describe JSON nests containers under ExecutionTemplate."""
+    payload = {
+        "apiVersion": "run.googleapis.com/v1",
+        "kind": "Job",
+        "spec": {
+            "template": {
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "image": "repo/collector@sha256:abc123",
+                                    "env": [
+                                        {
+                                            "name": "GIT_SHA",
+                                            "value": "commit123",
+                                        }
+                                    ],
+                                }
+                            ]
+                        }
+                    }
+                }
+            }
+        },
+    }
+    assert extract_container_image(payload) == "repo/collector@sha256:abc123"
+    assert extract_git_sha_env(payload) == "commit123"
+
+
 def test_extract_image_from_job_template_template() -> None:
     payload = {
         "template": {
