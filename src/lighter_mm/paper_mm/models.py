@@ -37,6 +37,8 @@ class PaperFill:
     timestamp_ms: int
     reference_mid: float
     is_partial: bool
+    markout_5s_resolved: bool = False
+    markout_30s_resolved: bool = False
 
 
 @dataclass

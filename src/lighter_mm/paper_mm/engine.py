@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 from lighter_mm.engine.mid_history import MidHistory
-from lighter_mm.paper_mm.markout import resolve_paper_markouts
+from lighter_mm.paper_mm.markout import drain_pending_paper_markouts, resolve_due_paper_markouts
 from lighter_mm.paper_mm.models import (
     BookSnapshot,
     FifoLot,
@@ -31,6 +31,22 @@ def _is_flat(position_qty: float) -> bool:
 
 def _position_usd(position_qty: float, price: float) -> float:
     return abs(position_qty) * price
+
+
+def _entry_order_usd(config: PaperMmConfig) -> float:
+    return min(config.order_usd, config.max_inventory_usd)
+
+
+def _compute_unrealized_pnl(state: PaperMmState, last_mid: float) -> float:
+    if last_mid <= 0:
+        return 0.0
+    unrealized = 0.0
+    for lot in state.fifo_lots:
+        if lot.side == "long":
+            unrealized += (last_mid - lot.price) * lot.qty_base
+        else:
+            unrealized += (lot.price - last_mid) * lot.qty_base
+    return unrealized
 
 
 def _cancel_order(order: PaperOrder | None) -> None:
@@ -224,9 +240,9 @@ def _apply_trade_to_order(
     if usd_left <= 0 or order.remaining_qty_base <= _FLAT_EPS:
         return
 
-    max_fill_usd = order.remaining_qty_base * trade.price
+    max_fill_usd = order.remaining_qty_base * order.price
     fill_usd = min(usd_left, max_fill_usd)
-    fill_qty = fill_usd / trade.price
+    fill_qty = fill_usd / order.price
     fill_qty = min(fill_qty, order.remaining_qty_base)
     if fill_qty <= _FLAT_EPS:
         return
@@ -236,7 +252,7 @@ def _apply_trade_to_order(
         state,
         side=order.side,
         qty_base=fill_qty,
-        price=trade.price,
+        price=order.price,
         timestamp_ms=trade.timestamp_ms,
         reference_mid=reference_mid,
         fee_bps=fee_bps,
@@ -254,6 +270,11 @@ def _apply_trade_to_order(
         _cancel_order(order)
         if state.bid_order is order:
             state.bid_order = None
+        _sync_exit_order(state, config)
+    elif order.side == "ask" and order.status == "partial":
+        _cancel_order(order)
+        if state.ask_order is order:
+            state.ask_order = None
         _sync_exit_order(state, config)
 
 
@@ -314,10 +335,11 @@ def _maybe_quote(state: PaperMmState, config: PaperMmConfig, book: BookSnapshot)
     pos = state.position_qty_base
 
     if _is_flat(pos):
+        entry_usd = _entry_order_usd(config)
         if book.best_bid_size_usd > 0 and book.best_bid > 0:
             if _should_requote(state.bid_order, book.best_bid, ts, max_age_ms):
                 _cancel_order(state.bid_order)
-                qty = config.order_usd / book.best_bid
+                qty = entry_usd / book.best_bid
                 state.bid_order = _place_order(
                     state,
                     side="bid",
@@ -333,7 +355,7 @@ def _maybe_quote(state: PaperMmState, config: PaperMmConfig, book: BookSnapshot)
         if book.best_ask_size_usd > 0 and book.best_ask > 0:
             if _should_requote(state.ask_order, book.best_ask, ts, max_age_ms):
                 _cancel_order(state.ask_order)
-                qty = config.order_usd / book.best_ask
+                qty = entry_usd / book.best_ask
                 state.ask_order = _place_order(
                     state,
                     side="ask",
@@ -416,6 +438,8 @@ def on_book(
         state.last_mid = book.mid
         state.last_mid_ts_ms = book.timestamp_ms
 
+    resolve_due_paper_markouts(state, mid_hist, book.timestamp_ms)
+
     max_age_ms = int(config.max_quote_age_seconds * 1000)
     if state.bid_order and state.bid_order.status in ("open", "partial"):
         if state.bid_order.price != book.best_bid:
@@ -451,16 +475,15 @@ def finalize_state(
         state.inventory_seconds += (end_ms - state.inventory_start_ms) / 1000.0
         state.inventory_start_ms = None
 
-    resolve_paper_markouts(state, mid_hist, end_ms)
+    drain_pending_paper_markouts(state, mid_hist, end_ms)
 
     _, fee_included = _effective_fee(config)
-    unrealized = 0.0
-    if not _is_flat(state.position_qty_base) and state.last_mid and state.last_mid > 0:
-        unrealized = state.position_qty_base * state.last_mid + state.cash_usd
+    last_mid = state.last_mid or 0.0
+    unrealized = _compute_unrealized_pnl(state, last_mid) if not _is_flat(state.position_qty_base) else 0.0
 
     gross_pnl = state.realized_pnl_usd + unrealized
     state.gross_trading_pnl_usd = gross_pnl + state.fees_usd
-    total_pnl = state.realized_pnl_usd + unrealized - state.fees_usd
+    total_pnl = gross_pnl - state.fees_usd
 
     window_seconds = max(window_hours * 3600.0, 1.0)
     time_with_inventory_pct = (
