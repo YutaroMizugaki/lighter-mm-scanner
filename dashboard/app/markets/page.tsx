@@ -1,5 +1,5 @@
 import MarketsClient from "./MarketsClient";
-import { getMarketsResult } from "@/lib/data";
+import { getMarketsResult } from "@/lib/api";
 
 export default async function MarketsPage() {
   const result = await getMarketsResult();

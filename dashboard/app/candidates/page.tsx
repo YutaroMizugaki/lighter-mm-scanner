@@ -1,12 +1,13 @@
 import Link from "next/link";
+import { EstimatedEdgeValue } from "@/components/EstimatedEdgeValue";
+import { EstimatedFillValue } from "@/components/EstimatedFillValue";
+import { SampleQualityValue } from "@/components/SampleQualityValue";
+import { getMarkets } from "@/lib/api";
+import { fmt } from "@/lib/format";
 import {
   ESTIMATED_EDGE_TOOLTIP,
   ESTIMATED_FILL_TOOLTIP,
-  fmt,
-  fmtEstimatedFill,
-  fmtSampleQuality,
-  getMarkets,
-} from "@/lib/data";
+} from "@/lib/marketMetrics";
 
 export default async function CandidatesPage() {
   const markets = (await getMarkets()).filter((m) => m.is_candidate);
@@ -45,15 +46,19 @@ export default async function CandidatesPage() {
                 <td>{fmt(m.score, 1)}</td>
                 <td>{fmt(m.median_spread_bps)}</td>
                 <td>
-                  {fmtEstimatedFill(
-                    m.estimated_maker_fill_rate_30s_conservative,
-                    m.estimated_maker_fill_sample_quality,
-                  )}
+                  <EstimatedFillValue
+                    rate={m.estimated_maker_fill_rate_30s_conservative}
+                    quality={m.estimated_maker_fill_sample_quality}
+                  />
                 </td>
                 <td>{fmt(m.maker_markout_5s_median_bps, 2, true)}</td>
                 <td>{fmt(m.maker_markout_30s_median_bps, 2, true)}</td>
-                <td>{fmt(m.estimated_maker_edge_30s_bps, 2, true)}</td>
-                <td>{fmtSampleQuality(m.estimated_maker_fill_sample_quality)}</td>
+                <td>
+                  <EstimatedEdgeValue edgeBps={m.estimated_maker_edge_30s_bps} />
+                </td>
+                <td>
+                  <SampleQualityValue quality={m.estimated_maker_fill_sample_quality} />
+                </td>
               </tr>
             ))}
           </tbody>

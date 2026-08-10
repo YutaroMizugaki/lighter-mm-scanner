@@ -2,14 +2,15 @@
 
 import Link from "next/link";
 import { useMemo, useState } from "react";
-import type { MarketRow } from "@/lib/data";
+import { EstimatedEdgeValue } from "@/components/EstimatedEdgeValue";
+import { EstimatedFillValue } from "@/components/EstimatedFillValue";
+import { SampleQualityValue } from "@/components/SampleQualityValue";
+import { fmt } from "@/lib/format";
 import {
   ESTIMATED_EDGE_TOOLTIP,
   ESTIMATED_FILL_TOOLTIP,
-  fmt,
-  fmtEstimatedFill,
-  fmtSampleQuality,
-} from "@/lib/data";
+} from "@/lib/marketMetrics";
+import type { MarketRow } from "@/lib/types";
 
 export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
   const [q, setQ] = useState("");
@@ -101,19 +102,23 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
                 </td>
                 <td>{fmt(m.score, 1)}</td>
                 <td>{fmt(m.median_spread_bps)}</td>
-                <td title={ESTIMATED_FILL_TOOLTIP}>
-                  {fmtEstimatedFill(
-                    m.estimated_maker_fill_rate_30s_conservative,
-                    m.estimated_maker_fill_sample_quality,
-                  )}
+                <td>
+                  <EstimatedFillValue
+                    rate={m.estimated_maker_fill_rate_30s_conservative}
+                    quality={m.estimated_maker_fill_sample_quality}
+                  />
                 </td>
                 <td>{fmt(m.maker_markout_5s_median_bps, 2, true)}</td>
                 <td>{fmt(m.maker_markout_30s_median_bps, 2, true)}</td>
-                <td>{fmt(m.estimated_maker_edge_30s_bps, 2, true)}</td>
                 <td>
-                  {fmtSampleQuality(
-                    m.estimated_maker_fill_sample_quality ?? m.markout_sample_quality,
-                  )}
+                  <EstimatedEdgeValue edgeBps={m.estimated_maker_edge_30s_bps} />
+                </td>
+                <td>
+                  <SampleQualityValue
+                    quality={
+                      m.estimated_maker_fill_sample_quality ?? m.markout_sample_quality
+                    }
+                  />
                 </td>
                 <td>{fmt(m.total_trade_count, 0)}</td>
                 <td>{fmt(m.data_coverage_pct, 1)}</td>

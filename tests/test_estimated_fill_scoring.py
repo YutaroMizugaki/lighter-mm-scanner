@@ -3,35 +3,11 @@
 from __future__ import annotations
 
 from lighter_mm.scoring import ScoreWeights, score_markets
+from tests.helpers.estimated_fill import make_candidate_row
 
 
 def _base_row(symbol: str, market_id: int, **overrides: object) -> dict:
-    row = {
-        "symbol": symbol,
-        "market_id": market_id,
-        "observation_hours": 24.0,
-        "data_coverage_pct": 98.0,
-        "observation_coverage_pct": 98.0,
-        "median_spread_bps": 5.0,
-        "pct_time_spread_ge_5bps": 0.4,
-        "median_two_sided_depth_10bps_usd": 2000.0,
-        "median_two_sided_depth_5bps_usd": 1000.0,
-        "trades_per_minute_median": 5.0,
-        "trades_per_minute_mean": 5.0,
-        "total_trade_count": 10_000,
-        "maker_markout_5s_median_bps": 0.5,
-        "maker_markout_30s_median_bps": 0.2,
-        "markout_5s_count": 200,
-        "markout_30s_count": 200,
-        "estimated_maker_fill_samples": 500,
-        "estimated_maker_fill_sample_quality": "reliable",
-        "estimated_maker_fill_rate_30s_conservative": 0.4,
-        "estimated_maker_fill_rate_5s_conservative": 0.2,
-        "estimated_maker_fill_rate_30s_optimistic": 0.6,
-        "estimated_maker_fill_rate_5s_optimistic": 0.3,
-    }
-    row.update(overrides)
-    return row
+    return make_candidate_row(symbol=symbol, market_id=market_id, **overrides)
 
 
 def test_score_weights_sum_to_100() -> None:

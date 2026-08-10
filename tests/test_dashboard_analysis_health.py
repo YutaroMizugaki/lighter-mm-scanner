@@ -122,13 +122,15 @@ def test_analyzer_stale_does_not_offline_collector() -> None:
 def test_dashboard_labels_last_analysis_and_last_sync() -> None:
     home = HOME_PAGE.read_text(encoding="utf-8")
     data = DATA_TS.read_text(encoding="utf-8")
+    status = (ROOT / "dashboard" / "lib" / "status.ts").read_text(encoding="utf-8")
+    types = (ROOT / "dashboard" / "lib" / "types.ts").read_text(encoding="utf-8")
     assert "Last Analysis" in home
     assert "Last Sync" in home
     assert "Last Data" in home
     assert "Last Update" not in home
     assert "analysisDisplayTimestamp" in data
-    assert "last_successful_sync" in data
-    assert "last_durable_event_at" in data
+    assert "last_successful_sync" in types
+    assert "last_durable_event_at" in status
 
 
 def test_dashboard_no_last_update_label() -> None:

@@ -325,12 +325,16 @@ def test_pending_final_run_selected_first(tmp_path: Path) -> None:
 
 # TEST O — dashboard separates collector and analysis health (source check)
 def test_dashboard_separates_collector_and_analysis_health() -> None:
-    data_ts = Path(__file__).resolve().parents[1] / "dashboard" / "lib" / "data.ts"
-    text = data_ts.read_text(encoding="utf-8")
-    assert "effectiveCollectorStatus" in text
-    assert "effectiveAnalysisStatus" in text
-    assert "getCollectorStatusResult" in text
-    assert "getAnalysisStatusResult" in text
+    lib = Path(__file__).resolve().parents[1] / "dashboard" / "lib"
+    data_ts = (lib / "data.ts").read_text(encoding="utf-8")
+    status_ts = (lib / "status.ts").read_text(encoding="utf-8")
+    api_ts = (lib / "api.ts").read_text(encoding="utf-8")
+    assert "effectiveCollectorStatus" in data_ts
+    assert "effectiveAnalysisStatus" in data_ts
+    assert "export function effectiveCollectorStatus" in status_ts
+    assert "export function effectiveAnalysisStatus" in status_ts
+    assert "getCollectorStatusResult" in api_ts
+    assert "getAnalysisStatusResult" in api_ts
 
 
 # TEST — end-to-end collector sync → analyzer read

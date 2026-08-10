@@ -15,6 +15,7 @@ from lighter_mm.analytics.estimated_fill_metrics import (
     snapshot_bucket_id,
 )
 from lighter_mm.scoring import CandidateThresholds, score_markets
+from tests.helpers.estimated_fill import make_book_rows, make_candidate_row
 
 # ---------------------------------------------------------------------------
 # A — Estimated Maker Edge formula
@@ -144,14 +145,6 @@ def test_b_one_snapshot_per_market_bucket() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _books(n: int = MIN_MEANINGFUL_SAMPLES) -> list[tuple]:
-    out = []
-    for i in range(n):
-        ts = 1_000_000 + i * SNAPSHOT_BUCKET_MS
-        out.append((1, "T", ts, 100.5, True, 100.0, 101.0, 100.0, 100.0))
-    return out
-
-
 def test_c1_missing_price_column_is_unavailable_not_zero() -> None:
     con = duckdb.connect()
     con.execute(
@@ -165,7 +158,7 @@ def test_c1_missing_price_column_is_unavailable_not_zero() -> None:
     )
     con.executemany(
         "INSERT INTO book_observed VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        _books(),
+        make_book_rows(),
     )
     # Schema-drift shape: price projected as all-NULL (column name present).
     con.execute(
@@ -207,7 +200,7 @@ def test_c2_missing_is_maker_ask_is_unavailable_not_zero() -> None:
     )
     con.executemany(
         "INSERT INTO book_observed VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        _books(),
+        make_book_rows(),
     )
     con.execute(
         """
@@ -248,7 +241,7 @@ def test_c3_valid_schema_zero_eligible_is_measured_zero() -> None:
     )
     con.executemany(
         "INSERT INTO book_observed VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        _books(),
+        make_book_rows(),
     )
     # Valid schema, empty regular trades → measured zero with enough samples.
     con.execute(
@@ -278,7 +271,7 @@ def test_c_source_fields_flag_short_circuits_when_false() -> None:
     )
     con.executemany(
         "INSERT INTO book_observed VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        _books(10),
+        make_book_rows(10),
     )
     con.execute(
         """
@@ -296,35 +289,8 @@ def test_c_source_fields_flag_short_circuits_when_false() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _candidate_row(**overrides: object) -> dict:
-    row = {
-        "symbol": "CAND",
-        "market_id": 1,
-        "observation_hours": 24.0,
-        "data_coverage_pct": 98.0,
-        "observation_coverage_pct": 98.0,
-        "median_spread_bps": 5.0,
-        "pct_time_spread_ge_5bps": 0.4,
-        "median_two_sided_depth_10bps_usd": 2000.0,
-        "median_two_sided_depth_5bps_usd": 1000.0,
-        "trades_per_minute_median": 5.0,
-        "trades_per_minute_mean": 5.0,
-        "total_trade_count": 10_000,
-        "maker_markout_5s_median_bps": 0.5,
-        "maker_markout_30s_median_bps": 0.2,
-        "markout_5s_count": 200,
-        "markout_30s_count": 200,
-        "estimated_maker_fill_samples": 500,
-        "estimated_maker_fill_sample_quality": "reliable",
-        "estimated_maker_fill_rate_30s_conservative": 0.4,
-        "estimated_maker_fill_rate_5s_conservative": 0.2,
-    }
-    row.update(overrides)
-    return row
-
-
 def test_d1_insufficient_fill_samples_blocks_candidate() -> None:
-    row = _candidate_row(
+    row = make_candidate_row(
         estimated_maker_fill_samples=99,
         estimated_maker_fill_rate_30s_conservative=None,
         estimated_maker_fill_sample_quality="insufficient",
@@ -337,7 +303,7 @@ def test_d1_insufficient_fill_samples_blocks_candidate() -> None:
 
 
 def test_d2_hundred_fill_samples_passes_fill_gate() -> None:
-    row = _candidate_row(
+    row = make_candidate_row(
         estimated_maker_fill_samples=100,
         estimated_maker_fill_rate_30s_conservative=0.35,
         estimated_maker_fill_sample_quality="preliminary",
@@ -347,7 +313,7 @@ def test_d2_hundred_fill_samples_passes_fill_gate() -> None:
 
 
 def test_d3_legacy_schema_unavailable_blocks_candidate_keeps_score() -> None:
-    row = _candidate_row(
+    row = make_candidate_row(
         estimated_maker_fill_samples=0,
         estimated_maker_fill_rate_30s_conservative=None,
         estimated_maker_fill_sample_quality="insufficient",
@@ -359,14 +325,14 @@ def test_d3_legacy_schema_unavailable_blocks_candidate_keeps_score() -> None:
 
 
 def test_measured_zero_penalty_distinct_from_null() -> None:
-    null_row = _candidate_row(
+    null_row = make_candidate_row(
         symbol="NULL_FILL",
         market_id=1,
         estimated_maker_fill_samples=20,
         estimated_maker_fill_rate_30s_conservative=None,
         estimated_maker_fill_sample_quality="insufficient",
     )
-    zero_row = _candidate_row(
+    zero_row = make_candidate_row(
         symbol="ZERO_FILL",
         market_id=2,
         estimated_maker_fill_samples=500,

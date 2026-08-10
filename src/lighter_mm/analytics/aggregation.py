@@ -18,9 +18,9 @@ from lighter_mm.analytics.book_metrics import (
     _volatility_sql,
 )
 from lighter_mm.analytics.estimated_fill_metrics import (
-    _empty_estimated_fill_stats,
     aggregate_estimated_fill_sql,
     attach_estimated_maker_edge,
+    empty_estimated_fill_stats,
     estimated_fill_explain_plans,
     sample_quality,
 )
@@ -179,40 +179,16 @@ def _create_market_windows_view(
     )
 
 
-def analyze_range(
-    settings: Settings,
+def _prepare_parquet_sources(
+    src: AnalysisSources,
     *,
-    start_ms: int,
-    end_ms: int,
-    sources: AnalysisSources | None = None,
-    market_lifecycle: dict[int, MarketLifecycleEntry] | None = None,
-    benchmark_profile: bool = False,
-    explain_volatility: bool = False,
-    duckdb_memory_limit: str | None = None,
-    duckdb_threads: int | None = None,
-    read_only: bool = False,
-) -> dict[str, Any]:
-    """Aggregate Parquet over an explicit time window and source paths."""
-    if end_ms <= start_ms:
-        return {
-            "hours": 0.0,
-            "markets": [],
-            "scored": [],
-            "error": "invalid analysis window (end_ms <= start_ms)",
-        }
-    src = sources or _default_sources(settings.data_dir)
-    con = _connect(
-        settings.data_dir,
-        memory_limit=duckdb_memory_limit,
-        threads=duckdb_threads,
-    )
-    hours = max((end_ms - start_ms) / 3_600_000.0, 0.001)
-    t0 = time.monotonic()
+    read_only: bool,
+    t0: float,
+) -> tuple[list[str], list[str], list[str], list[dict[str, str]], dict[str, Any]]:
     prep_kwargs = {
         "quarantine": not read_only,
         "cleanup_temp": not read_only,
     }
-
     book_valid, book_corrupt = prepare_parquet_dataset(src.books, **prep_kwargs)
     trade_valid, trade_corrupt = prepare_parquet_dataset(src.trades, **prep_kwargs)
     markout_valid, markout_corrupt = prepare_parquet_dataset(src.markouts, **prep_kwargs)
@@ -235,26 +211,21 @@ def analyze_range(
         len(all_corrupt),
         _rss_mb(),
     )
+    return book_valid, trade_valid, markout_valid, all_corrupt, parquet_health
 
-    if not book_valid:
-        log.error(
-            "analysis failed reason=no_valid_parquet_files corrupt_files=%s",
-            len(all_corrupt),
-        )
-        return {
-            "hours": hours,
-            "start_ms": start_ms,
-            "end_ms": end_ms,
-            "markets": [],
-            "scored": [],
-            "error": (
-                "no valid book_samples parquet files"
-                if all_corrupt
-                else "no book_samples yet"
-            ),
-            "parquet_health": parquet_health,
-        }
 
+def _probe_book_columns(
+    con: duckdb.DuckDBPyConnection,
+    book_valid: list[str],
+    trade_valid: list[str],
+    markout_valid: list[str],
+    all_corrupt: list[dict[str, str]],
+) -> tuple[list[str], set[str], dict[str, Any]] | dict[str, Any]:
+    """Probe book columns; may isolate corrupt files.
+
+    Returns either ``(book_valid, available_cols, parquet_health)`` or an
+    early-error result dict.
+    """
     try:
         available_cols = _probe_parquet_columns(con, file_paths=book_valid)
     except Exception as exc:  # noqa: BLE001
@@ -275,11 +246,6 @@ def analyze_range(
                 len(all_corrupt),
             )
             return {
-                "hours": hours,
-                "start_ms": start_ms,
-                "end_ms": end_ms,
-                "markets": [],
-                "scored": [],
                 "error": "no readable book_samples parquet files",
                 "parquet_health": parquet_health,
             }
@@ -288,15 +254,34 @@ def analyze_range(
         except Exception as retry_exc:  # noqa: BLE001
             log.exception("book parquet column probe failed after isolation: %s", retry_exc)
             return {
-                "hours": hours,
-                "start_ms": start_ms,
-                "end_ms": end_ms,
-                "markets": [],
-                "scored": [],
                 "error": f"book_samples parquet probe failed: {retry_exc}",
                 "parquet_health": parquet_health,
             }
+    else:
+        parquet_health = parquet_health_summary(
+            {
+                "books": len(book_valid),
+                "trades": len(trade_valid),
+                "markouts": len(markout_valid),
+            },
+            all_corrupt,
+        )
+    return book_valid, available_cols, parquet_health
 
+
+def _prepare_book_dataset(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    book_valid: list[str],
+    available_cols: set[str],
+    start_ms: int,
+    end_ms: int,
+    market_lifecycle: dict[int, MarketLifecycleEntry] | None,
+    t0: float,
+    benchmark_profile: bool,
+    profile: dict[str, float],
+) -> tuple[int, int | None] | None:
+    """Materialize book tables. Returns (book_count, latest_book_event_ms) or None."""
     book_cols = _book_projection(available_cols)
     if not _read_view(
         con,
@@ -307,15 +292,7 @@ def analyze_range(
         end_ms,
         file_paths=book_valid,
     ):
-        return {
-            "hours": hours,
-            "start_ms": start_ms,
-            "end_ms": end_ms,
-            "markets": [],
-            "scored": [],
-            "error": "no book_samples yet",
-            "parquet_health": parquet_health,
-        }
+        return None
 
     # Materialize projected/deduped books once onto local DuckDB storage.
     # Re-scanning hive Parquet via GCS FUSE for every aggregate CTE caused the
@@ -387,7 +364,6 @@ def analyze_range(
 
     book_count = con.execute("SELECT COUNT(*) FROM book_deduped").fetchone()[0]
     latest_book_event_ms = con.execute("SELECT MAX(timestamp_ms) FROM book_deduped").fetchone()[0]
-    profile: dict[str, float] = {}
     rss = _rss_mb()
     if benchmark_profile:
         profile["rss_after_book_load_mb"] = rss
@@ -397,7 +373,19 @@ def analyze_range(
         book_count,
         rss,
     )
+    return int(book_count), latest_book_event_ms
 
+
+def _run_book_metrics(
+    con: duckdb.DuckDBPyConnection,
+    settings: Settings,
+    *,
+    start_ms: int,
+    end_ms: int,
+    hours: float,
+    benchmark_profile: bool,
+    profile: dict[str, float],
+) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
     t_book = time.monotonic()
     book_agg = _aggregate_book_sql(con, settings, start_ms, end_ms, hours)
     rss = _rss_mb()
@@ -447,108 +435,275 @@ def analyze_range(
         time.monotonic() - t_vol,
         rss,
     )
+    return book_agg, persistence, volatility
+
+
+def _prepare_trade_dataset(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    trade_valid: list[str],
+    start_ms: int,
+    end_ms: int,
+) -> tuple[int, set[str]] | None:
+    """Load and materialize trades. Returns (trade_count, available_cols) or None."""
+    try:
+        trade_available = _probe_parquet_columns(con, file_paths=trade_valid)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("trade parquet column probe failed: %s", exc)
+        trade_available = set()
+    price_col = (
+        "price" if "price" in trade_available else "CAST(NULL AS DOUBLE) AS price"
+    )
+    is_maker_ask_col = (
+        "is_maker_ask"
+        if "is_maker_ask" in trade_available
+        else "CAST(NULL AS BOOLEAN) AS is_maker_ask"
+    )
+    trade_cols = (
+        "timestamp_ms, market_id, symbol, trade_id, usd_amount, type, "
+        f"{price_col}, {is_maker_ask_col}"
+    )
+    if not _read_view(
+        con,
+        "trade_raw_view",
+        None,
+        trade_cols,
+        start_ms,
+        end_ms,
+        file_paths=trade_valid,
+    ):
+        return None
+    con.execute("CREATE OR REPLACE TABLE trade_raw AS SELECT * FROM trade_raw_view")
+    try:
+        con.execute("DROP VIEW IF EXISTS trade_raw_view")
+    except Exception:  # noqa: BLE001
+        pass
+    trade_count = con.execute("SELECT COUNT(*) FROM trade_raw").fetchone()[0]
+    return int(trade_count), trade_available
+
+
+def _run_trade_metrics(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    trade_available: set[str],
+    benchmark_profile: bool,
+    profile: dict[str, float],
+) -> tuple[dict[int, dict[str, Any]], dict[int, dict[str, Any]]]:
+    t_trade = time.monotonic()
+    trade_agg = _aggregate_trades_sql(con)
+    rss = _rss_mb()
+    if benchmark_profile:
+        profile["rss_after_trade_aggregate_mb"] = rss
+    log.info(
+        "analysis phase=trade_aggregate elapsed=%.3fs trade_rows=%s rss_mb=%.1f",
+        time.monotonic() - t_trade,
+        con.execute("SELECT COUNT(*) FROM trade_raw").fetchone()[0],
+        rss,
+    )
+    # Required source fields must exist in Parquet — not merely as
+    # all-NULL projected placeholders — or fill would look like 0%.
+    fill_source_ok = "price" in trade_available and "is_maker_ask" in trade_available
+    t_fill = time.monotonic()
+    estimated_fill_agg = aggregate_estimated_fill_sql(
+        con, source_fields_available=fill_source_ok
+    )
+    rss = _rss_mb()
+    if benchmark_profile:
+        profile["rss_after_estimated_fill_mb"] = rss
+    log.info(
+        "analysis phase=estimated_fill elapsed=%.3fs markets=%s "
+        "source_fields_ok=%s rss_mb=%.1f",
+        time.monotonic() - t_fill,
+        len(estimated_fill_agg),
+        fill_source_ok,
+        rss,
+    )
+    return trade_agg, estimated_fill_agg
+
+
+def _prepare_markout_dataset(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    markout_valid: list[str],
+    start_ms: int,
+    end_ms: int,
+) -> int | None:
+    """Load and materialize markouts. Returns markout_count or None."""
+    markout_cols = (
+        "timestamp_ms, market_id, symbol, trade_id, horizon_s, maker_markout_bps"
+    )
+    if not _read_view(
+        con,
+        "markout_raw_view",
+        None,
+        markout_cols,
+        start_ms,
+        end_ms,
+        file_paths=markout_valid,
+    ):
+        return None
+    con.execute(
+        "CREATE OR REPLACE TABLE markout_raw AS SELECT * FROM markout_raw_view"
+    )
+    try:
+        con.execute("DROP VIEW IF EXISTS markout_raw_view")
+    except Exception:  # noqa: BLE001
+        pass
+    return int(con.execute("SELECT COUNT(*) FROM markout_raw").fetchone()[0])
+
+
+def _run_markout_metrics(
+    con: duckdb.DuckDBPyConnection,
+    *,
+    markout_count: int,
+    benchmark_profile: bool,
+    profile: dict[str, float],
+) -> dict[int, dict[str, Any]]:
+    t_markout = time.monotonic()
+    markout_agg = _aggregate_markouts_sql(con)
+    rss = _rss_mb()
+    if benchmark_profile:
+        profile["rss_after_markout_aggregate_mb"] = rss
+    log.info(
+        "analysis phase=markout_aggregate elapsed=%.3fs markout_rows=%s rss_mb=%.1f",
+        time.monotonic() - t_markout,
+        markout_count,
+        rss,
+    )
+    return markout_agg
+
+
+def analyze_range(
+    settings: Settings,
+    *,
+    start_ms: int,
+    end_ms: int,
+    sources: AnalysisSources | None = None,
+    market_lifecycle: dict[int, MarketLifecycleEntry] | None = None,
+    benchmark_profile: bool = False,
+    explain_volatility: bool = False,
+    duckdb_memory_limit: str | None = None,
+    duckdb_threads: int | None = None,
+    read_only: bool = False,
+) -> dict[str, Any]:
+    """Aggregate Parquet over an explicit time window and source paths."""
+    if end_ms <= start_ms:
+        return {
+            "hours": 0.0,
+            "markets": [],
+            "scored": [],
+            "error": "invalid analysis window (end_ms <= start_ms)",
+        }
+    src = sources or _default_sources(settings.data_dir)
+    con = _connect(
+        settings.data_dir,
+        memory_limit=duckdb_memory_limit,
+        threads=duckdb_threads,
+    )
+    hours = max((end_ms - start_ms) / 3_600_000.0, 0.001)
+    t0 = time.monotonic()
+    profile: dict[str, float] = {}
+
+    book_valid, trade_valid, markout_valid, all_corrupt, parquet_health = (
+        _prepare_parquet_sources(src, read_only=read_only, t0=t0)
+    )
+
+    if not book_valid:
+        log.error(
+            "analysis failed reason=no_valid_parquet_files corrupt_files=%s",
+            len(all_corrupt),
+        )
+        return {
+            "hours": hours,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "markets": [],
+            "scored": [],
+            "error": (
+                "no valid book_samples parquet files"
+                if all_corrupt
+                else "no book_samples yet"
+            ),
+            "parquet_health": parquet_health,
+        }
+
+    probed = _probe_book_columns(
+        con, book_valid, trade_valid, markout_valid, all_corrupt
+    )
+    if isinstance(probed, dict):
+        return {
+            "hours": hours,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "markets": [],
+            "scored": [],
+            "error": probed["error"],
+            "parquet_health": probed["parquet_health"],
+        }
+    book_valid, available_cols, parquet_health = probed
+
+    book_loaded = _prepare_book_dataset(
+        con,
+        book_valid=book_valid,
+        available_cols=available_cols,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        market_lifecycle=market_lifecycle,
+        t0=t0,
+        benchmark_profile=benchmark_profile,
+        profile=profile,
+    )
+    if book_loaded is None:
+        return {
+            "hours": hours,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "markets": [],
+            "scored": [],
+            "error": "no book_samples yet",
+            "parquet_health": parquet_health,
+        }
+    book_count, latest_book_event_ms = book_loaded
+
+    book_agg, persistence, volatility = _run_book_metrics(
+        con,
+        settings,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        hours=hours,
+        benchmark_profile=benchmark_profile,
+        profile=profile,
+    )
 
     trade_count = 0
     trade_agg: dict[int, dict[str, Any]] = {}
     estimated_fill_agg: dict[int, dict[str, Any]] = {}
     if trade_valid:
-        try:
-            trade_available = _probe_parquet_columns(con, file_paths=trade_valid)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("trade parquet column probe failed: %s", exc)
-            trade_available = set()
-        price_col = (
-            "price" if "price" in trade_available else "CAST(NULL AS DOUBLE) AS price"
+        trade_loaded = _prepare_trade_dataset(
+            con, trade_valid=trade_valid, start_ms=start_ms, end_ms=end_ms
         )
-        is_maker_ask_col = (
-            "is_maker_ask"
-            if "is_maker_ask" in trade_available
-            else "CAST(NULL AS BOOLEAN) AS is_maker_ask"
-        )
-        trade_cols = (
-            "timestamp_ms, market_id, symbol, trade_id, usd_amount, type, "
-            f"{price_col}, {is_maker_ask_col}"
-        )
-        if _read_view(
-            con,
-            "trade_raw_view",
-            None,
-            trade_cols,
-            start_ms,
-            end_ms,
-            file_paths=trade_valid,
-        ):
-            con.execute("CREATE OR REPLACE TABLE trade_raw AS SELECT * FROM trade_raw_view")
-            try:
-                con.execute("DROP VIEW IF EXISTS trade_raw_view")
-            except Exception:  # noqa: BLE001
-                pass
-            trade_count = con.execute("SELECT COUNT(*) FROM trade_raw").fetchone()[0]
-            t_trade = time.monotonic()
-            trade_agg = _aggregate_trades_sql(con)
-            rss = _rss_mb()
-            if benchmark_profile:
-                profile["rss_after_trade_aggregate_mb"] = rss
-            log.info(
-                "analysis phase=trade_aggregate elapsed=%.3fs trade_rows=%s rss_mb=%.1f",
-                time.monotonic() - t_trade,
-                trade_count,
-                rss,
-            )
-            # Required source fields must exist in Parquet — not merely as
-            # all-NULL projected placeholders — or fill would look like 0%.
-            fill_source_ok = (
-                "price" in trade_available and "is_maker_ask" in trade_available
-            )
-            t_fill = time.monotonic()
-            estimated_fill_agg = aggregate_estimated_fill_sql(
-                con, source_fields_available=fill_source_ok
-            )
-            rss = _rss_mb()
-            if benchmark_profile:
-                profile["rss_after_estimated_fill_mb"] = rss
-            log.info(
-                "analysis phase=estimated_fill elapsed=%.3fs markets=%s "
-                "source_fields_ok=%s rss_mb=%.1f",
-                time.monotonic() - t_fill,
-                len(estimated_fill_agg),
-                fill_source_ok,
-                rss,
+        if trade_loaded is not None:
+            trade_count, trade_available = trade_loaded
+            trade_agg, estimated_fill_agg = _run_trade_metrics(
+                con,
+                trade_available=trade_available,
+                benchmark_profile=benchmark_profile,
+                profile=profile,
             )
 
     markout_count = 0
     markout_agg: dict[int, dict[str, Any]] = {}
     if markout_valid:
-        markout_cols = (
-            "timestamp_ms, market_id, symbol, trade_id, horizon_s, maker_markout_bps"
+        loaded_markouts = _prepare_markout_dataset(
+            con, markout_valid=markout_valid, start_ms=start_ms, end_ms=end_ms
         )
-        if _read_view(
-            con,
-            "markout_raw_view",
-            None,
-            markout_cols,
-            start_ms,
-            end_ms,
-            file_paths=markout_valid,
-        ):
-            con.execute(
-                "CREATE OR REPLACE TABLE markout_raw AS SELECT * FROM markout_raw_view"
-            )
-            try:
-                con.execute("DROP VIEW IF EXISTS markout_raw_view")
-            except Exception:  # noqa: BLE001
-                pass
-            markout_count = con.execute("SELECT COUNT(*) FROM markout_raw").fetchone()[0]
-            t_markout = time.monotonic()
-            markout_agg = _aggregate_markouts_sql(con)
-            rss = _rss_mb()
-            if benchmark_profile:
-                profile["rss_after_markout_aggregate_mb"] = rss
-            log.info(
-                "analysis phase=markout_aggregate elapsed=%.3fs markout_rows=%s rss_mb=%.1f",
-                time.monotonic() - t_markout,
-                markout_count,
-                rss,
+        if loaded_markouts is not None:
+            markout_count = loaded_markouts
+            markout_agg = _run_markout_metrics(
+                con,
+                markout_count=markout_count,
+                benchmark_profile=benchmark_profile,
+                profile=profile,
             )
 
     rows = _merge_market_rows(
@@ -682,7 +837,7 @@ def _merge_market_rows(
         m5c = int(row.get("markout_5s_count") or 0)
         m30c = int(row.get("markout_30s_count") or 0)
         row["markout_sample_quality"] = sample_quality(min(m5c, m30c))
-        row.update(estimated_fill_agg.get(mid, _empty_estimated_fill_stats()))
+        row.update(estimated_fill_agg.get(mid, empty_estimated_fill_stats()))
         # Maker fee is not on the analyzer row path today; edge excludes fee (0).
         attach_estimated_maker_edge(row)
         rows.append(row)

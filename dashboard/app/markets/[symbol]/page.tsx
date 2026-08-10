@@ -1,12 +1,13 @@
 import Link from "next/link";
+import { EstimatedEdgeValue } from "@/components/EstimatedEdgeValue";
+import { EstimatedFillValue } from "@/components/EstimatedFillValue";
+import { SampleQualityValue } from "@/components/SampleQualityValue";
+import { getMarket } from "@/lib/api";
+import { fmt } from "@/lib/format";
 import {
   ESTIMATED_EDGE_TOOLTIP,
   ESTIMATED_FILL_TOOLTIP,
-  fmt,
-  fmtEstimatedFill,
-  fmtSampleQuality,
-  getMarket,
-} from "@/lib/data";
+} from "@/lib/marketMetrics";
 
 function sizeCell(
   bySize: Record<string, Record<string, { conservative?: number | null; optimistic?: number | null }>> | null | undefined,
@@ -14,9 +15,9 @@ function sizeCell(
   horizon: string,
   mode: "conservative" | "optimistic",
   quality?: string | null,
-): string {
+) {
   const rate = bySize?.[size]?.[horizon]?.[mode];
-  return fmtEstimatedFill(rate, quality);
+  return <EstimatedFillValue rate={rate} quality={quality} />;
 }
 
 export default async function MarketDetailPage({
@@ -54,13 +55,19 @@ export default async function MarketDetailPage({
         <div className="kpi" title={ESTIMATED_FILL_TOOLTIP}>
           <div className="label">Est. Fill 30s ($50 cons.)</div>
           <div className="value">
-            {fmtEstimatedFill(m.estimated_maker_fill_rate_30s_conservative, fillQ)}
+            <EstimatedFillValue
+              rate={m.estimated_maker_fill_rate_30s_conservative}
+              quality={fillQ}
+            />
           </div>
         </div>
         <div className="kpi" title={ESTIMATED_FILL_TOOLTIP}>
           <div className="label">Est. Fill 5s ($50 cons.)</div>
           <div className="value">
-            {fmtEstimatedFill(m.estimated_maker_fill_rate_5s_conservative, fillQ)}
+            <EstimatedFillValue
+              rate={m.estimated_maker_fill_rate_5s_conservative}
+              quality={fillQ}
+            />
           </div>
         </div>
         <div className="kpi" title={ESTIMATED_EDGE_TOOLTIP}>
@@ -72,7 +79,9 @@ export default async function MarketDetailPage({
                 ? " (fee incl.)"
                 : ""}
           </div>
-          <div className="value">{fmt(m.estimated_maker_edge_30s_bps, 2, true)} bp</div>
+          <div className="value">
+            <EstimatedEdgeValue edgeBps={m.estimated_maker_edge_30s_bps} /> bp
+          </div>
         </div>
         <div className="kpi">
           <div className="label">Markout 5s</div>
@@ -84,11 +93,15 @@ export default async function MarketDetailPage({
         </div>
         <div className="kpi">
           <div className="label">Fill Sample Quality</div>
-          <div className="value">{fmtSampleQuality(fillQ)}</div>
+          <div className="value">
+            <SampleQualityValue quality={fillQ} />
+          </div>
         </div>
         <div className="kpi">
           <div className="label">Markout Sample Quality</div>
-          <div className="value">{fmtSampleQuality(m.markout_sample_quality)}</div>
+          <div className="value">
+            <SampleQualityValue quality={m.markout_sample_quality} />
+          </div>
         </div>
         <div className="kpi">
           <div className="label">Depth ±10bp</div>
