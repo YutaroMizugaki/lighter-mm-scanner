@@ -259,7 +259,7 @@ def test_duration_vs_schedule_warns_near_interval() -> None:
             "generated_at": (now - timedelta(minutes=6)).isoformat(),
             "git_sha": "abc123",
             "last_successful_analysis_at": (now - timedelta(minutes=6)).isoformat(),
-            "duration_seconds": 26 * 60,
+            "duration_seconds": 25 * 60,
         },
     )
     report = verify_runtime(snap, now=now)
@@ -285,6 +285,27 @@ def test_duration_vs_schedule_pass_for_current_runtime() -> None:
     report = verify_runtime(snap, now=now)
     assert any(
         c.name == "analyzer.duration_vs_schedule" and c.level.value == "PASS"
+        for c in report.checks
+    )
+
+
+def test_duration_vs_schedule_fails_when_exceeds_interval() -> None:
+    now = _now()
+    snap = _base_snapshot(
+        analysis_interval_minutes=30.0,
+        analysis_status={
+            "status": "OK",
+            "run_id": "run-current",
+            "generated_at": (now - timedelta(minutes=6)).isoformat(),
+            "git_sha": "abc123",
+            "last_successful_analysis_at": (now - timedelta(minutes=6)).isoformat(),
+            "duration_seconds": 31 * 60,
+        },
+    )
+    report = verify_runtime(snap, now=now)
+    assert report.exit_code() == 1
+    assert any(
+        c.name == "analyzer.duration_vs_schedule" and c.level.value == "FAIL"
         for c in report.checks
     )
 

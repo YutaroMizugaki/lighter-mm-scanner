@@ -55,6 +55,8 @@ def _publish_analysis_status(
     parquet_health_status: str | None = None,
     git_sha: str | None = None,
     analyzer_version: str | None = None,
+    analysis_window_hours: float | None = None,
+    run_observation_hours: float | None = None,
 ) -> None:
     payload: dict[str, Any] = {
         "status": status,
@@ -84,6 +86,10 @@ def _publish_analysis_status(
         )
         if duration_seconds is not None:
             payload["duration_seconds"] = duration_seconds
+        if analysis_window_hours is not None:
+            payload["analysis_window_hours"] = analysis_window_hours
+        if run_observation_hours is not None:
+            payload["run_observation_hours"] = run_observation_hours
         if valid_parquet_files is not None:
             payload["valid_parquet_files"] = valid_parquet_files
         if corrupt_parquet_files is not None:

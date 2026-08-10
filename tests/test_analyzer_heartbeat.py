@@ -191,3 +191,116 @@ def test_lock_renewal_failure_stops_analysis(tmp_path: Path) -> None:
                 ):
                     code = run_cloud_analyze(settings)
     assert code == 1
+
+
+def test_blocked_heartbeat_cannot_overwrite_terminal_status(tmp_path: Path) -> None:
+    """In-flight RUNNING GCS write must finish before terminal; never overwrite after."""
+    import threading
+
+    settings = _base_settings(tmp_path, analyzer_lock_renew_interval_seconds=0.05)
+    be = LocalStorageBackend(tmp_path / "remote")
+    _seed_run(be)
+    statuses: list[str] = []
+    heartbeat_entered = threading.Event()
+    allow_heartbeat_finish = threading.Event()
+    real_publish = analyzer_publish._publish_analysis_status
+    running_seen = {"n": 0}
+
+    def blocking_publish(*args, **kwargs):
+        status = str(kwargs.get("status"))
+        if status == "RUNNING":
+            running_seen["n"] += 1
+            if running_seen["n"] > 1:
+                # Subsequent heartbeat holds the publish lock while blocked.
+                heartbeat_entered.set()
+                assert allow_heartbeat_finish.wait(timeout=30)
+        statuses.append(status)
+        return real_publish(*args, **kwargs)
+
+    def slow_analyze(*_a, **_k):
+        assert heartbeat_entered.wait(timeout=10)
+        time.sleep(0.05)
+        return _analyze_ok()
+
+    def releaser() -> None:
+        assert heartbeat_entered.wait(timeout=10)
+        # Let analyze finish and terminal publish wait on the status lock.
+        time.sleep(0.25)
+        allow_heartbeat_finish.set()
+
+    threading.Thread(target=releaser, name="hb-releaser", daemon=True).start()
+
+    with patch("lighter_mm.cloud.analyzer.build_storage_backend", return_value=be):
+        with patch("lighter_mm.cloud.analyzer.analyze_range", side_effect=slow_analyze):
+            with patch(
+                "lighter_mm.cloud.analyzer.build_dashboard_payload",
+                side_effect=_payload_ok,
+            ):
+                with patch(
+                    "lighter_mm.cloud.analyzer._publish_analysis_status",
+                    side_effect=blocking_publish,
+                ):
+                    code = run_cloud_analyze(settings)
+    assert code == 0
+    assert statuses
+    assert statuses[-1] in {"OK", "DEGRADED"}
+    last_terminal = max(i for i, s in enumerate(statuses) if s in {"OK", "DEGRADED", "ERROR"})
+    assert all(s != "RUNNING" for s in statuses[last_terminal + 1 :])
+    time.sleep(0.2)
+    final = be.download_json("lighter-mm/public/analysis_status.json")
+    assert final["status"] in {"OK", "DEGRADED"}
+
+
+def test_lock_renewal_continues_while_heartbeat_blocked(tmp_path: Path) -> None:
+    """Heartbeat GCS delay must not stall LeaderLock renewal."""
+    import threading
+
+    settings = _base_settings(tmp_path, analyzer_lock_renew_interval_seconds=0.05)
+    be = LocalStorageBackend(tmp_path / "remote")
+    _seed_run(be)
+    heartbeat_entered = threading.Event()
+    allow_heartbeat_finish = threading.Event()
+    renew_times: list[float] = []
+    real_publish = analyzer_publish._publish_analysis_status
+    running_seen = {"n": 0}
+
+    def blocking_publish(*args, **kwargs):
+        status = str(kwargs.get("status"))
+        if status == "RUNNING":
+            running_seen["n"] += 1
+            if running_seen["n"] > 1:
+                heartbeat_entered.set()
+                assert allow_heartbeat_finish.wait(timeout=30)
+        return real_publish(*args, **kwargs)
+
+    def tracking_renew(self, *args, **kwargs):
+        renew_times.append(time.time())
+        return True
+
+    def slow_analyze(*_a, **_k):
+        assert heartbeat_entered.wait(timeout=10)
+        # Hold analysis while renewals continue despite blocked heartbeat.
+        time.sleep(0.35)
+        allow_heartbeat_finish.set()
+        return _analyze_ok()
+
+    with patch("lighter_mm.cloud.analyzer.build_storage_backend", return_value=be):
+        with patch(
+            "lighter_mm.cloud.analyzer.LeaderLock.renew",
+            autospec=True,
+            side_effect=tracking_renew,
+        ):
+            with patch("lighter_mm.cloud.analyzer.analyze_range", side_effect=slow_analyze):
+                with patch(
+                    "lighter_mm.cloud.analyzer.build_dashboard_payload",
+                    side_effect=_payload_ok,
+                ):
+                    with patch(
+                        "lighter_mm.cloud.analyzer._publish_analysis_status",
+                        side_effect=blocking_publish,
+                    ):
+                        code = run_cloud_analyze(settings)
+    assert code == 0
+    assert len(renew_times) >= 2
+    status = be.download_json("lighter-mm/public/analysis_status.json")
+    assert status["status"] in {"OK", "DEGRADED"}

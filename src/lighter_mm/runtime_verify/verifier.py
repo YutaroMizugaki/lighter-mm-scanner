@@ -464,19 +464,31 @@ def _verify_analyzer(report: VerifyReport, snap: RuntimeSnapshot, now: datetime)
     else:
         report.add(_check(CheckLevel.WARN, section, "analysis.status", ast or "unknown"))
 
-    # Warn when successful Analyzer duration approaches Scheduler cadence.
+    # Duration vs Scheduler cadence:
+    # PASS <80%, WARN 80–100%, FAIL >100% of schedule interval.
     duration_raw = data.get("duration_seconds")
     if isinstance(duration_raw, (int, float)) and interval > 0:
         duration_s = float(duration_raw)
-        threshold_s = interval * 60.0 * 0.8
-        if duration_s > threshold_s:
+        interval_s = interval * 60.0
+        warn_s = interval_s * 0.8
+        if duration_s > interval_s:
+            report.add(
+                _check(
+                    CheckLevel.FAIL,
+                    section,
+                    "analyzer.duration_vs_schedule",
+                    f"duration_seconds={duration_s:.0f} exceeds schedule "
+                    f"interval ({interval:.0f}m = {interval_s:.0f}s)",
+                )
+            )
+        elif duration_s > warn_s:
             report.add(
                 _check(
                     CheckLevel.WARN,
                     section,
                     "analyzer.duration_vs_schedule",
                     f"duration_seconds={duration_s:.0f} > 80% of schedule "
-                    f"interval ({interval:.0f}m = {threshold_s:.0f}s)",
+                    f"interval ({interval:.0f}m = {warn_s:.0f}s)",
                 )
             )
         else:

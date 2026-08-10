@@ -166,6 +166,7 @@ def run_cloud_analyze(settings: Settings) -> int:
 
     lost_lock = threading.Event()
     stop = threading.Event()
+    status_publish_lock = threading.Lock()
     background_stopped = False
     execution_start_ms = int(time.time() * 1000)
     execution_start = time.time()
@@ -175,47 +176,74 @@ def run_cloud_analyze(settings: Settings) -> int:
     final_claimed = False
     last_parquet_health: dict[str, Any] = {}
 
-    def _stop_background(*, join_timeout: float = 5.0) -> None:
-        """Stop renew/heartbeat before any final status publish (no RUNNING overwrite)."""
+    def _stop_background(*, join_timeout: float = 30.0) -> None:
+        """Signal background loops to exit; join is best-effort (lock is the safety)."""
         nonlocal background_stopped
         if background_stopped:
             return
         stop.set()
         renew_thread.join(timeout=join_timeout)
+        heartbeat_thread.join(timeout=join_timeout)
         background_stopped = True
 
-    def _renew_and_heartbeat_loop() -> None:
+    def _publish_running_status(*, beat_at: str) -> None:
+        """Publish RUNNING only while analysis is still active (under publish lock)."""
+        with status_publish_lock:
+            if stop.is_set():
+                return
+            _publish_analysis_status(
+                backend,
+                sync,
+                status="RUNNING",
+                run_id=run_id,
+                generated_at=beat_at,
+                started_at=started_at,
+                heartbeat_at=beat_at,
+                last_successful_analysis_at=last_ok,
+                git_sha=settings.git_sha,
+                analyzer_version=settings.analyzer_version,
+            )
+
+    def _publish_terminal_status(**kwargs: Any) -> None:
+        """Stop heartbeats, then publish terminal status under the same lock.
+
+        Holding status_publish_lock until after the terminal write makes it
+        structurally impossible for a late RUNNING heartbeat to overwrite OK/ERROR.
+        """
+        stop.set()
+        with status_publish_lock:
+            _publish_analysis_status(backend, sync, **kwargs)
+
+    def _renew_loop() -> None:
+        # Leadership renewal must not wait on heartbeat GCS writes.
         while not stop.wait(settings.analyzer_lock_renew_interval_seconds):
             if not lock.renew(run_id, git_sha=settings.git_sha):
                 log.error("lost analyzer lock during analysis")
                 lost_lock.set()
                 return
-            if stop.is_set():
+
+    def _heartbeat_loop() -> None:
+        while not stop.wait(settings.analyzer_lock_renew_interval_seconds):
+            if stop.is_set() or lost_lock.is_set():
                 return
             try:
-                beat_at = now_iso()
-                _publish_analysis_status(
-                    backend,
-                    sync,
-                    status="RUNNING",
-                    run_id=run_id,
-                    generated_at=beat_at,
-                    started_at=started_at,
-                    heartbeat_at=beat_at,
-                    last_successful_analysis_at=last_ok,
-                    git_sha=settings.git_sha,
-                    analyzer_version=settings.analyzer_version,
-                )
+                _publish_running_status(beat_at=now_iso())
             except Exception as exc:  # noqa: BLE001
-                # Heartbeat write failure must not abort analysis; lock renew is separate.
+                # Heartbeat write failure must not abort analysis or block renewal.
                 log.warning("analyzer heartbeat publish failed: %s", exc)
 
     renew_thread = threading.Thread(
-        target=_renew_and_heartbeat_loop,
-        name="analyzer-lock-renew-heartbeat",
+        target=_renew_loop,
+        name="analyzer-lock-renew",
+        daemon=True,
+    )
+    heartbeat_thread = threading.Thread(
+        target=_heartbeat_loop,
+        name="analyzer-heartbeat",
         daemon=True,
     )
     renew_thread.start()
+    heartbeat_thread.start()
 
     try:
         if request_type == "final":
@@ -230,18 +258,7 @@ def run_cloud_analyze(settings: Settings) -> int:
             final_claimed = True
 
         _check_leadership(lost_lock, phase="analysis status publish")
-        _publish_analysis_status(
-            backend,
-            sync,
-            status="RUNNING",
-            run_id=run_id,
-            generated_at=generated_at,
-            started_at=started_at,
-            heartbeat_at=started_at,
-            last_successful_analysis_at=last_ok,
-            git_sha=settings.git_sha,
-            analyzer_version=settings.analyzer_version,
-        )
+        _publish_running_status(beat_at=generated_at)
         log.info(
             "analysis_started run_id=%s type=%s last_successful_analysis_at=%s rss_mb=%.1f",
             run_id,
@@ -274,17 +291,29 @@ def run_cloud_analyze(settings: Settings) -> int:
                     )
                 return 0
 
+        # Ranking uses a bounded rolling window (default 24h). Collector retention
+        # (e.g. 72h) is unchanged. Final ranking also uses the same bound so
+        # analysis stays within the 3600s task timeout as the run grows.
         start_ms, end_ms, analysis_end_ms, durable_ms = _analysis_window_ms(
-            state, execution_start_ms=execution_start_ms, sources=sources
+            state,
+            execution_start_ms=execution_start_ms,
+            sources=sources,
+            window_hours=settings.scheduled_analysis_window_hours,
         )
+        analysis_window_hours = max((end_ms - start_ms) / 3_600_000.0, 0.0)
+        run_start_ms = _iso_to_ms(state.started_at) or start_ms
+        run_observation_hours = max((end_ms - run_start_ms) / 3_600_000.0, 0.0)
 
         log.info(
-            "analyzing run_id=%s type=%s start_ms=%s end_ms=%s durable_ms=%s books=%s rss_mb=%.1f",
+            "analyzing run_id=%s type=%s start_ms=%s end_ms=%s durable_ms=%s "
+            "analysis_window_hours=%.2f run_observation_hours=%.2f books=%s rss_mb=%.1f",
             run_id,
             request_type,
             start_ms,
             end_ms,
             durable_ms,
+            analysis_window_hours,
+            run_observation_hours,
             sources.books,
             _rss_mb(),
         )
@@ -317,6 +346,8 @@ def run_cloud_analyze(settings: Settings) -> int:
             state=state,
             sources=sources,
             analysis_result=result,
+            analysis_window_hours=analysis_window_hours,
+            run_observation_hours=run_observation_hours,
         )
         log.info(
             "analysis_dashboard_build_done run_id=%s rss_mb=%.1f",
@@ -334,11 +365,7 @@ def run_cloud_analyze(settings: Settings) -> int:
             "DEGRADED" if parquet_health.get("status") == "degraded" else "OK"
         )
         _check_leadership(lost_lock, phase="final status publish")
-        # Stop heartbeat before final publish so RUNNING cannot overwrite OK/DEGRADED.
-        _stop_background()
-        _publish_analysis_status(
-            backend,
-            sync,
+        _publish_terminal_status(
             status=analysis_status,
             run_id=run_id,
             generated_at=completed_at,
@@ -360,7 +387,10 @@ def run_cloud_analyze(settings: Settings) -> int:
             parquet_health_status=parquet_health.get("status"),
             git_sha=settings.git_sha,
             analyzer_version=settings.analyzer_version,
+            analysis_window_hours=analysis_window_hours,
+            run_observation_hours=run_observation_hours,
         )
+        _stop_background()
 
         if request_type == "final":
             _check_leadership(lost_lock, phase="final marker")
@@ -376,7 +406,8 @@ def run_cloud_analyze(settings: Settings) -> int:
 
         log.info(
             "analysis_completed run_id=%s markets=%s candidates=%s book_rows=%s "
-            "duration_seconds=%.1f analysis_id=%s status=%s valid_files=%s corrupt_files=%s",
+            "duration_seconds=%.1f analysis_id=%s status=%s analysis_window_hours=%.2f "
+            "run_observation_hours=%.2f valid_files=%s corrupt_files=%s",
             run_id,
             len(scored),
             len(candidates),
@@ -384,12 +415,15 @@ def run_cloud_analyze(settings: Settings) -> int:
             duration_seconds,
             analysis_id,
             analysis_status,
+            analysis_window_hours,
+            run_observation_hours,
             parquet_health.get("valid_parquet_files"),
             parquet_health.get("corrupt_parquet_files"),
         )
         return 0
     except LostLeadershipError as exc:
         log.error("analysis aborted: %s", exc)
+        stop.set()
         _stop_background()
         if request_type == "final" and final_claimed:
             _finalize_final_request_failure(
@@ -409,11 +443,8 @@ def run_cloud_analyze(settings: Settings) -> int:
             exc,
             duration_seconds,
         )
-        _stop_background()
         if not lost_lock.is_set():
-            _publish_analysis_status(
-                backend,
-                sync,
+            _publish_terminal_status(
                 status="ERROR",
                 run_id=run_id,
                 generated_at=failed_at,
@@ -428,6 +459,9 @@ def run_cloud_analyze(settings: Settings) -> int:
                 git_sha=settings.git_sha,
                 analyzer_version=settings.analyzer_version,
             )
+        else:
+            stop.set()
+        _stop_background()
         if request_type == "final" and final_claimed:
             _finalize_final_request_failure(
                 backend,
@@ -438,5 +472,6 @@ def run_cloud_analyze(settings: Settings) -> int:
             )
         return 1
     finally:
+        stop.set()
         _stop_background()
         lock.release()
