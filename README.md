@@ -170,10 +170,25 @@ Durable sync uploads immutable Parquet (`if_generation_match=0`) and deletes loc
 | `spread_bps` | `(ask-bid)/mid * 1e4` from local BBO |
 | Depth `±X bp` | Quote notional within X bp of mid on each side |
 | `two_sided_depth_*` | `min(bid_depth, ask_depth)` — avoids one-sided illusions |
-| Trades/min | **Market-level** print frequency (≠ your maker fill probability) |
+| Trades/min | **Market-level** print frequency (≠ Estimated Maker Fill) |
+| Estimated Maker Fill | Virtual touch-quote fill opportunity from public books + regular trades (not actual fill probability) |
+| Estimated Maker Edge | `fill_rate × (half_spread + maker_markout − maker_fee)`; explanatory, not expected profit |
 | Spread persistence | Fraction of time / run lengths where spread ≥ threshold |
 | Volatility | Abs log mid moves over 5s/30s/60s (1s uses consecutive-sample proxy when sampling at 5s) |
 | Maker markout | Post-trade mid move from the **maker** perspective (positive = maker-favorable) |
+
+### Estimated Maker Fill (v1)
+
+Analyzer-only metric over the bounded rolling analysis window (`analysis_scope=rolling`).
+
+- Virtual maker buy @ Best Bid / sell @ Best Ask on downsampled usable book snapshots (30s buckets)
+- Eligible aggressive flow over **5s** and **30s** horizons (regular trades only)
+- **Optimistic**: touch queue near front; fill if eligible notional ≥ order size
+- **Conservative**: full displayed touch size ahead; fill if eligible notional ≥ touch size + order size
+- Sizes: **$25 / $50 / $100** (ranking uses **$50 conservative**, market-level = min(bid, ask))
+- Sample quality: insufficient (<100), preliminary (100–499), reliable (≥500)
+- Insufficient samples → `null` (not 0%). Observed zero opportunity with enough samples → `0`
+- Does **not** observe actual queue position, own orders, cancels/amends, or cancel latency
 
 ### Maker markout sign
 
@@ -188,13 +203,15 @@ Implemented only in `src/lighter_mm/scoring.py` (easy to retune).
 
 Default weight mix (cross-sectional percentile ranks):
 
-- 25 trade activity
+- 15 trade activity
+- 20 Estimated Maker Fill ($50 / 30s / conservative)
 - 20 spread (capped diminishing returns)
-- 20 two-sided depth
-- 25 maker markout
+- 15 two-sided depth
+- 20 maker markout
 - 10 data quality / persistence
 
 Hard penalties for low coverage, sparse trades, thin books, negative / deeply negative markout.
+Missing Estimated Fill samples are treated as unavailable (not forced to the bottom percentile).
 
 Candidates are split into letter ranks **A/B/C/D**.
 

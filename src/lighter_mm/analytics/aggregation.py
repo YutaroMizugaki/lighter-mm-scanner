@@ -17,6 +17,13 @@ from lighter_mm.analytics.book_metrics import (
     _volatility_explain_plans,
     _volatility_sql,
 )
+from lighter_mm.analytics.estimated_fill_metrics import (
+    _empty_estimated_fill_stats,
+    aggregate_estimated_fill_sql,
+    attach_estimated_maker_edge,
+    estimated_fill_explain_plans,
+    sample_quality,
+)
 from lighter_mm.analytics.markout_metrics import (
     _aggregate_markouts_sql,
     _empty_markout_stats,
@@ -443,8 +450,25 @@ def analyze_range(
 
     trade_count = 0
     trade_agg: dict[int, dict[str, Any]] = {}
+    estimated_fill_agg: dict[int, dict[str, Any]] = {}
     if trade_valid:
-        trade_cols = "timestamp_ms, market_id, symbol, trade_id, usd_amount, type"
+        try:
+            trade_available = _probe_parquet_columns(con, file_paths=trade_valid)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("trade parquet column probe failed: %s", exc)
+            trade_available = set()
+        price_col = (
+            "price" if "price" in trade_available else "CAST(NULL AS DOUBLE) AS price"
+        )
+        is_maker_ask_col = (
+            "is_maker_ask"
+            if "is_maker_ask" in trade_available
+            else "CAST(NULL AS BOOLEAN) AS is_maker_ask"
+        )
+        trade_cols = (
+            "timestamp_ms, market_id, symbol, trade_id, usd_amount, type, "
+            f"{price_col}, {is_maker_ask_col}"
+        )
         if _read_view(
             con,
             "trade_raw_view",
@@ -469,6 +493,17 @@ def analyze_range(
                 "analysis phase=trade_aggregate elapsed=%.3fs trade_rows=%s rss_mb=%.1f",
                 time.monotonic() - t_trade,
                 trade_count,
+                rss,
+            )
+            t_fill = time.monotonic()
+            estimated_fill_agg = aggregate_estimated_fill_sql(con)
+            rss = _rss_mb()
+            if benchmark_profile:
+                profile["rss_after_estimated_fill_mb"] = rss
+            log.info(
+                "analysis phase=estimated_fill elapsed=%.3fs markets=%s rss_mb=%.1f",
+                time.monotonic() - t_fill,
+                len(estimated_fill_agg),
                 rss,
             )
 
@@ -507,7 +542,15 @@ def analyze_range(
                 rss,
             )
 
-    rows = _merge_market_rows(book_agg, persistence, volatility, trade_agg, markout_agg, hours)
+    rows = _merge_market_rows(
+        book_agg,
+        persistence,
+        volatility,
+        trade_agg,
+        markout_agg,
+        estimated_fill_agg,
+        hours,
+    )
 
     t_score = time.monotonic()
     thresholds = CandidateThresholds(
@@ -554,6 +597,10 @@ def analyze_range(
         result["benchmark_profile"] = profile
     if explain_volatility:
         result["volatility_explain"] = _volatility_explain_plans(con, settings)
+        try:
+            result["estimated_fill_explain"] = estimated_fill_explain_plans(con)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("estimated fill EXPLAIN failed: %s", exc)
     return result
 
 
@@ -598,14 +645,16 @@ def _merge_market_rows(
     volatility: dict[int, dict[str, Any]],
     trade_agg: dict[int, dict[str, Any]],
     markout_agg: dict[int, dict[str, Any]],
+    estimated_fill_agg: dict[int, dict[str, Any]],
     hours: float,
 ) -> list[dict[str, Any]]:
-    all_ids = set(book_agg) | set(trade_agg) | set(markout_agg)
+    all_ids = set(book_agg) | set(trade_agg) | set(markout_agg) | set(estimated_fill_agg)
     rows: list[dict[str, Any]] = []
     for mid in sorted(all_ids):
         row: dict[str, Any] = {
             "market_id": mid,
             "analysis_window_hours": hours,
+            "analysis_scope": "rolling",
             "observation_hours": 0.0,
         }
         if mid in book_agg:
@@ -615,11 +664,18 @@ def _merge_market_rows(
             row["data_coverage_pct"] = 0.0
             row["observation_hours"] = 0.0
         row.setdefault("analysis_window_hours", hours)
+        row.setdefault("analysis_scope", "rolling")
         row.setdefault("observation_hours", 0.0)
         row.update(persistence.get(mid, {}))
         row.update(volatility.get(mid, {}))
         row.update(trade_agg.get(mid, _empty_trade_stats()))
         row.update(markout_agg.get(mid, _empty_markout_stats()))
+        m5c = int(row.get("markout_5s_count") or 0)
+        m30c = int(row.get("markout_30s_count") or 0)
+        row["markout_sample_quality"] = sample_quality(min(m5c, m30c))
+        row.update(estimated_fill_agg.get(mid, _empty_estimated_fill_stats()))
+        # Maker fee is not on the analyzer row path today; edge excludes fee (0).
+        attach_estimated_maker_edge(row)
         rows.append(row)
     return rows
 

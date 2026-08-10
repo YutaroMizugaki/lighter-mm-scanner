@@ -183,6 +183,7 @@ def build_dashboard_payload(
         "started_at": state.started_at if state else None,
         "observation_hours": obs_hours,
         "run_observation_hours": obs_hours,
+        "analysis_scope": "rolling",
         "analysis_window_hours": ranked_window_hours,
         "observation_target_hours": state.observation_target_hours if state else window_hours,
         "markets": len(scored),
@@ -281,8 +282,32 @@ def _market_row(s: ScoredMarket) -> dict[str, Any]:
         "total_trade_count": r.get("total_trade_count"),
         "markout_5s_count": r.get("markout_5s_count"),
         "markout_30s_count": r.get("markout_30s_count"),
+        "markout_sample_quality": r.get("markout_sample_quality"),
         "maker_markout_5s_median_bps": r.get("maker_markout_5s_median_bps"),
         "maker_markout_30s_median_bps": r.get("maker_markout_30s_median_bps"),
+        "estimated_maker_fill_rate_5s_conservative": r.get(
+            "estimated_maker_fill_rate_5s_conservative"
+        ),
+        "estimated_maker_fill_rate_30s_conservative": r.get(
+            "estimated_maker_fill_rate_30s_conservative"
+        ),
+        "estimated_maker_fill_rate_5s_optimistic": r.get(
+            "estimated_maker_fill_rate_5s_optimistic"
+        ),
+        "estimated_maker_fill_rate_30s_optimistic": r.get(
+            "estimated_maker_fill_rate_30s_optimistic"
+        ),
+        "estimated_maker_fill_samples": r.get("estimated_maker_fill_samples"),
+        "estimated_maker_fill_sample_quality": r.get(
+            "estimated_maker_fill_sample_quality"
+        ),
+        "estimated_maker_edge_5s_bps": r.get("estimated_maker_edge_5s_bps"),
+        "estimated_maker_edge_30s_bps": r.get("estimated_maker_edge_30s_bps"),
+        "estimated_maker_edge_fee_included": r.get(
+            "estimated_maker_edge_fee_included"
+        ),
+        "analysis_scope": r.get("analysis_scope"),
+        "analysis_window_hours": r.get("analysis_window_hours"),
         "current_funding_rate": r.get("current_funding_rate"),
         "data_coverage_pct": r.get("data_coverage_pct"),
         "observation_coverage_pct": r.get("observation_coverage_pct"),
@@ -332,6 +357,8 @@ def _market_detail(s: ScoredMarket) -> dict[str, Any]:
             "p95_book_update_age_seconds": r.get("p95_book_update_age_seconds"),
             "size_fit": s.size_fit,
             "penalties": s.penalties,
+            "estimated_maker_fill_by_size": r.get("estimated_maker_fill_by_size"),
+            "estimated_maker_fill_order_usd_default": 50,
         }
     )
     return base
