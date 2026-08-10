@@ -146,10 +146,10 @@ export function statusHealthNote(
     return "No active collector run is available to analyze.";
   }
   if (status === "ERROR") {
-    return "Analyzer run failed — see error details below.";
+    return "The latest analysis run failed. Prior valid results may still be shown.";
   }
   if (status === "DEGRADED") {
-    return "一部の収集データを読み込めませんでした。破損ファイルを除外して解析を継続しています。";
+    return "Some source data could not be processed. The latest valid analysis is still shown.";
   }
   if (status === "STALE") {
     return "Analysis results are older than 30m (expected cadence: 30m).";

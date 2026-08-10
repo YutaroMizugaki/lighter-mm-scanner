@@ -1,29 +1,28 @@
-import MarketsClient from "./MarketsClient";
+import PublicErrorState from "@/components/PublicErrorState";
 import { getMarketsResult } from "@/lib/api";
+import { publicDataUnavailableMessage } from "@/lib/public";
+import MarketsClient from "./MarketsClient";
 
 export default async function MarketsPage() {
   const result = await getMarketsResult();
 
   if (!result.ok) {
-    return (
-      <section className="card">
-        <h2>Failed to load markets.json</h2>
-        <p>Dashboard data fetch failed.</p>
-        <p className="muted" style={{ fontSize: "0.85rem" }}>
-          {result.error}
-          {result.status != null ? ` (HTTP ${result.status})` : ""}
-        </p>
-      </section>
-    );
+    const msg = publicDataUnavailableMessage("markets");
+    return <PublicErrorState title={msg.title} body={msg.body} />;
   }
 
   const markets = result.data.markets ?? [];
   return (
-    <section className="card">
-      <h2>All Markets</h2>
-      <p className="muted">Search / sort / filter over aggregate scores (not raw Parquet).</p>
+    <section className="panel">
+      <div className="section-header">
+        <h1 style={{ margin: 0, fontSize: "1.35rem" }}>Markets</h1>
+        <p className="section-lead">
+          Search, sort, and compare research rankings across Lighter markets. Depth and activity
+          are shown alongside Estimated Fill so you can separate liquidity from fill estimates.
+        </p>
+      </div>
       {markets.length === 0 ? (
-        <p className="muted">No markets in aggregate yet (collector has published an empty list).</p>
+        <p className="muted">No markets are available in the latest analysis yet.</p>
       ) : (
         <MarketsClient markets={markets} />
       )}
