@@ -10,6 +10,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from lighter_mm.analytics.real_benchmark import RESULT_PASS
 from lighter_mm.storage.state import MarketLifecycleEntry, RunState
 from tests.test_collector_analyzer_split import _write_book_parquet
@@ -32,6 +34,26 @@ def _write_state(data_dir: Path, state: RunState) -> None:
     state_dir = data_dir / "state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "state.json").write_text(state.model_dump_json())
+
+
+@pytest.mark.parametrize(
+    ("hours", "start_ms", "end_ms", "message"),
+    [
+        (1.0, 1_000, None, "use either"),
+        (None, 1_000, None, "provide --hours or both"),
+        (float("nan"), None, None, "positive finite"),
+        (None, 2_000, 1_000, "greater than"),
+    ],
+)
+def test_validate_window_rejects_ambiguous_or_invalid_ranges(
+    hours: float | None,
+    start_ms: int | None,
+    end_ms: int | None,
+    message: str,
+) -> None:
+    args = Namespace(hours=hours, start_ms=start_ms, end_ms=end_ms)
+    with pytest.raises(SystemExit, match=message):
+        _benchmark._validate_window_args(args)
 
 
 def test_resolve_window_uses_state_watermark_not_current_time(tmp_path: Path) -> None:

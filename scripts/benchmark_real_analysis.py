@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import subprocess
 import sys
@@ -116,13 +117,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 def _validate_window_args(args: argparse.Namespace) -> None:
     has_hours = args.hours is not None
-    has_explicit = args.start_ms is not None and args.end_ms is not None
-    if has_hours and has_explicit:
+    has_start = args.start_ms is not None
+    has_end = args.end_ms is not None
+    if has_hours and (has_start or has_end):
         raise SystemExit("use either --hours or --start-ms/--end-ms, not both")
-    if not has_hours and not has_explicit:
+    if has_start != has_end or (not has_hours and not has_start):
         raise SystemExit("provide --hours or both --start-ms and --end-ms")
-    if has_hours and float(args.hours) <= 0:
-        raise SystemExit("--hours must be > 0")
+    if has_hours and (not math.isfinite(float(args.hours)) or float(args.hours) <= 0):
+        raise SystemExit("--hours must be a positive finite number")
+    if has_start and args.end_ms <= args.start_ms:
+        raise SystemExit("--end-ms must be greater than --start-ms")
 
 
 def _state_path(data_dir: Path) -> Path:

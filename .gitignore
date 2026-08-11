@@ -24,5 +24,6 @@ htmlcov/
 dashboard/node_modules/
 dashboard/.next/
 dashboard/out/
+*.tsbuildinfo
 /tmp/
 *.log
