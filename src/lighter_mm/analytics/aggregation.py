@@ -728,7 +728,7 @@ def analyze_range(
     )
     t_stage1 = time.monotonic()
     try:
-        stage1_markets = run_stage1(
+        stage1_markets, stage1_window_stats = run_stage1(
             stage1_con,
             settings,
             start_ms=start_ms,
@@ -808,6 +808,7 @@ def analyze_range(
         stage1_elapsed=stage1_elapsed,
         stage2_elapsed=stage2_elapsed,
         selected_market_ids=selected,
+        stage1_window_stats=stage1_window_stats,
     )
 
 

@@ -21,6 +21,7 @@ from lighter_mm.analytics.parquet_source import (
     _probe_parquet_columns,
     _read_view,
 )
+from lighter_mm.analytics.trade_metrics import _aggregate_trade_slots_sql
 from lighter_mm.config import Settings
 from lighter_mm.scoring import _pct_rank
 from lighter_mm.storage.state import MarketLifecycleEntry
@@ -206,10 +207,20 @@ def run_stage1(
     trade_valid: list[str],
     markout_valid: list[str] | None = None,
     market_lifecycle: dict[int, MarketLifecycleEntry] | None = None,
-) -> list[Stage1Market]:
-    """Lightweight per-market aggregation over all markets (no heavy materialization)."""
+) -> tuple[list[Stage1Market], dict[str, Any]]:
+    """Lightweight per-market aggregation over all markets (no heavy materialization).
+
+    Returns per-market Stage 1 metrics plus window-level row counts aligned with the
+    full Analyzer (all markets in the analysis window, not Stage 2 subset).
+    """
+    empty_stats: dict[str, Any] = {
+        "book_row_count": 0,
+        "trade_row_count": 0,
+        "markout_row_count": 0,
+        "latest_book_event_ms": None,
+    }
     if not book_valid:
-        return []
+        return [], empty_stats
 
     try:
         available_cols = _probe_parquet_columns(con, file_paths=book_valid)
@@ -217,7 +228,7 @@ def run_stage1(
         log.warning("stage1 book column probe failed; isolating: %s", exc)
         book_valid, _ = _isolate_readable_parquet_files(con, book_valid)
         if not book_valid:
-            return []
+            return [], empty_stats
         available_cols = _probe_parquet_columns(con, file_paths=book_valid)
 
     book_cols = _book_projection(available_cols)
@@ -230,7 +241,7 @@ def run_stage1(
         end_ms,
         file_paths=book_valid,
     ):
-        return []
+        return [], empty_stats
 
     interval_ms = int(settings.book_sample_interval_seconds * 1000)
     _prepare_stage1_book_views(con)
@@ -304,6 +315,7 @@ def run_stage1(
 
     book_rows = {int(r[0]): r for r in con.execute(book_sql).fetchall()}
 
+    trade_raw_row_count = 0
     trade_rows: dict[int, tuple[Any, ...]] = {}
     if trade_valid:
         try:
@@ -326,6 +338,9 @@ def run_stage1(
             end_ms,
             file_paths=trade_valid,
         ):
+            trade_raw_row_count = int(
+                con.execute("SELECT COUNT(*) FROM stage1_trade_raw").fetchone()[0]
+            )
             con.execute(
                 """
                 CREATE OR REPLACE VIEW stage1_trade_deduped AS
@@ -338,45 +353,37 @@ def run_stage1(
                 ) WHERE rn = 1
                 """
             )
-            trade_count_sql = """
+            tpm_by_id = _aggregate_trade_slots_sql(
+                con,
+                market_windows="stage1_market_windows",
+                trade_deduped="stage1_trade_deduped",
+            )
+            trade_meta_sql = """
             SELECT
                 market_id,
                 MAX(symbol) AS symbol,
-                COUNT(*) AS trade_count,
-                SUM(usd_amount) AS trade_volume,
                 MIN(timestamp_ms) AS trade_first_seen_at,
                 MAX(timestamp_ms) AS trade_last_seen_at
             FROM stage1_trade_deduped
             GROUP BY market_id
             """
-            tpm_sql = """
-            WITH per_minute AS (
-                SELECT
-                    market_id,
-                    (timestamp_ms // 60000) AS minute_idx,
-                    COUNT(*)::DOUBLE AS cnt
-                FROM stage1_trade_deduped
-                GROUP BY market_id, minute_idx
-            )
-            SELECT
-                market_id,
-                AVG(cnt) AS trades_per_minute_mean,
-                quantile_cont(cnt, 0.5) AS trades_per_minute_median
-            FROM per_minute
-            GROUP BY market_id
-            """
-            tpm_by_id = {
-                int(r[0]): (r[1], r[2])
-                for r in con.execute(tpm_sql).fetchall()
+            trade_meta = {
+                int(r[0]): r for r in con.execute(trade_meta_sql).fetchall()
             }
-            for row in con.execute(trade_count_sql).fetchall():
-                mid = int(row[0])
-                tpm = tpm_by_id.get(mid)
-                trade_rows[mid] = row + (
-                    tpm[0] if tpm else None,
-                    tpm[1] if tpm else None,
+            for mid, slots in tpm_by_id.items():
+                meta = trade_meta.get(mid)
+                trade_rows[mid] = (
+                    mid,
+                    meta[1] if meta else None,
+                    slots["total_trade_count"],
+                    slots["total_quote_volume"],
+                    meta[2] if meta else None,
+                    meta[3] if meta else None,
+                    slots["trades_per_minute_mean"],
+                    slots["trades_per_minute_median"],
                 )
 
+    markout_raw_row_count = 0
     markout_by_id: dict[int, dict[str, Any]] = {}
     if markout_valid:
         markout_cols = (
@@ -391,6 +398,9 @@ def run_stage1(
             end_ms,
             file_paths=markout_valid,
         ):
+            markout_raw_row_count = int(
+                con.execute("SELECT COUNT(*) FROM stage1_markout_raw_view").fetchone()[0]
+            )
             con.execute(
                 "CREATE OR REPLACE TABLE markout_raw AS "
                 "SELECT * FROM stage1_markout_raw_view"
@@ -482,7 +492,23 @@ def run_stage1(
 
     _apply_eligibility(markets, settings)
     _apply_screening_scores(markets)
-    return markets
+
+    book_row_count = sum(m.book_observation_count for m in markets)
+    latest_book_event_ms: int | None = None
+    for m in markets:
+        if m.book_last_seen_at is not None:
+            latest_book_event_ms = max(
+                latest_book_event_ms or m.book_last_seen_at,
+                m.book_last_seen_at,
+            )
+
+    window_stats = {
+        "book_row_count": book_row_count,
+        "trade_row_count": trade_raw_row_count,
+        "markout_row_count": markout_raw_row_count,
+        "latest_book_event_ms": latest_book_event_ms,
+    }
+    return markets, window_stats
 
 
 def _apply_eligibility(markets: list[Stage1Market], settings: Settings) -> None:
@@ -634,6 +660,7 @@ def merge_screening_and_full_results(
     stage1_elapsed: float,
     stage2_elapsed: float,
     selected_market_ids: list[int],
+    stage1_window_stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Combine Stage 1 screening with Stage 2 full analysis output."""
     selected_set = frozenset(selected_market_ids)
@@ -660,6 +687,17 @@ def merge_screening_and_full_results(
     eligible_count = sum(1 for m in stage1 if m.eligible)
     total_elapsed = stage1_elapsed + stage2_elapsed
 
+    if stage1_window_stats is None:
+        stage1_window_stats = {
+            "book_row_count": sum(m.book_observation_count for m in stage1),
+            "trade_row_count": 0,
+            "markout_row_count": 0,
+            "latest_book_event_ms": max(
+                (m.book_last_seen_at for m in stage1 if m.book_last_seen_at is not None),
+                default=None,
+            ),
+        }
+
     result: dict[str, Any] = {
         "hours": hours,
         "start_ms": start_ms,
@@ -669,10 +707,10 @@ def merge_screening_and_full_results(
         "screened": screened,
         "candidates": [s for s in scored if s.candidate],
         "avoid": full_results.get("avoid") or [],
-        "book_row_count": full_results.get("book_row_count", 0),
-        "latest_book_event_ms": full_results.get("latest_book_event_ms"),
-        "trade_row_count": full_results.get("trade_row_count", 0),
-        "markout_row_count": full_results.get("markout_row_count", 0),
+        "book_row_count": stage1_window_stats.get("book_row_count", 0),
+        "latest_book_event_ms": stage1_window_stats.get("latest_book_event_ms"),
+        "trade_row_count": stage1_window_stats.get("trade_row_count", 0),
+        "markout_row_count": stage1_window_stats.get("markout_row_count", 0),
         "parquet_health": full_results.get("parquet_health"),
         "error": full_results.get("error"),
         "two_stage": {

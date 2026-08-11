@@ -143,7 +143,7 @@ def test_stage1_aggregates_all_markets(tmp_path: Path) -> None:
     trade_valid, _ = prepare_parquet_dataset(tmp_path / "trades", quarantine=False)
     markout_valid, _ = prepare_parquet_dataset(tmp_path / "markouts", quarantine=False)
     con = _connect(tmp_path)
-    stage1 = run_stage1(
+    stage1, _ = run_stage1(
         con,
         settings,
         start_ms=start_ms,
@@ -178,7 +178,7 @@ def test_stage1_dedupes_duplicate_books(tmp_path: Path) -> None:
 
     book_valid, _ = prepare_parquet_dataset(tmp_path / "book_samples", quarantine=False)
     con = _connect(tmp_path)
-    stage1 = run_stage1(
+    stage1, _ = run_stage1(
         con,
         settings,
         start_ms=start_ms,
@@ -204,7 +204,7 @@ def test_stage1_excludes_unusable_books_from_spread(tmp_path: Path) -> None:
 
     book_valid, _ = prepare_parquet_dataset(tmp_path / "book_samples", quarantine=False)
     con = _connect(tmp_path)
-    stage1 = run_stage1(
+    stage1, _ = run_stage1(
         con,
         settings,
         start_ms=start_ms,
@@ -217,7 +217,8 @@ def test_stage1_excludes_unusable_books_from_spread(tmp_path: Path) -> None:
     assert stage1[0].median_spread_bps is not None
 
 
-def test_stage1_tpm_median_not_mean(tmp_path: Path) -> None:
+def test_stage1_tpm_matches_full_analyzer(tmp_path: Path) -> None:
+    """Stage 1 TPM must match full Analyzer slot-based semantics (zeros for inactive minutes)."""
     start_ms = int(time.time() * 1000) - 3_600_000
     end_ms = start_ms + 3_600_000
     trades = [
@@ -233,12 +234,13 @@ def test_stage1_tpm_median_not_mean(tmp_path: Path) -> None:
     _write_parquet(trade_dir / "trades.parquet", trades)
 
     settings = Settings(data_dir=tmp_path)
+    hours = (end_ms - start_ms) / 3_600_000.0
     from lighter_mm.storage.parquet_validation import prepare_parquet_dataset
 
     book_valid, _ = prepare_parquet_dataset(tmp_path / "book_samples", quarantine=False)
     trade_valid, _ = prepare_parquet_dataset(tmp_path / "trades", quarantine=False)
     con = _connect(tmp_path)
-    stage1 = run_stage1(
+    stage1, _ = run_stage1(
         con,
         settings,
         start_ms=start_ms,
@@ -247,12 +249,50 @@ def test_stage1_tpm_median_not_mean(tmp_path: Path) -> None:
         trade_valid=trade_valid,
     )
     con.close()
+
+    legacy = _analyze_range_impl(
+        settings,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        hours=hours,
+        read_only=True,
+    )
+    legacy_row = next(
+        r for r in legacy["scored"] if int(r.row["market_id"]) == 1
+    ).row
+
     m = stage1[0]
-    assert m.trades_per_minute_median is not None
-    assert m.trades_per_minute_mean is not None
-    assert m.trades_per_minute_median == 1.0
-    assert m.trades_per_minute_mean > 10.0
+    assert m.trades_per_minute_mean == legacy_row["trades_per_minute_mean"]
+    assert m.trades_per_minute_median == legacy_row["trades_per_minute_median"]
     assert m.trades_per_minute_median != m.trades_per_minute_mean
+
+
+def test_two_stage_top_level_row_counts_match_legacy(tmp_path: Path) -> None:
+    start_ms, end_ms = _seed_multi_market_fixture(tmp_path, n_markets=5)
+    legacy = analyze_range(
+        Settings(data_dir=tmp_path, analyzer_two_stage_enabled=False),
+        start_ms=start_ms,
+        end_ms=end_ms,
+        read_only=True,
+    )
+    staged = analyze_range(
+        Settings(
+            data_dir=tmp_path,
+            analyzer_two_stage_enabled=True,
+            analyzer_stage1_min_coverage=0.0,
+            analyzer_stage1_min_trades=0,
+            analyzer_stage1_min_spread_bps=0.0,
+            analyzer_stage2_top_n=2,
+        ),
+        start_ms=start_ms,
+        end_ms=end_ms,
+        read_only=True,
+    )
+    assert staged["book_row_count"] == legacy["book_row_count"]
+    assert staged["trade_row_count"] == legacy["trade_row_count"]
+    assert staged["markout_row_count"] == legacy["markout_row_count"]
+    assert staged["latest_book_event_ms"] == legacy["latest_book_event_ms"]
+    assert staged["two_stage"]["stage2_book_row_count"] < legacy["book_row_count"]
 
 
 def test_eligibility_and_top_n_selection() -> None:
