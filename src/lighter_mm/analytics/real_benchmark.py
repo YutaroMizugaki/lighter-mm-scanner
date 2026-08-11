@@ -193,9 +193,44 @@ def compare_snapshots(
         "latest_book_event_ms"
     )
 
+    legacy_book_rows = int(legacy.get("book_row_count") or 0)
+    two_stage_book_rows = int(two_stage.get("book_row_count") or 0)
+    if legacy_book_rows == 0:
+        hard_failures.append("legacy book_row_count is 0")
+    if two_stage_book_rows == 0:
+        hard_failures.append("two-stage book_row_count is 0")
+
     legacy_markets = legacy.get("markets") or {}
     two_stage_markets = two_stage.get("markets") or {}
     stage2_ids = sorted(two_stage_markets.keys())
+    two_stage_output_count = len(two_stage_markets)
+
+    two_stage_meta = two_stage.get("two_stage") or {}
+    markets_selected = int(two_stage_meta.get("markets_selected") or 0)
+    markets_full_analyzed = int(two_stage_meta.get("markets_full_analyzed") or 0)
+    markets_scored = int(two_stage.get("markets_scored") or 0)
+
+    if two_stage_output_count == 0:
+        hard_failures.append(
+            f"no two-stage markets to compare (output count=0, "
+            f"markets_selected={markets_selected}, "
+            f"markets_full_analyzed={markets_full_analyzed})"
+        )
+    if markets_selected != markets_full_analyzed:
+        hard_failures.append(
+            f"markets_selected ({markets_selected}) != "
+            f"markets_full_analyzed ({markets_full_analyzed})"
+        )
+    if markets_full_analyzed != two_stage_output_count:
+        hard_failures.append(
+            f"markets_full_analyzed ({markets_full_analyzed}) != "
+            f"two_stage output markets ({two_stage_output_count})"
+        )
+    if markets_scored != two_stage_output_count:
+        hard_failures.append(
+            f"markets_scored ({markets_scored}) != "
+            f"two_stage output markets ({two_stage_output_count})"
+        )
 
     mismatches: list[dict[str, Any]] = []
     mismatch_count = 0
@@ -275,7 +310,6 @@ def compare_snapshots(
         ((legacy_rss - two_stage_rss) / legacy_rss * 100.0) if legacy_rss > 0 else 0.0
     )
 
-    two_stage_meta = two_stage.get("two_stage") or {}
     markets_total_legacy = int(legacy.get("markets_listed") or legacy.get("markets_scored") or 0)
     markets_total_two = int(two_stage_meta.get("markets_total") or 0)
     if markets_total_two and markets_total_legacy and markets_total_two != markets_total_legacy:

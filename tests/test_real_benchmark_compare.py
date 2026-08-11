@@ -145,3 +145,54 @@ def test_analyzer_error_fails() -> None:
     legacy["error"] = "boom"
     cmp = compare_snapshots(legacy, two_stage)
     assert cmp["result"] == RESULT_FAIL
+
+
+def test_compare_zero_book_rows_fails() -> None:
+    markets = {1: _market(1)}
+    legacy = _base_snapshot("legacy", markets)
+    two_stage = _base_snapshot("two-stage", markets)
+    legacy["book_row_count"] = 0
+    cmp = compare_snapshots(legacy, two_stage)
+    assert cmp["result"] == RESULT_FAIL
+    assert any("legacy book_row_count is 0" in f for f in cmp["hard_failures"])
+
+
+def test_compare_zero_stage2_markets_fails() -> None:
+    markets = {1: _market(1)}
+    legacy = _base_snapshot("legacy", markets)
+    two_stage = _base_snapshot("two-stage", {})
+    two_stage["markets"] = {}
+    two_stage["markets_scored"] = 0
+    two_stage["two_stage"]["markets_selected"] = 0
+    two_stage["two_stage"]["markets_full_analyzed"] = 0
+    cmp = compare_snapshots(legacy, two_stage)
+    assert cmp["result"] == RESULT_FAIL
+    assert any("no two-stage markets to compare" in f for f in cmp["hard_failures"])
+
+
+def test_compare_selected_but_not_analyzed_fails() -> None:
+    markets = {1: _market(1)}
+    legacy = _base_snapshot("legacy", markets)
+    two_stage = _base_snapshot("two-stage", {})
+    two_stage["markets"] = {}
+    two_stage["markets_scored"] = 0
+    two_stage["two_stage"]["markets_selected"] = 1
+    two_stage["two_stage"]["markets_full_analyzed"] = 0
+    cmp = compare_snapshots(legacy, two_stage)
+    assert cmp["result"] == RESULT_FAIL
+    assert any("markets_selected (1) != markets_full_analyzed (0)" in f for f in cmp["hard_failures"])
+
+
+def test_compare_output_market_count_mismatch_fails() -> None:
+    markets = {1: _market(1), 2: _market(2, spread=3.0, score=8.0)}
+    legacy = _base_snapshot("legacy", markets)
+    two_stage = _base_snapshot("two-stage", {1: markets[1]})
+    two_stage["markets_scored"] = 1
+    two_stage["two_stage"]["markets_selected"] = 2
+    two_stage["two_stage"]["markets_full_analyzed"] = 2
+    cmp = compare_snapshots(legacy, two_stage)
+    assert cmp["result"] == RESULT_FAIL
+    assert any(
+        "markets_full_analyzed (2) != two_stage output markets (1)" in f
+        for f in cmp["hard_failures"]
+    )
