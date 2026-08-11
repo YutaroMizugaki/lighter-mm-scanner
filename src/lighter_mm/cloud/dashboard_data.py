@@ -227,6 +227,10 @@ def build_dashboard_payload(
             "読み取り専用のリサーチツールです。売買・ウォレット接続・APIキーは使用しません。"
             "表示されるスプレッドや取引回数は利益を保証するものではありません。"
             "実際のマーケットメイクでは、約定確率・逆選択・在庫リスクを別途検証してください。"
+            " Paper MM is a historical simulation based on sampled public market data. "
+            "It does not reproduce actual exchange queue position, latency, order acknowledgement, "
+            "cancellations, hidden liquidity, network delays, or exact fill probability. "
+            "No real orders are placed."
         ),
     }
 
@@ -312,6 +316,17 @@ def _market_row(s: ScoredMarket) -> dict[str, Any]:
         "estimated_maker_edge_fee_included": r.get(
             "estimated_maker_edge_fee_included"
         ),
+        "paper_mm_total_pnl_usd": r.get("paper_mm_total_pnl_usd"),
+        "paper_mm_round_trips": r.get("paper_mm_round_trips"),
+        "paper_mm_filled_notional_usd": r.get("paper_mm_filled_notional_usd"),
+        "paper_mm_pnl_per_hour_usd": r.get("paper_mm_pnl_per_hour_usd"),
+        "paper_mm_pnl_bps_on_filled_notional": r.get("paper_mm_pnl_bps_on_filled_notional"),
+        "paper_mm_max_abs_inventory_usd": r.get("paper_mm_max_abs_inventory_usd"),
+        "paper_mm_time_with_inventory_pct": r.get("paper_mm_time_with_inventory_pct"),
+        "paper_mm_median_holding_seconds": r.get("paper_mm_median_holding_seconds"),
+        "paper_mm_markout_5s_median_bps": r.get("paper_mm_markout_5s_median_bps"),
+        "paper_mm_markout_30s_median_bps": r.get("paper_mm_markout_30s_median_bps"),
+        "paper_mm_status": r.get("paper_mm_status"),
         "analysis_scope": r.get("analysis_scope"),
         "analysis_window_hours": r.get("analysis_window_hours"),
         "current_funding_rate": r.get("current_funding_rate"),
@@ -365,6 +380,36 @@ def _market_detail(s: ScoredMarket) -> dict[str, Any]:
             "penalties": s.penalties,
             "estimated_maker_fill_by_size": r.get("estimated_maker_fill_by_size"),
             "estimated_maker_fill_order_usd_default": DEFAULT_ORDER_USD,
+            "paper_mm_order_usd": r.get("paper_mm_order_usd"),
+            "paper_mm_queue_model": r.get("paper_mm_queue_model"),
+            "paper_mm_quote_count": r.get("paper_mm_quote_count"),
+            "paper_mm_bid_fills": r.get("paper_mm_bid_fills"),
+            "paper_mm_ask_fills": r.get("paper_mm_ask_fills"),
+            "paper_mm_partial_fills": r.get("paper_mm_partial_fills"),
+            "paper_mm_full_fills": r.get("paper_mm_full_fills"),
+            "paper_mm_filled_notional_usd": r.get("paper_mm_filled_notional_usd"),
+            "paper_mm_round_trips": r.get("paper_mm_round_trips"),
+            "paper_mm_gross_pnl_usd": r.get("paper_mm_gross_pnl_usd"),
+            "paper_mm_realized_pnl_usd": r.get("paper_mm_realized_pnl_usd"),
+            "paper_mm_unrealized_pnl_usd": r.get("paper_mm_unrealized_pnl_usd"),
+            "paper_mm_fees_usd": r.get("paper_mm_fees_usd"),
+            "paper_mm_total_pnl_usd": r.get("paper_mm_total_pnl_usd"),
+            "paper_mm_pnl_per_hour_usd": r.get("paper_mm_pnl_per_hour_usd"),
+            "paper_mm_max_abs_inventory_usd": r.get("paper_mm_max_abs_inventory_usd"),
+            "paper_mm_time_with_inventory_pct": r.get("paper_mm_time_with_inventory_pct"),
+            "paper_mm_median_holding_seconds": r.get("paper_mm_median_holding_seconds"),
+            "paper_mm_p90_holding_seconds": r.get("paper_mm_p90_holding_seconds"),
+            "paper_mm_max_holding_seconds": r.get("paper_mm_max_holding_seconds"),
+            "paper_mm_markout_5s_median_bps": r.get("paper_mm_markout_5s_median_bps"),
+            "paper_mm_markout_30s_median_bps": r.get("paper_mm_markout_30s_median_bps"),
+            "paper_mm_markout_5s_count": r.get("paper_mm_markout_5s_count"),
+            "paper_mm_markout_30s_count": r.get("paper_mm_markout_30s_count"),
+            "paper_mm_final_inventory_usd": r.get("paper_mm_final_inventory_usd"),
+            "paper_mm_fee_included": r.get("paper_mm_fee_included"),
+            "paper_mm_pnl_bps_on_filled_notional": r.get("paper_mm_pnl_bps_on_filled_notional"),
+            "paper_mm_samples": r.get("paper_mm_samples"),
+            "paper_mm_status": r.get("paper_mm_status"),
+            "paper_mm_gross_spread_capture_usd": r.get("paper_mm_gross_spread_capture_usd"),
         }
     )
     return base

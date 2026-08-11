@@ -125,7 +125,7 @@ Phases:
 
 1. **Data collection** (this repo)
 2. Historical analysis
-3. Paper market maker *(not implemented)*
+3. Paper market maker *(implemented, historical conservative queue simulation)*
 4. Small live MM *(not implemented)*
 
 Collector runs without the dashboard. Dashboard shows the last published aggregates even if the collector is stopped.
