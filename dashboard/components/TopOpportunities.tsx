@@ -43,7 +43,8 @@ export default function TopOpportunities({ candidates, fetchFailed = false }: Pr
                 <tr>
                   <th className="sticky-col">Market</th>
                   <th>Rank</th>
-                  <th>Score</th>
+                  <th title={TOOLTIPS.score}>Score</th>
+                  <th title={TOOLTIPS.effectiveScore}>Effective</th>
                   <th title={TOOLTIPS.estimatedFill}>Est. Fill</th>
                   <th>Spread</th>
                   <th title={TOOLTIPS.makerMarkout}>M5</th>
@@ -65,6 +66,9 @@ export default function TopOpportunities({ candidates, fetchFailed = false }: Pr
                     </td>
                     <td>
                       <ScoreBar score={m.score} />
+                    </td>
+                    <td className="tabular" title={TOOLTIPS.effectiveScore}>
+                      {fmt(m.effective_score ?? m.score, 1)}
                     </td>
                     <td>
                       <EstimatedFillValue

@@ -253,6 +253,17 @@ def build_dashboard_payload(
     }
 
 
+def _confidence_payload(s: ScoredMarket) -> dict[str, Any]:
+    return {
+        "raw_score": round(s.raw_score, 2),
+        "confidence": round(s.confidence, 4),
+        "effective_score": round(s.effective_score, 2),
+        "confidence_label": s.confidence_label,
+        "confidence_reasons": list(s.confidence_reasons),
+        "confidence_breakdown": dict(s.confidence_breakdown),
+    }
+
+
 def _market_card(s: ScoredMarket) -> dict[str, Any]:
     r = s.row
     return {
@@ -263,6 +274,7 @@ def _market_card(s: ScoredMarket) -> dict[str, Any]:
         "median_spread_bps": r.get("median_spread_bps"),
         "maker_markout_5s_median_bps": r.get("maker_markout_5s_median_bps"),
         "maker_markout_30s_median_bps": r.get("maker_markout_30s_median_bps"),
+        **_confidence_payload(s),
     }
 
 
@@ -343,6 +355,7 @@ def _market_row(s: ScoredMarket) -> dict[str, Any]:
         "warnings": warnings,
         "pros": s.pros[:6],
         "cons": s.cons[:6],
+        **_confidence_payload(s),
     }
 
 
@@ -410,6 +423,8 @@ def _market_detail(s: ScoredMarket) -> dict[str, Any]:
             "paper_mm_samples": r.get("paper_mm_samples"),
             "paper_mm_status": r.get("paper_mm_status"),
             "paper_mm_gross_spread_capture_usd": r.get("paper_mm_gross_spread_capture_usd"),
+            "penalties": s.penalties,
+            "confidence_reasons": list(s.confidence_reasons),
         }
     )
     return base

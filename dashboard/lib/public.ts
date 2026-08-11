@@ -286,4 +286,8 @@ export const TOOLTIPS = {
     "Reliability of the Estimated Fill / markout sample. Insufficient means too few observations — not a measured 0%.",
   tradesPerMin: "Market-level trade prints per minute. Not Estimated Maker Fill.",
   score: "Relative research ranking across markets — not an expected return forecast.",
+  confidence:
+    "Data Confidence: sample size, coverage, and observation duration based reliability index. Not a statistical confidence interval.",
+  effectiveScore:
+    "Confidence-adjusted score used for market ranking (Raw Score × Data Confidence).",
 } as const;

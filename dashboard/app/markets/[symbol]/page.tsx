@@ -6,7 +6,7 @@ import RankBadge from "@/components/RankBadge";
 import ScoreBar from "@/components/ScoreBar";
 import SignedValue from "@/components/SignedValue";
 import { getMarket } from "@/lib/api";
-import { fmt, fmtEstimatedFill, fmtPaperBp, fmtPaperCount, fmtPaperUsd } from "@/lib/format";
+import { fmt, fmtEstimatedFill, fmtPaperBp, fmtPaperCount, fmtPaperUsd, fmtPctFraction } from "@/lib/format";
 import {
   ESTIMATED_EDGE_TOOLTIP,
   ESTIMATED_FILL_TOOLTIP,
@@ -80,8 +80,14 @@ export default async function MarketDetailPage({
           </h1>
           <p className="detail-sub">
             Rank {m.letter_rank} · Score {fmt(m.score, 1)}
+            {m.effective_score != null && m.effective_score !== m.score
+              ? ` · Effective ${fmt(m.effective_score, 1)}`
+              : ""}
           </p>
           <p className="detail-sub">{rankSubtext(m.letter_rank, m.is_candidate)}</p>
+          <p className="detail-sub muted" title={TOOLTIPS.confidence}>
+            Letter rank uses raw Score. Ranking uses Effective Score (confidence-adjusted).
+          </p>
         </div>
       </header>
 
@@ -90,6 +96,16 @@ export default async function MarketDetailPage({
           label="Score"
           value={<ScoreBar score={m.score} />}
           title={TOOLTIPS.score}
+        />
+        <MetricCard
+          label="Data Confidence"
+          value={fmtPctFraction(m.confidence, 0)}
+          title={TOOLTIPS.confidence}
+        />
+        <MetricCard
+          label="Effective Score"
+          value={fmt(m.effective_score ?? m.score, 1)}
+          title={TOOLTIPS.effectiveScore}
         />
         <MetricCard
           label="Est. Fill 30s"
@@ -167,6 +183,43 @@ export default async function MarketDetailPage({
           />
         </div>
       </section>
+
+      {m.confidence_breakdown && (
+        <section className="detail-section" aria-labelledby="confidence-heading">
+          <h2 id="confidence-heading">Data Confidence</h2>
+          <p className="section-lead" title={TOOLTIPS.confidence}>
+            Heuristic reliability index from sample sizes, coverage, and observation duration.
+            Not a statistical confidence interval.
+          </p>
+          {m.confidence_reasons && m.confidence_reasons.length > 0 && (
+            <p className="muted">
+              Reasons: {m.confidence_reasons.join(", ")}
+            </p>
+          )}
+          <div className="table-scroll" style={{ marginTop: "0.75rem" }}>
+            <table className="market-table" style={{ minWidth: 360 }}>
+              <thead>
+                <tr>
+                  <th>Component</th>
+                  <th>Confidence</th>
+                </tr>
+              </thead>
+              <tbody>
+                {Object.entries(m.confidence_breakdown).map(([key, val]) => (
+                  <tr key={key}>
+                    <td>{key}</td>
+                    <td className="tabular">
+                      {val === null || val === undefined
+                        ? "—"
+                        : fmtPctFraction(val as number, 0)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       <section className="detail-section" aria-labelledby="execution-heading">
         <h2 id="execution-heading" title={ESTIMATED_FILL_TOOLTIP}>
