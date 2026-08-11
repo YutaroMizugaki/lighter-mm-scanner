@@ -5,7 +5,7 @@ import RankBadge from "@/components/RankBadge";
 import ScoreBar from "@/components/ScoreBar";
 import SignedValue from "@/components/SignedValue";
 import { getCandidatesResult } from "@/lib/api";
-import { fmt, fmtPaperCount, fmtPaperUsd, fmtPctFraction } from "@/lib/format";
+import { fmt, fmtPaperCount, fmtPaperUsd } from "@/lib/format";
 import {
   ESTIMATED_EDGE_TOOLTIP,
   ESTIMATED_FILL_TOOLTIP,

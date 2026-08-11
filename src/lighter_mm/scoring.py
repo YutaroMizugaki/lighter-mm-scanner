@@ -58,9 +58,9 @@ class ScoredMarket:
     recommended_max_order_usd: float | None = None
     size_fit: dict[str, bool] = field(default_factory=dict)
     raw_score: float = 0.0
-    confidence: float = 1.0
+    confidence: float = 0.0
     effective_score: float = 0.0
-    confidence_label: str = "high"
+    confidence_label: str = "low"
     confidence_reasons: list[str] = field(default_factory=list)
     confidence_breakdown: dict[str, Any] = field(default_factory=dict)
 

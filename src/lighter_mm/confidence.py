@@ -50,6 +50,7 @@ _COVERAGE_ANCHORS: tuple[tuple[float, float], ...] = (
     (99.0, 1.0),
 )
 
+
 @dataclass
 class ConfidenceResult:
     confidence: float
@@ -60,14 +61,20 @@ class ConfidenceResult:
 
 
 def sample_confidence(n: float, k: float) -> float:
-    """Hill / saturation curve: n / (n + k)."""
+    """Hill / saturation curve for a validated non-negative sample count."""
+    if not math.isfinite(n) or n < 0:
+        raise ValueError("n must be a finite non-negative number")
     if k <= 0:
         return 1.0
-    nn = max(0.0, float(n))
-    return nn / (nn + k)
+    return float(n) / (float(n) + k)
 
 
 def coverage_confidence_from_pct(coverage_pct: float) -> float:
+    """Piecewise linear confidence for validated coverage in [0, 100]."""
+    if not math.isfinite(coverage_pct):
+        raise ValueError("coverage_pct must be finite")
+    if coverage_pct < 0 or coverage_pct > 100:
+        raise ValueError("coverage_pct must be in [0, 100]")
     if coverage_pct >= 99.0:
         return 1.0
     for i in range(len(_COVERAGE_ANCHORS) - 1):
@@ -82,10 +89,12 @@ def coverage_confidence_from_pct(coverage_pct: float) -> float:
 
 
 def duration_confidence_from_hours(hours: float, tau_hours: float) -> float:
+    """Exponential saturation for validated non-negative observation hours."""
+    if not math.isfinite(hours) or hours < 0:
+        raise ValueError("hours must be a finite non-negative number")
     if tau_hours <= 0:
         return 1.0
-    h = max(0.0, float(hours))
-    return 1.0 - math.exp(-h / tau_hours)
+    return 1.0 - math.exp(-float(hours) / tau_hours)
 
 
 def _is_finite_number(raw: Any) -> bool:
@@ -362,18 +371,6 @@ def compute_market_confidence(
         confidence_reasons=reasons,
         confidence_breakdown=breakdown,
     )
-
-
-def confidence_fields_for_json(result: ConfidenceResult, raw_score: float) -> dict[str, Any]:
-    """Serialize confidence fields for dashboard / API JSON."""
-    return {
-        "raw_score": round(raw_score, 2),
-        "confidence": round(result.confidence, 4),
-        "effective_score": round(result.effective_score, 2),
-        "confidence_label": result.confidence_label,
-        "confidence_reasons": list(result.confidence_reasons),
-        "confidence_breakdown": dict(result.confidence_breakdown),
-    }
 
 
 def scored_market_sort_key(s: Any) -> tuple[float, float, str]:

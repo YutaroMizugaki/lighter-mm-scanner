@@ -8,13 +8,15 @@ import pytest
 
 from lighter_mm.confidence import (
     ConfidenceConfig,
+    _overall_confidence,
     compute_market_confidence,
     coverage_confidence_from_pct,
     duration_confidence_from_hours,
     sample_confidence,
-    _overall_confidence,
+    scored_market_sort_key,
 )
-from lighter_mm.scoring import score_markets
+from lighter_mm.paper_mm import resolve_paper_mm_targets
+from lighter_mm.scoring import ScoredMarket, score_markets
 from tests.helpers.estimated_fill import make_candidate_row
 
 EPS = 0.05
@@ -57,6 +59,26 @@ def _expect_eps_power(weight: float) -> float:
     return EPS ** weight
 
 
+def _scored_market(
+    symbol: str,
+    raw_score: float,
+    effective_score: float,
+    *,
+    market_id: int = 1,
+    candidate: bool = True,
+) -> ScoredMarket:
+    confidence = effective_score / raw_score if raw_score > 0 else 0.0
+    return ScoredMarket(
+        row={"symbol": symbol, "market_id": market_id},
+        score=raw_score,
+        raw_score=raw_score,
+        effective_score=effective_score,
+        confidence=confidence,
+        rank_components={},
+        candidate=candidate,
+    )
+
+
 # --- Case 1: sample reliability ---
 def test_case1_sample_reliability_ranking() -> None:
     high = make_candidate_row(
@@ -75,42 +97,56 @@ def test_case1_sample_reliability_ranking() -> None:
     assert by_sym["HIGH"].effective_score > by_sym["LOW"].effective_score
 
 
-# --- Case 2: high raw / low conf vs lower raw / high conf ---
-def test_case2_effective_prefers_confidence() -> None:
-    a = make_candidate_row(
-        symbol="A",
-        markout_5s_count=10,
-        markout_30s_count=10,
-        estimated_maker_fill_samples=10,
-        total_trade_count=10,
-        observation_hours=2.0,
+# --- Case 2: effective_score ranking via sort key ---
+def test_case2_effective_prefers_confidence_via_sort_key() -> None:
+    high_raw_low_eff = _scored_market("A", raw_score=90.0, effective_score=18.0, market_id=1)
+    low_raw_high_eff = _scored_market("B", raw_score=70.0, effective_score=63.0, market_id=2)
+    ordered = sorted(
+        [high_raw_low_eff, low_raw_high_eff],
+        key=scored_market_sort_key,
     )
-    b = make_candidate_row(
-        symbol="B",
-        markout_5s_count=5000,
-        markout_30s_count=5000,
-        estimated_maker_fill_samples=5000,
-        total_trade_count=5000,
-        observation_hours=72.0,
+    assert [s.row["symbol"] for s in ordered] == ["B", "A"]
+
+
+def test_scored_market_sort_key_tie_breaks_on_raw_score() -> None:
+    higher_raw = _scored_market("A", raw_score=90.0, effective_score=50.0, market_id=1)
+    lower_raw = _scored_market("B", raw_score=80.0, effective_score=50.0, market_id=2)
+    ordered = sorted([lower_raw, higher_raw], key=scored_market_sort_key)
+    assert ordered[0].row["symbol"] == "A"
+
+
+def test_scored_market_sort_key_tie_breaks_on_symbol() -> None:
+    aaa = _scored_market("AAA", raw_score=80.0, effective_score=50.0, market_id=1)
+    bbb = _scored_market("BBB", raw_score=80.0, effective_score=50.0, market_id=2)
+    ordered = sorted([bbb, aaa], key=scored_market_sort_key)
+    assert ordered[0].row["symbol"] == "AAA"
+
+
+def test_score_markets_orders_by_effective_score() -> None:
+    low = make_candidate_row(
+        symbol="LOW",
+        markout_5s_count=20,
+        markout_30s_count=20,
     )
-    scored = score_markets([a, b])
-    # Force raw scores for deterministic comparison
-    for s in scored:
-        if s.row["symbol"] == "A":
-            s.score = 90.0
-            s.raw_score = 90.0
-            conf = compute_market_confidence(s.row, 90.0)
-            s.confidence = conf.confidence
-            s.effective_score = 90.0 * conf.confidence
-        else:
-            s.score = 70.0
-            s.raw_score = 70.0
-            conf = compute_market_confidence(s.row, 70.0)
-            s.confidence = conf.confidence
-            s.effective_score = 70.0 * conf.confidence
-    assert scored[0].row["symbol"] == "B" or scored[1].effective_score > scored[0].effective_score
-    by_sym = {s.row["symbol"]: s for s in scored}
-    assert by_sym["B"].effective_score > by_sym["A"].effective_score
+    high = make_candidate_row(
+        symbol="HIGH",
+        markout_5s_count=2000,
+        markout_30s_count=2000,
+    )
+    scored = score_markets([low, high])
+    assert scored[0].row["symbol"] == "HIGH"
+    assert scored[0].effective_score >= scored[1].effective_score
+
+
+def test_resolve_paper_mm_targets_uses_effective_top_n() -> None:
+    scored = [
+        _scored_market("A", raw_score=95.0, effective_score=20.0, market_id=1),
+        _scored_market("B", raw_score=80.0, effective_score=75.0, market_id=2),
+        _scored_market("C", raw_score=70.0, effective_score=65.0, market_id=3),
+    ]
+    scored.sort(key=scored_market_sort_key)
+    targets = resolve_paper_mm_targets(scored, top_n=2)
+    assert [t.row["symbol"] for t in targets] == ["B", "C"]
 
 
 # --- Case 3: coverage monotonicity ---
@@ -417,11 +453,11 @@ def test_case21b_zero_missing_full_order() -> None:
 # --- Case 22: per-leaf sample monotonicity ---
 def test_case22_per_leaf_monotonicity() -> None:
     ns = [0, 10, 100, 1000, 5000]
-    for field, k in (
-        ("markout_5s_count", CFG.k_markout),
-        ("markout_30s_count", CFG.k_markout),
-        ("estimated_maker_fill_samples", CFG.k_fill),
-        ("total_trade_count", CFG.k_trade),
+    for field in (
+        "markout_5s_count",
+        "markout_30s_count",
+        "estimated_maker_fill_samples",
+        "total_trade_count",
     ):
         confs = []
         for n in ns:
@@ -484,3 +520,14 @@ def test_fill_rate_none_uses_sample_count() -> None:
     )
     assert res.confidence_breakdown["estimated_fill"] is not None
     assert res.confidence_breakdown["estimated_fill"] > 0.0
+
+
+def test_curve_helpers_reject_invalid_inputs() -> None:
+    with pytest.raises(ValueError):
+        sample_confidence(-1, 200)
+    with pytest.raises(ValueError):
+        coverage_confidence_from_pct(-10)
+    with pytest.raises(ValueError):
+        coverage_confidence_from_pct(120)
+    with pytest.raises(ValueError):
+        duration_confidence_from_hours(-1, 24)

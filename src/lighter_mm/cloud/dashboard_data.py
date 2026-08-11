@@ -423,7 +423,6 @@ def _market_detail(s: ScoredMarket) -> dict[str, Any]:
             "paper_mm_samples": r.get("paper_mm_samples"),
             "paper_mm_status": r.get("paper_mm_status"),
             "paper_mm_gross_spread_capture_usd": r.get("paper_mm_gross_spread_capture_usd"),
-            "penalties": s.penalties,
             "confidence_reasons": list(s.confidence_reasons),
         }
     )
