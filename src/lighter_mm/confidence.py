@@ -50,16 +50,6 @@ _COVERAGE_ANCHORS: tuple[tuple[float, float], ...] = (
     (99.0, 1.0),
 )
 
-_LEAF_KEYS = (
-    "markout_5s",
-    "markout_30s",
-    "fill",
-    "coverage",
-    "trade",
-    "duration",
-)
-
-
 @dataclass
 class ConfidenceResult:
     confidence: float
