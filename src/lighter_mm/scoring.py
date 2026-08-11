@@ -244,18 +244,29 @@ def _compute_rank_components(
     persistence: list[float | None],
     coverage: list[float | None],
 ) -> dict[str, float | None]:
-    pr_act = _pct_rank(activity, activity[index])
-    pr_spr = _pct_rank(spread_for_rank, spread_for_rank[index])
-    pr_dep = _pct_rank(depth, depth[index])
-    pr_mk = _pct_rank(markout, markout[index])
-    # Missing Estimated Fill is data-unavailable, not a forced bottom percentile.
-    if estimated_fill[index] is None:
+    pr_act = _pct_rank(activity, activity[index] if index < len(activity) else None)
+    pr_spr = _pct_rank(
+        spread_for_rank,
+        spread_for_rank[index] if index < len(spread_for_rank) else None,
+    )
+    pr_dep = _pct_rank(depth, depth[index] if index < len(depth) else None)
+    pr_mk = _pct_rank(markout, markout[index] if index < len(markout) else None)
+    fill_val = estimated_fill[index] if index < len(estimated_fill) else None
+    if fill_val is None:
         pr_fill: float | None = None
     else:
-        pr_fill = _pct_rank(estimated_fill, estimated_fill[index])
+        pr_fill = _pct_rank(estimated_fill, fill_val)
 
-    dq_raw = _dq_raw_value(persistence[index], coverage[index])
-    dq_vals = [_dq_raw_value(persistence[j], coverage[j]) for j in range(len(rows))]
+    pers_val = persistence[index] if index < len(persistence) else None
+    cov_val = coverage[index] if index < len(coverage) else None
+    dq_raw = _dq_raw_value(pers_val, cov_val)
+    dq_vals = [
+        _dq_raw_value(
+            persistence[j] if j < len(persistence) else None,
+            coverage[j] if j < len(coverage) else None,
+        )
+        for j in range(len(rows))
+    ]
     pr_dq = _pct_rank(dq_vals, dq_raw)
 
     return {
@@ -266,6 +277,98 @@ def _compute_rank_components(
         "maker_markout": pr_mk,
         "data_quality_persistence": pr_dq,
     }
+
+
+def _compute_rank_components_for_row(
+    row: dict[str, Any],
+    *,
+    activity: list[float | None],
+    spread_for_rank: list[float | None],
+    depth: list[float | None],
+    markout: list[float | None],
+    estimated_fill: list[float | None],
+    persistence: list[float | None],
+    coverage: list[float | None],
+    dq_vals: list[float | None],
+) -> dict[str, float | None]:
+    """Cross-sectional ranks for one row against peer value series."""
+    act = row.get("trades_per_minute_median")
+    act_mean = row.get("trades_per_minute_mean")
+    if act is not None and act_mean is not None:
+        activity_val: float | None = 0.7 * float(act_mean) + 0.3 * float(act)
+    elif act_mean is not None:
+        activity_val = float(act_mean)
+    elif act is not None:
+        activity_val = float(act)
+    else:
+        activity_val = None
+
+    spread_val = row.get("median_spread_bps")
+    if spread_val is not None:
+        spread_val = min(float(spread_val), 20.0)
+
+    pr_act = _pct_rank(activity, activity_val)
+    pr_spr = _pct_rank(spread_for_rank, spread_val)
+    pr_dep = _pct_rank(depth, row.get("median_two_sided_depth_10bps_usd"))
+    pr_mk = _pct_rank(markout, row.get("maker_markout_5s_median_bps"))
+    fill_val = row.get("estimated_maker_fill_rate_30s_conservative")
+    if fill_val is None:
+        pr_fill: float | None = None
+    else:
+        pr_fill = _pct_rank(estimated_fill, fill_val)
+
+    pers_val = row.get("pct_time_spread_ge_5bps")
+    cov_val = row.get("observation_coverage_pct") or row.get("data_coverage_pct")
+    dq_raw = _dq_raw_value(pers_val, cov_val)
+    pr_dq = _pct_rank(dq_vals, dq_raw)
+
+    return {
+        "trade_activity": pr_act,
+        "estimated_maker_fill": pr_fill,
+        "spread": pr_spr,
+        "two_sided_depth": pr_dep,
+        "maker_markout": pr_mk,
+        "data_quality_persistence": pr_dq,
+    }
+
+
+def _peer_dq_values(
+    peer: list[dict[str, Any]],
+) -> list[float | None]:
+    return [
+        _dq_raw_value(
+            r.get("pct_time_spread_ge_5bps"),
+            r.get("observation_coverage_pct") or r.get("data_coverage_pct"),
+        )
+        for r in peer
+    ]
+
+
+def _peer_activity_values(peer: list[dict[str, Any]]) -> list[float | None]:
+    out: list[float | None] = []
+    for r in peer:
+        m = r.get("trades_per_minute_mean")
+        med = r.get("trades_per_minute_median")
+        if m is not None and med is not None:
+            out.append(0.7 * float(m) + 0.3 * float(med))
+        elif m is not None:
+            out.append(float(m))
+        elif med is not None:
+            out.append(float(med))
+        else:
+            out.append(None)
+    return out
+
+
+def _peer_spread_for_rank(peer: list[dict[str, Any]]) -> list[float | None]:
+    out: list[float | None] = []
+    for r in peer:
+        s = r.get("median_spread_bps")
+        if s is None:
+            out.append(None)
+        else:
+            out.append(min(float(s), 20.0))
+    return out
 
 
 def _compute_weighted_score(
@@ -400,36 +503,66 @@ def score_markets(
     rows: list[dict[str, Any]],
     weights: ScoreWeights | None = None,
     thresholds: CandidateThresholds | None = None,
+    peer_rows: list[dict[str, Any]] | None = None,
 ) -> list[ScoredMarket]:
     weights = weights or ScoreWeights()
     thresholds = thresholds or CandidateThresholds()
     if not rows:
         return []
 
-    activity = _activity_blend_series(rows)
-    spread_for_rank = _spread_for_rank_series(rows)
-    depth = [r.get("median_two_sided_depth_10bps_usd") for r in rows]
-    markout = [r.get("maker_markout_5s_median_bps") for r in rows]
-    # $50 / 30s / conservative Estimated Maker Fill (market-level min of bid/ask).
-    estimated_fill = [r.get("estimated_maker_fill_rate_30s_conservative") for r in rows]
-    persistence = [r.get("pct_time_spread_ge_5bps") for r in rows]
-    coverage = [
-        r.get("observation_coverage_pct") or r.get("data_coverage_pct") for r in rows
-    ]
+    peer = peer_rows if peer_rows is not None else rows
+
+    if peer_rows is not None:
+        activity = _peer_activity_values(peer)
+        spread_for_rank = _peer_spread_for_rank(peer)
+        depth = [r.get("median_two_sided_depth_10bps_usd") for r in peer]
+        markout = [r.get("maker_markout_5s_median_bps") for r in peer]
+        estimated_fill = [r.get("estimated_maker_fill_rate_30s_conservative") for r in peer]
+        persistence = [r.get("pct_time_spread_ge_5bps") for r in peer]
+        coverage = [
+            r.get("observation_coverage_pct") or r.get("data_coverage_pct") for r in peer
+        ]
+        dq_vals = _peer_dq_values(peer)
+        peer_count = len(peer)
+    else:
+        activity = _activity_blend_series(rows)
+        spread_for_rank = _spread_for_rank_series(rows)
+        depth = [r.get("median_two_sided_depth_10bps_usd") for r in rows]
+        markout = [r.get("maker_markout_5s_median_bps") for r in rows]
+        estimated_fill = [r.get("estimated_maker_fill_rate_30s_conservative") for r in rows]
+        persistence = [r.get("pct_time_spread_ge_5bps") for r in rows]
+        coverage = [
+            r.get("observation_coverage_pct") or r.get("data_coverage_pct") for r in rows
+        ]
+        dq_vals = _peer_dq_values(rows)
+        peer_count = len(rows)
 
     scored: list[ScoredMarket] = []
     for i, row in enumerate(rows):
-        components = _compute_rank_components(
-            rows,
-            index=i,
-            activity=activity,
-            spread_for_rank=spread_for_rank,
-            depth=depth,
-            markout=markout,
-            estimated_fill=estimated_fill,
-            persistence=persistence,
-            coverage=coverage,
-        )
+        if peer_rows is not None:
+            components = _compute_rank_components_for_row(
+                row,
+                activity=activity,
+                spread_for_rank=spread_for_rank,
+                depth=depth,
+                markout=markout,
+                estimated_fill=estimated_fill,
+                persistence=persistence,
+                coverage=coverage,
+                dq_vals=dq_vals,
+            )
+        else:
+            components = _compute_rank_components(
+                rows,
+                index=i,
+                activity=activity,
+                spread_for_rank=spread_for_rank,
+                depth=depth,
+                markout=markout,
+                estimated_fill=estimated_fill,
+                persistence=persistence,
+                coverage=coverage,
+            )
         score = _compute_weighted_score(components, weights)
         score, penalties = _apply_score_penalties(row, score, thresholds)
 
@@ -438,7 +571,7 @@ def score_markets(
             row,
             thresholds=thresholds,
             pr_act=pr_act,
-            peer_count=len(rows),
+            peer_count=peer_count,
         )
 
         pros, cons, warnings = build_narratives(

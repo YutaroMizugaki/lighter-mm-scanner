@@ -40,6 +40,14 @@ from lighter_mm.analytics.parquet_source import (
     _probe_parquet_columns,
     _read_view,
 )
+from lighter_mm.analytics.screening import (
+    log_stage1_complete,
+    log_two_stage_summary,
+    merge_screening_and_full_results,
+    run_stage1,
+    select_stage2_markets,
+    stage1_to_peer_row,
+)
 from lighter_mm.analytics.trade_metrics import (
     _aggregate_trades_sql,
     _empty_trade_stats,
@@ -280,6 +288,7 @@ def _prepare_book_dataset(
     t0: float,
     benchmark_profile: bool,
     profile: dict[str, float],
+    market_ids: frozenset[int] | None = None,
 ) -> tuple[int, int | None] | None:
     """Materialize book tables. Returns (book_count, latest_book_event_ms) or None."""
     book_cols = _book_projection(available_cols)
@@ -291,6 +300,7 @@ def _prepare_book_dataset(
         start_ms,
         end_ms,
         file_paths=book_valid,
+        market_ids=market_ids,
     ):
         return None
 
@@ -444,6 +454,7 @@ def _prepare_trade_dataset(
     trade_valid: list[str],
     start_ms: int,
     end_ms: int,
+    market_ids: frozenset[int] | None = None,
 ) -> tuple[int, set[str]] | None:
     """Load and materialize trades. Returns (trade_count, available_cols) or None."""
     try:
@@ -471,6 +482,7 @@ def _prepare_trade_dataset(
         start_ms,
         end_ms,
         file_paths=trade_valid,
+        market_ids=market_ids,
     ):
         return None
     con.execute("CREATE OR REPLACE TABLE trade_raw AS SELECT * FROM trade_raw_view")
@@ -527,6 +539,7 @@ def _prepare_markout_dataset(
     markout_valid: list[str],
     start_ms: int,
     end_ms: int,
+    market_ids: frozenset[int] | None = None,
 ) -> int | None:
     """Load and materialize markouts. Returns markout_count or None."""
     markout_cols = (
@@ -540,6 +553,7 @@ def _prepare_markout_dataset(
         start_ms,
         end_ms,
         file_paths=markout_valid,
+        market_ids=market_ids,
     ):
         return None
     con.execute(
@@ -573,6 +587,64 @@ def _run_markout_metrics(
     return markout_agg
 
 
+def _enrich_peer_rows_for_scoring(
+    peer_rows: list[dict[str, Any]],
+    full_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge Stage 2 markout/fill/depth into Stage 1 peer rows for scoring percentiles."""
+    full_by_id = {int(r["market_id"]): r for r in full_rows}
+    enriched: list[dict[str, Any]] = []
+    for peer in peer_rows:
+        row = dict(peer)
+        mid = int(row["market_id"])
+        if mid in full_by_id:
+            fr = full_by_id[mid]
+            row.update(
+                {
+                    "median_spread_bps": fr.get("median_spread_bps"),
+                    "observation_coverage_pct": fr.get("observation_coverage_pct"),
+                    "data_coverage_pct": fr.get("data_coverage_pct"),
+                    "median_two_sided_depth_10bps_usd": fr.get(
+                        "median_two_sided_depth_10bps_usd"
+                    ),
+                    "pct_time_spread_ge_5bps": fr.get("pct_time_spread_ge_5bps"),
+                    "trades_per_minute_median": fr.get("trades_per_minute_median"),
+                    "trades_per_minute_mean": fr.get("trades_per_minute_mean"),
+                    "total_trade_count": fr.get("total_trade_count"),
+                    "observation_hours": fr.get("observation_hours"),
+                    "maker_markout_5s_median_bps": fr.get("maker_markout_5s_median_bps"),
+                    "estimated_maker_fill_rate_30s_conservative": fr.get(
+                        "estimated_maker_fill_rate_30s_conservative"
+                    ),
+                }
+            )
+        enriched.append(row)
+    return enriched
+
+
+def _empty_full_results(
+    *,
+    hours: float,
+    start_ms: int,
+    end_ms: int,
+    parquet_health: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "hours": hours,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "markets": [],
+        "scored": [],
+        "candidates": [],
+        "avoid": [],
+        "book_row_count": 0,
+        "latest_book_event_ms": None,
+        "trade_row_count": 0,
+        "markout_row_count": 0,
+        "parquet_health": parquet_health,
+    }
+
+
 def analyze_range(
     settings: Settings,
     *,
@@ -594,19 +666,175 @@ def analyze_range(
             "scored": [],
             "error": "invalid analysis window (end_ms <= start_ms)",
         }
+
+    hours = max((end_ms - start_ms) / 3_600_000.0, 0.001)
+
+    if not settings.analyzer_two_stage_enabled:
+        return _analyze_range_impl(
+            settings,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            hours=hours,
+            sources=sources,
+            market_lifecycle=market_lifecycle,
+            benchmark_profile=benchmark_profile,
+            explain_volatility=explain_volatility,
+            duckdb_memory_limit=duckdb_memory_limit,
+            duckdb_threads=duckdb_threads,
+            read_only=read_only,
+            market_ids=None,
+            peer_rows=None,
+        )
+
+    # Two-stage: Stage 1 screening → Stage 2 full analysis on selected markets
+    src = sources or _default_sources(settings.data_dir)
+    t0 = time.monotonic()
+    book_valid, trade_valid, markout_valid, all_corrupt, parquet_health = (
+        _prepare_parquet_sources(src, read_only=read_only, t0=t0)
+    )
+
+    if not book_valid:
+        log.error(
+            "analysis failed reason=no_valid_parquet_files corrupt_files=%s",
+            len(all_corrupt),
+        )
+        return {
+            "hours": hours,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "markets": [],
+            "scored": [],
+            "error": (
+                "no valid book_samples parquet files"
+                if all_corrupt
+                else "no book_samples yet"
+            ),
+            "parquet_health": parquet_health,
+        }
+
+    log.info("[Analyzer] Stage 1 started: markets=pending")
+    stage1_con = _connect(
+        settings.data_dir,
+        memory_limit=duckdb_memory_limit,
+        threads=duckdb_threads,
+    )
+    t_stage1 = time.monotonic()
+    stage1_markets = run_stage1(
+        stage1_con,
+        settings,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        book_valid=book_valid,
+        trade_valid=trade_valid,
+        market_lifecycle=market_lifecycle,
+    )
+    try:
+        stage1_con.close()
+    except Exception:  # noqa: BLE001
+        pass
+    stage1_elapsed = time.monotonic() - t_stage1
+
+    selected = select_stage2_markets(
+        stage1_markets,
+        top_n=settings.analyzer_stage2_top_n,
+    )
+    eligible_count = sum(1 for m in stage1_markets if m.eligible)
+    log_stage1_complete(
+        len(stage1_markets),
+        eligible_count,
+        len(selected),
+        stage1_elapsed,
+    )
+
+    peer_rows = [stage1_to_peer_row(m, hours) for m in stage1_markets]
+
+    t_stage2 = time.monotonic()
+    if selected:
+        full_results = _analyze_range_impl(
+            settings,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            hours=hours,
+            sources=src,
+            market_lifecycle=market_lifecycle,
+            benchmark_profile=benchmark_profile,
+            explain_volatility=explain_volatility,
+            duckdb_memory_limit=duckdb_memory_limit,
+            duckdb_threads=duckdb_threads,
+            read_only=read_only,
+            market_ids=frozenset(selected),
+            peer_rows=peer_rows,
+            prevalidated=(
+                book_valid,
+                trade_valid,
+                markout_valid,
+                all_corrupt,
+                parquet_health,
+            ),
+        )
+    else:
+        full_results = _empty_full_results(
+            hours=hours,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            parquet_health=parquet_health,
+        )
+    stage2_elapsed = time.monotonic() - t_stage2
+    log_two_stage_summary(stage1_elapsed, stage2_elapsed, len(selected))
+
+    return merge_screening_and_full_results(
+        stage1_markets,
+        full_results,
+        hours=hours,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        stage1_elapsed=stage1_elapsed,
+        stage2_elapsed=stage2_elapsed,
+        selected_market_ids=selected,
+    )
+
+
+def _analyze_range_impl(
+    settings: Settings,
+    *,
+    start_ms: int,
+    end_ms: int,
+    hours: float,
+    sources: AnalysisSources | None = None,
+    market_lifecycle: dict[int, MarketLifecycleEntry] | None = None,
+    benchmark_profile: bool = False,
+    explain_volatility: bool = False,
+    duckdb_memory_limit: str | None = None,
+    duckdb_threads: int | None = None,
+    read_only: bool = False,
+    market_ids: frozenset[int] | None = None,
+    peer_rows: list[dict[str, Any]] | None = None,
+    prevalidated: tuple[
+        list[str],
+        list[str],
+        list[str],
+        list[dict[str, str]],
+        dict[str, Any],
+    ] | None = None,
+) -> dict[str, Any]:
+    """Core analyzer pipeline (optionally filtered to ``market_ids``)."""
     src = sources or _default_sources(settings.data_dir)
     con = _connect(
         settings.data_dir,
         memory_limit=duckdb_memory_limit,
         threads=duckdb_threads,
     )
-    hours = max((end_ms - start_ms) / 3_600_000.0, 0.001)
     t0 = time.monotonic()
     profile: dict[str, float] = {}
 
-    book_valid, trade_valid, markout_valid, all_corrupt, parquet_health = (
-        _prepare_parquet_sources(src, read_only=read_only, t0=t0)
-    )
+    if prevalidated is not None:
+        book_valid, trade_valid, markout_valid, all_corrupt, parquet_health = (
+            prevalidated
+        )
+    else:
+        book_valid, trade_valid, markout_valid, all_corrupt, parquet_health = (
+            _prepare_parquet_sources(src, read_only=read_only, t0=t0)
+        )
 
     if not book_valid:
         log.error(
@@ -652,6 +880,7 @@ def analyze_range(
         t0=t0,
         benchmark_profile=benchmark_profile,
         profile=profile,
+        market_ids=market_ids,
     )
     if book_loaded is None:
         return {
@@ -680,7 +909,11 @@ def analyze_range(
     estimated_fill_agg: dict[int, dict[str, Any]] = {}
     if trade_valid:
         trade_loaded = _prepare_trade_dataset(
-            con, trade_valid=trade_valid, start_ms=start_ms, end_ms=end_ms
+            con,
+            trade_valid=trade_valid,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            market_ids=market_ids,
         )
         if trade_loaded is not None:
             trade_count, trade_available = trade_loaded
@@ -695,7 +928,11 @@ def analyze_range(
     markout_agg: dict[int, dict[str, Any]] = {}
     if markout_valid:
         loaded_markouts = _prepare_markout_dataset(
-            con, markout_valid=markout_valid, start_ms=start_ms, end_ms=end_ms
+            con,
+            markout_valid=markout_valid,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            market_ids=market_ids,
         )
         if loaded_markouts is not None:
             markout_count = loaded_markouts
@@ -727,7 +964,10 @@ def analyze_range(
         min_median_trades_per_minute=settings.min_median_trades_per_minute,
         min_observation_hours=settings.min_observation_hours_for_candidate,
     )
-    scored = score_markets(rows, thresholds=thresholds)
+    scoring_peers = peer_rows
+    if peer_rows is not None:
+        scoring_peers = _enrich_peer_rows_for_scoring(peer_rows, rows)
+    scored = score_markets(rows, thresholds=thresholds, peer_rows=scoring_peers)
     rss = _rss_mb()
     if benchmark_profile:
         profile["rss_after_score_mb"] = rss

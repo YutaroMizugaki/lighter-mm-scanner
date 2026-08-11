@@ -58,6 +58,7 @@ def build_dashboard_payload(
             )
     result = analysis_result
     scored: list[ScoredMarket] = result.get("scored") or []
+    screened_rows: list[dict[str, Any]] = result.get("screened") or []
     candidates = [s for s in scored if s.candidate]
     avoid = result.get("avoid") or []
     analysis_error = result.get("error")
@@ -187,7 +188,7 @@ def build_dashboard_payload(
         "analysis_scope": "rolling",
         "analysis_window_hours": ranked_window_hours,
         "observation_target_hours": state.observation_target_hours if state else window_hours,
-        "markets": len(scored),
+        "markets": len(scored) + len(screened_rows),
         "markets_analyzed": len(scored),
         "markets_discovered": markets_discovered,
         "candidates": len(candidates),
@@ -232,6 +233,8 @@ def build_dashboard_payload(
     markets = []
     for s in scored:
         markets.append(_market_row(s))
+    for row in screened_rows:
+        markets.append(row)
 
     market_details = {str(s.row.get("symbol")): _market_detail(s) for s in scored}
 
@@ -272,6 +275,8 @@ def _market_row(s: ScoredMarket) -> dict[str, Any]:
     return {
         "symbol": r.get("symbol"),
         "market_id": r.get("market_id"),
+        "analysis_stage": r.get("analysis_stage", "full"),
+        "stage1": r.get("stage1"),
         "score": round(s.score, 2),
         "letter_rank": s.letter_rank,
         "is_candidate": s.candidate,

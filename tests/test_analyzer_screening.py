@@ -1,0 +1,357 @@
+"""Tests for Analyzer two-stage screening (Stage 1 → Stage 2)."""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from lighter_mm.analytics.aggregation import analyze_range, _analyze_range_impl
+from lighter_mm.analytics.screening import (
+    run_stage1,
+    select_stage2_markets,
+    stage1_to_peer_row,
+)
+from lighter_mm.analytics.parquet_source import AnalysisSources, _connect
+from lighter_mm.config import Settings
+
+
+def _book_row(
+    ts: int,
+    market_id: int,
+    symbol: str,
+    *,
+    bid: float = 100.0,
+    ask: float = 100.10,
+) -> dict:
+    mid = (bid + ask) / 2.0
+    spread_bps = (ask - bid) / mid * 10000.0
+    return {
+        "timestamp_ms": ts,
+        "market_id": market_id,
+        "symbol": symbol,
+        "best_bid": bid,
+        "best_ask": ask,
+        "mid": mid,
+        "spread_bps": spread_bps,
+        "spread_absolute": ask - bid,
+        "best_bid_size_base": 1.0,
+        "best_ask_size_base": 1.0,
+        "best_bid_size_usd": 100.0,
+        "best_ask_size_usd": 100.0,
+        "is_stale": False,
+        "is_usable": True,
+        "is_inactive": False,
+        "book_update_age_ms": 1000,
+        "nonce": 1,
+        "index_price": None,
+        "mark_price": None,
+        "stats_mid_price": None,
+        "open_interest": None,
+        "last_trade_price": None,
+        "current_funding_rate": None,
+        "funding_rate": None,
+        "daily_base_token_volume": None,
+        "daily_quote_token_volume": None,
+        "daily_price_low": None,
+        "daily_price_high": None,
+        "daily_price_change": None,
+        "bid_depth_5bps_usd": 50.0,
+        "ask_depth_5bps_usd": 50.0,
+        "two_sided_depth_5bps_usd": 100.0,
+        "bid_depth_10bps_usd": 200.0,
+        "ask_depth_10bps_usd": 200.0,
+        "two_sided_depth_10bps_usd": 400.0,
+        "bid_depth_25bps_usd": 400.0,
+        "ask_depth_25bps_usd": 400.0,
+        "two_sided_depth_25bps_usd": 800.0,
+    }
+
+
+def _trade_row(ts: int, market_id: int, symbol: str, trade_id: int) -> dict:
+    return {
+        "timestamp_ms": ts,
+        "market_id": market_id,
+        "symbol": symbol,
+        "trade_id": trade_id,
+        "usd_amount": 50.0,
+        "type": "trade",
+        "price": 100.0,
+        "is_maker_ask": False,
+    }
+
+
+def _markout_row(ts: int, market_id: int, symbol: str, trade_id: int, horizon: int) -> dict:
+    return {
+        "timestamp_ms": ts,
+        "market_id": market_id,
+        "symbol": symbol,
+        "trade_id": trade_id,
+        "horizon_s": horizon,
+        "maker_markout_bps": 1.5,
+    }
+
+
+def _write_parquet(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    keys = list(rows[0].keys())
+    data = {k: [r.get(k) for r in rows] for k in keys}
+    pq.write_table(pa.table(data), path)
+
+
+def _seed_multi_market_fixture(tmp_path: Path, n_markets: int = 5) -> tuple[int, int]:
+    base = int(time.time() * 1000) - 3_600_000
+    end = base + 3_600_000
+    books: list[dict] = []
+    trades: list[dict] = []
+    markouts: list[dict] = []
+
+    for i in range(n_markets):
+        mid = i + 1
+        symbol = f"M{mid}"
+        spread = 1.0 + i * 0.5
+        ask = 100.0 + spread / 100.0
+        for j in range(30):
+            ts = base + j * 120_000
+            books.append(
+                _book_row(ts, mid, symbol, bid=100.0, ask=ask)
+            )
+        for t in range(25):
+            ts = base + t * 140_000
+            trades.append(_trade_row(ts, mid, symbol, t + 1))
+            markouts.append(_markout_row(ts, mid, symbol, t + 1, 5))
+            markouts.append(_markout_row(ts, mid, symbol, t + 1, 30))
+
+    book_dir = tmp_path / "book_samples/date=2026-08-09/hour=10"
+    trade_dir = tmp_path / "trades/date=2026-08-09/hour=10"
+    markout_dir = tmp_path / "markouts/date=2026-08-09/hour=10"
+    _write_parquet(book_dir / "books.parquet", books)
+    _write_parquet(trade_dir / "trades.parquet", trades)
+    _write_parquet(markout_dir / "markouts.parquet", markouts)
+    return base, end
+
+
+def test_stage1_aggregates_all_markets(tmp_path: Path) -> None:
+    start_ms, end_ms = _seed_multi_market_fixture(tmp_path, n_markets=4)
+    settings = Settings(data_dir=tmp_path)
+    sources = AnalysisSources(
+        books=tmp_path / "book_samples",
+        trades=tmp_path / "trades",
+        markouts=tmp_path / "markouts",
+    )
+    from lighter_mm.storage.parquet_validation import prepare_parquet_dataset
+
+    book_valid, _ = prepare_parquet_dataset(sources.books, quarantine=False)
+    trade_valid, _ = prepare_parquet_dataset(sources.trades, quarantine=False)
+    con = _connect(tmp_path)
+    stage1 = run_stage1(
+        con,
+        settings,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        book_valid=book_valid,
+        trade_valid=trade_valid,
+    )
+    con.close()
+
+    assert len(stage1) == 4
+    for m in stage1:
+        assert m.book_observation_count == 30
+        assert m.trade_count == 25
+        assert m.observation_coverage > 0
+        assert m.median_spread_bps is not None
+        assert m.median_spread_bps > 0
+
+
+def test_stage1_excludes_invalid_spread_books(tmp_path: Path) -> None:
+    start_ms = int(time.time() * 1000) - 3_600_000
+    end_ms = start_ms + 3_600_000
+    bad = _book_row(start_ms, 1, "BAD", bid=0.0, ask=100.0)
+    bad["best_bid"] = 0.0
+    good = _book_row(start_ms + 1000, 1, "BAD", bid=100.0, ask=100.20)
+    book_dir = tmp_path / "book_samples/date=2026-08-09/hour=10"
+    _write_parquet(book_dir / "books.parquet", [bad, good])
+
+    settings = Settings(data_dir=tmp_path)
+    from lighter_mm.storage.parquet_validation import prepare_parquet_dataset
+
+    book_valid, _ = prepare_parquet_dataset(
+        tmp_path / "book_samples", quarantine=False
+    )
+    con = _connect(tmp_path)
+    stage1 = run_stage1(
+        con,
+        settings,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        book_valid=book_valid,
+        trade_valid=[],
+    )
+    con.close()
+
+    assert len(stage1) == 1
+    assert stage1[0].median_spread_bps is not None
+
+
+def test_eligibility_and_top_n_selection() -> None:
+    from lighter_mm.analytics.screening import Stage1Market
+
+    markets = [
+        Stage1Market(
+            market_id=1,
+            eligible=True,
+            screening_score=0.9,
+            observation_coverage=0.95,
+            trade_count=50,
+            median_spread_bps=2.0,
+        ),
+        Stage1Market(
+            market_id=2,
+            eligible=True,
+            screening_score=0.5,
+            observation_coverage=0.95,
+            trade_count=50,
+            median_spread_bps=2.0,
+        ),
+        Stage1Market(
+            market_id=3,
+            eligible=False,
+            screening_score=None,
+            observation_coverage=0.5,
+            trade_count=2,
+            median_spread_bps=0.2,
+        ),
+    ]
+    selected = select_stage2_markets(markets, top_n=1)
+    assert selected == [1]
+
+    markets[0].screening_score = 0.3
+    markets[1].screening_score = 0.8
+    selected2 = select_stage2_markets(markets, top_n=10)
+    assert set(selected2) == {1, 2}
+
+    none_eligible = select_stage2_markets(
+        [Stage1Market(market_id=9, eligible=False)], top_n=40
+    )
+    assert none_eligible == []
+
+
+def test_market_ids_filter_limits_stage2_input(tmp_path: Path) -> None:
+    start_ms, end_ms = _seed_multi_market_fixture(tmp_path, n_markets=3)
+    settings = Settings(data_dir=tmp_path)
+    hours = (end_ms - start_ms) / 3_600_000.0
+
+    result = _analyze_range_impl(
+        settings,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        hours=hours,
+        market_ids=frozenset({1}),
+        read_only=True,
+    )
+    assert len(result["scored"]) == 1
+    assert int(result["scored"][0].row["market_id"]) == 1
+    assert result["book_row_count"] == 30
+
+
+def test_two_stage_null_semantics_for_screened(tmp_path: Path) -> None:
+    start_ms, end_ms = _seed_multi_market_fixture(tmp_path, n_markets=3)
+    settings = Settings(
+        data_dir=tmp_path,
+        analyzer_two_stage_enabled=True,
+        analyzer_stage1_min_coverage=0.0,
+        analyzer_stage1_min_trades=0,
+        analyzer_stage1_min_spread_bps=0.0,
+        analyzer_stage2_top_n=1,
+    )
+    result = analyze_range(
+        settings,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        read_only=True,
+    )
+    screened = result.get("screened") or []
+    assert len(screened) == 2
+    for row in screened:
+        assert row["analysis_stage"] == "screened"
+        assert row["score"] is None
+        assert row["maker_markout_5s_median_bps"] is None
+        assert row["estimated_maker_fill_rate_5s_conservative"] is None
+
+    full = result.get("scored") or []
+    assert len(full) == 1
+    assert full[0].score is not None
+
+
+def test_feature_flag_false_matches_legacy(tmp_path: Path) -> None:
+    start_ms, end_ms = _seed_multi_market_fixture(tmp_path, n_markets=3)
+    settings = Settings(data_dir=tmp_path, analyzer_two_stage_enabled=False)
+    legacy = analyze_range(
+        settings,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        read_only=True,
+    )
+    assert len(legacy["scored"]) == 3
+    assert legacy.get("screened") is None or legacy.get("screened") == []
+
+
+def test_all_markets_stage2_equivalent_scores(tmp_path: Path) -> None:
+    start_ms, end_ms = _seed_multi_market_fixture(tmp_path, n_markets=4)
+    base_settings = Settings(data_dir=tmp_path, analyzer_two_stage_enabled=False)
+    legacy = analyze_range(
+        base_settings,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        read_only=True,
+    )
+
+    two_stage_settings = Settings(
+        data_dir=tmp_path,
+        analyzer_two_stage_enabled=True,
+        analyzer_stage1_min_coverage=0.0,
+        analyzer_stage1_min_trades=0,
+        analyzer_stage1_min_spread_bps=0.0,
+        analyzer_stage2_top_n=100,
+    )
+    staged = analyze_range(
+        two_stage_settings,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        read_only=True,
+    )
+
+    legacy_by_id = {
+        int(s.row["market_id"]): s.score for s in legacy["scored"]
+    }
+    for s in staged["scored"]:
+        mid = int(s.row["market_id"])
+        assert mid in legacy_by_id
+        assert abs(s.score - legacy_by_id[mid]) < 0.01
+
+
+def test_screening_score_ordering() -> None:
+    from lighter_mm.analytics.screening import Stage1Market, _apply_screening_scores
+
+    markets = [
+        Stage1Market(
+            market_id=1,
+            eligible=True,
+            median_spread_bps=5.0,
+            trade_count=100,
+            observation_coverage=0.99,
+        ),
+        Stage1Market(
+            market_id=2,
+            eligible=True,
+            median_spread_bps=1.0,
+            trade_count=10,
+            observation_coverage=0.91,
+        ),
+    ]
+    _apply_screening_scores(markets)
+    assert markets[0].screening_score is not None
+    assert markets[1].screening_score is not None
+    assert markets[0].screening_score > markets[1].screening_score
