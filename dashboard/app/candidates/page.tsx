@@ -47,6 +47,7 @@ export default async function CandidatesPage() {
                 <th className="sticky-col">Market</th>
                 <th>Rank</th>
                 <th title={TOOLTIPS.score}>Score</th>
+                <th title={TOOLTIPS.effectiveScore}>Effective</th>
                 <th title={ESTIMATED_FILL_TOOLTIP}>Est. Fill</th>
                 <th>Spread</th>
                 <th title={TOOLTIPS.depth10bp}>Depth</th>
@@ -70,6 +71,9 @@ export default async function CandidatesPage() {
                   </td>
                   <td>
                     <ScoreBar score={m.score} />
+                  </td>
+                  <td className="tabular" title={TOOLTIPS.effectiveScore}>
+                    {fmt(m.effective_score ?? m.score, 1)}
                   </td>
                   <td>
                     <EstimatedFillValue

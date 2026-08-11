@@ -143,6 +143,12 @@ export type MarketRow = {
   symbol: string;
   market_id: number;
   score: number | null;
+  raw_score?: number;
+  confidence?: number;
+  effective_score?: number;
+  confidence_label?: string | null;
+  confidence_reasons?: string[];
+  confidence_breakdown?: Record<string, number | null> | null;
   letter_rank: string | null;
   analysis_stage?: "full" | "screened";
   stage1?: Stage1Summary | null;

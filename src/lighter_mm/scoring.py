@@ -10,6 +10,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from lighter_mm.analytics.estimated_fill_policy import MIN_MEANINGFUL_SAMPLES
+from lighter_mm.confidence import (
+    compute_market_confidence,
+    scored_market_sort_key,
+)
 from lighter_mm.util import percentile
 
 ORDER_SIZE_USD = [25.0, 50.0, 100.0, 250.0, 500.0, 1000.0]
@@ -53,6 +57,12 @@ class ScoredMarket:
     letter_rank: str = "D"
     recommended_max_order_usd: float | None = None
     size_fit: dict[str, bool] = field(default_factory=dict)
+    raw_score: float = 0.0
+    confidence: float = 0.0
+    effective_score: float = 0.0
+    confidence_label: str = "low"
+    confidence_reasons: list[str] = field(default_factory=list)
+    confidence_breakdown: dict[str, Any] = field(default_factory=dict)
 
 
 def _pct_rank(values: list[float | None], x: float | None) -> float:
@@ -585,6 +595,7 @@ def score_markets(
             row.get("median_two_sided_depth_10bps_usd"),
         )
         letter = letter_rank(score, candidate, penalties)
+        conf = compute_market_confidence(row, score)
         scored.append(
             ScoredMarket(
                 row=row,
@@ -598,10 +609,16 @@ def score_markets(
                 letter_rank=letter,
                 recommended_max_order_usd=rec,
                 size_fit=size_fit_map(row.get("median_two_sided_depth_10bps_usd")),
+                raw_score=score,
+                confidence=conf.confidence,
+                effective_score=conf.effective_score,
+                confidence_label=conf.confidence_label,
+                confidence_reasons=conf.confidence_reasons,
+                confidence_breakdown=conf.confidence_breakdown,
             )
         )
 
-    scored.sort(key=lambda s: s.score, reverse=True)
+    scored.sort(key=scored_market_sort_key)
     return scored
 
 

@@ -5,7 +5,7 @@ import QualityChip from "@/components/QualityChip";
 import RankBadge from "@/components/RankBadge";
 import ScoreBar from "@/components/ScoreBar";
 import SignedValue from "@/components/SignedValue";
-import { fmt, fmtPaperCount, fmtPaperUsd } from "@/lib/format";
+import { fmt, fmtPaperCount, fmtPaperUsd, fmtPctFraction } from "@/lib/format";
 import {
   ESTIMATED_EDGE_TOOLTIP,
   ESTIMATED_FILL_TOOLTIP,
@@ -22,8 +22,15 @@ function isScreened(m: MarketRow): boolean {
 export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<
-    "score" | "spread" | "fill30" | "tpm" | "tpm_avg" | "m5" | "edge30"
-  >("score");
+    | "effective"
+    | "score"
+    | "spread"
+    | "fill30"
+    | "tpm"
+    | "tpm_avg"
+    | "m5"
+    | "edge30"
+  >("effective");
   const [candidatesOnly, setCandidatesOnly] = useState(false);
 
   const rows = useMemo(() => {
@@ -35,6 +42,7 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
     }
     xs.sort((a, b) => {
       const pick = (m: MarketRow) => {
+        if (sort === "effective") return m.effective_score ?? m.score ?? -Infinity;
         if (sort === "score") return m.score ?? -Infinity;
         if (sort === "spread") return m.median_spread_bps || 0;
         if (sort === "fill30") return m.estimated_maker_fill_rate_30s_conservative ?? -1;
@@ -62,6 +70,7 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
           onChange={(e) => setSort(e.target.value as typeof sort)}
           aria-label="Sort markets"
         >
+          <option value="effective">Sort: Effective</option>
           <option value="score">Sort: Score</option>
           <option value="spread">Sort: Spread</option>
           <option value="fill30">Sort: Est. Fill 30s</option>
@@ -91,6 +100,8 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
               <th>Analysis</th>
               <th>Rank</th>
               <th title={TOOLTIPS.score}>Score</th>
+              <th title={TOOLTIPS.confidence}>Confidence</th>
+              <th title={TOOLTIPS.effectiveScore}>Effective</th>
               <th title={ESTIMATED_FILL_TOOLTIP}>Est. Fill</th>
               <th>Spread</th>
               <th title={TOOLTIPS.depth10bp}>Depth</th>
@@ -126,6 +137,12 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
                 </td>
                 <td>
                   <ScoreBar score={m.score} />
+                </td>
+                <td className="tabular" title={TOOLTIPS.confidence}>
+                  {fmtPctFraction(m.confidence, 0)}
+                </td>
+                <td className="tabular" title={TOOLTIPS.effectiveScore}>
+                  {fmt(m.effective_score ?? m.score, 1)}
                 </td>
                 <td>
                   <EstimatedFillValue

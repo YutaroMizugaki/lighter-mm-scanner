@@ -1132,6 +1132,9 @@ def scored_to_records(scored: list[ScoredMarket]) -> list[dict[str, Any]]:
         rec.update(
             {
                 "mm_opportunity_score": s.score,
+                "raw_score": s.raw_score,
+                "confidence": s.confidence,
+                "effective_score": s.effective_score,
                 "letter_rank": s.letter_rank,
                 "is_candidate": s.candidate,
                 "recommended_max_order_usd": s.recommended_max_order_usd,

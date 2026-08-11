@@ -138,6 +138,67 @@ def test_markout_without_trades_adds_warning() -> None:
     assert any("trade aggregation inconsistency" in w for w in row["warnings"])
 
 
+def _minimal_scored_market(
+    symbol: str,
+    market_id: int,
+    score: float,
+    effective_score: float,
+    *,
+    candidate: bool = True,
+) -> ScoredMarket:
+    return ScoredMarket(
+        row={
+            "symbol": symbol,
+            "market_id": market_id,
+            "trades_per_minute_median": 5.0,
+            "trades_per_minute_mean": 5.0,
+            "total_trade_count": 1000,
+            "maker_markout_5s_median_bps": 1.0,
+            "maker_markout_30s_median_bps": 0.5,
+            "median_spread_bps": 5.0,
+            "pct_time_spread_ge_5bps": 0.5,
+            "median_two_sided_depth_10bps_usd": 500.0,
+            "current_funding_rate": 0.0,
+            "data_coverage_pct": 95.0,
+        },
+        score=score,
+        raw_score=score,
+        effective_score=effective_score,
+        confidence=effective_score / score if score > 0 else 0.0,
+        rank_components={},
+        penalties=[],
+        pros=[],
+        cons=[],
+        warnings=[],
+        candidate=candidate,
+        letter_rank="A",
+        recommended_max_order_usd=100.0,
+        size_fit={},
+    )
+
+
+def test_dashboard_payload_preserves_effective_score_order(tmp_path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", reports_dir=tmp_path / "reports")
+    scored = [
+        _minimal_scored_market("B", 2, 80.0, 75.0),
+        _minimal_scored_market("C", 3, 70.0, 65.0),
+        _minimal_scored_market("A", 1, 95.0, 20.0),
+    ]
+    analysis_result = {
+        "scored": scored,
+        "avoid": [],
+        "parquet_health": {"status": "ok"},
+    }
+    payload = build_dashboard_payload(settings, hours=1, analysis_result=analysis_result)
+    market_symbols = [m["symbol"] for m in payload["markets"]]
+    candidate_symbols = [m["symbol"] for m in payload["candidates"]]
+    assert market_symbols == ["B", "C", "A"]
+    assert candidate_symbols == ["B", "C", "A"]
+    top = payload["latest"]["top_candidate"]
+    assert top is not None
+    assert top["symbol"] == "B"
+
+
 def test_payload_includes_flush_and_ws(tmp_path) -> None:
     settings = Settings(data_dir=tmp_path / "data", reports_dir=tmp_path / "reports")
     (settings.data_dir / "book_samples").mkdir(parents=True)

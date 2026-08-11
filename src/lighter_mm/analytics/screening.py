@@ -664,12 +664,11 @@ def merge_screening_and_full_results(
 ) -> dict[str, Any]:
     """Combine Stage 1 screening with Stage 2 full analysis output."""
     selected_set = frozenset(selected_market_ids)
-    full_scored = full_results.get("scored") or []
+    full_scored = list(full_results.get("scored") or [])
     scored_by_id = {int(s.row.get("market_id")): s for s in full_scored}
 
     screened: list[dict[str, Any]] = []
     all_market_rows: list[dict[str, Any]] = []
-    scored: list[Any] = []
 
     for m in stage1:
         if m.market_id in selected_set and m.market_id in scored_by_id:
@@ -678,11 +677,13 @@ def merge_screening_and_full_results(
             row["analysis_stage"] = "full"
             row["stage1"] = stage1_to_dict(m)
             s.row.update({"analysis_stage": "full", "stage1": stage1_to_dict(m)})
-            scored.append(s)
             all_market_rows.append(row)
         else:
             screened.append(screened_market_row(m, hours))
             all_market_rows.append(screened[-1])
+
+    # Preserve effective_score ranking from Stage 2 (score_markets), not Stage 1 order.
+    scored = full_scored
 
     eligible_count = sum(1 for m in stage1 if m.eligible)
     total_elapsed = stage1_elapsed + stage2_elapsed
