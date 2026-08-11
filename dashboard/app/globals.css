@@ -458,6 +458,15 @@ main.app-shell {
 .C { background: #4d3a1f; color: var(--warning); }
 .D { background: #4d1f1f; color: var(--negative); }
 
+.analysis-badge.full {
+  background: #1f3a4d;
+  color: #8ec8e8;
+}
+.analysis-badge.screened {
+  background: #3a3a3a;
+  color: var(--text-muted);
+}
+
 .quality-chip {
   display: inline-block;
   font-size: 0.72rem;

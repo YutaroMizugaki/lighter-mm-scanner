@@ -266,12 +266,13 @@ def _aggregate_book_sql(
     return out
 
 
-def _spread_persistence_sql(
+def _spread_persistence_from_relation(
     con: duckdb.DuckDBPyConnection,
+    relation: str,
     thresholds: list[float],
     sample_interval_seconds: float,
 ) -> dict[int, dict[str, Any]]:
-    """Time-weighted spread persistence via DuckDB window functions."""
+    """Time-weighted spread persistence from an observed-spread relation."""
     if not thresholds:
         return {}
     default_dt = float(sample_interval_seconds)
@@ -291,7 +292,7 @@ def _spread_persistence_sql(
             LEAD(timestamp_ms) OVER (
                 PARTITION BY market_id ORDER BY timestamp_ms
             ) AS next_ts
-        FROM book_spread_observed
+        FROM {relation}
         WHERE effective_spread_bps IS NOT NULL
     ),
     intervals AS (
@@ -332,8 +333,24 @@ def _spread_persistence_sql(
             key = int(t) if float(t).is_integer() else t
             above = float(d.get(f"above_{key}") or 0)
             result[f"pct_time_spread_ge_{key}bps"] = (above / total) if total > 0 else None
-            # Event counts via separate lightweight query would be expensive;
-            # approximate from threshold crossings in Python is avoided — set None for events.
+        out[mid] = result
+    return out
+
+
+def _spread_persistence_sql(
+    con: duckdb.DuckDBPyConnection,
+    thresholds: list[float],
+    sample_interval_seconds: float,
+) -> dict[int, dict[str, Any]]:
+    """Time-weighted spread persistence via DuckDB window functions."""
+    out = _spread_persistence_from_relation(
+        con, "book_spread_observed", thresholds, sample_interval_seconds
+    )
+    if not out:
+        return {}
+    for mid, result in out.items():
+        for t in thresholds:
+            key = int(t) if float(t).is_integer() else t
             result[f"spread_ge_{key}bps_event_count"] = None
             result[f"spread_ge_{key}bps_median_duration_seconds"] = None
             result[f"spread_ge_{key}bps_p90_duration_seconds"] = None

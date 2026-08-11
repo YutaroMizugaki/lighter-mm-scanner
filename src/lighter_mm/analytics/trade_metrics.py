@@ -7,25 +7,16 @@ from typing import Any
 import duckdb
 
 
-def _aggregate_trades_sql(
+def _aggregate_trade_slots_sql(
     con: duckdb.DuckDBPyConnection,
+    *,
+    market_windows: str,
+    trade_deduped: str,
 ) -> dict[int, dict[str, Any]]:
-    """Per-market trade stats with dedupe on (market_id, trade_id)."""
+    """Per-market TPM using full observation-window minute slots (zeros for inactive minutes)."""
     from lighter_mm.util import percentile
 
-    con.execute(
-        """
-        CREATE OR REPLACE VIEW trade_deduped AS
-        SELECT * EXCLUDE (rn) FROM (
-            SELECT *, ROW_NUMBER() OVER (
-                PARTITION BY market_id, trade_id ORDER BY timestamp_ms
-            ) AS rn
-            FROM trade_raw
-            WHERE type = 'trade'
-        ) WHERE rn = 1
-        """
-    )
-    sql = """
+    sql = f"""
     WITH window_bounds AS (
         SELECT
             market_id,
@@ -37,14 +28,14 @@ def _aggregate_trades_sql(
                 + 1
             AS INTEGER) AS minute_slots,
             market_observation_seconds
-        FROM market_windows
+        FROM {market_windows}
     ),
     per_minute AS (
         SELECT
             market_id,
             (timestamp_ms // 60000) AS minute_idx,
             COUNT(*)::DOUBLE AS cnt
-        FROM trade_deduped
+        FROM {trade_deduped}
         GROUP BY market_id, minute_idx
     ),
     slot_rows AS (
@@ -65,12 +56,72 @@ def _aggregate_trades_sql(
             market_id,
             MAX(minute_slots) AS minute_slots,
             MAX(market_observation_seconds) AS market_observation_seconds,
-            LIST(cnt ORDER BY minute_idx) AS cnts,
-            COUNT(*) FILTER (WHERE cnt > 0) AS active_minutes
+            LIST(cnt ORDER BY minute_idx) AS cnts
         FROM slot_rows
         GROUP BY market_id
     ),
-    trade_agg AS (
+    trade_counts AS (
+        SELECT
+            market_id,
+            COUNT(*) AS total_trade_count,
+            SUM(usd_amount) AS total_quote_volume
+        FROM {trade_deduped}
+        GROUP BY market_id
+    )
+    SELECT
+        sl.market_id,
+        sl.cnts,
+        sl.minute_slots,
+        sl.market_observation_seconds,
+        COALESCE(tc.total_trade_count, 0) AS total_trade_count,
+        COALESCE(tc.total_quote_volume, 0.0) AS total_quote_volume
+    FROM slot_lists sl
+    LEFT JOIN trade_counts tc ON tc.market_id = sl.market_id
+    """
+    out: dict[int, dict[str, Any]] = {}
+    for row in con.execute(sql).fetchall():
+        mid, cnts, minute_slots, obs_s, tc, vol = row
+        tc = int(tc or 0)
+        obs_s = float(obs_s or 0)
+        effective_minutes_float = max(obs_s / 60.0, 1.0 / 60.0)
+        tpm_mean = float(tc) / effective_minutes_float
+        slots = max(1, int(minute_slots or 0))
+        cnt_list = [float(c) for c in (cnts or [])]
+        if len(cnt_list) < slots:
+            cnt_list = cnt_list + [0.0] * (slots - len(cnt_list))
+        elif len(cnt_list) > slots:
+            cnt_list = cnt_list[:slots]
+        out[int(mid)] = {
+            "total_trade_count": tc,
+            "total_quote_volume": float(vol or 0),
+            "trades_per_minute_mean": tpm_mean,
+            "trades_per_minute_median": percentile(cnt_list, 50) or 0.0,
+            "trades_per_minute_p90": percentile(cnt_list, 90) or 0.0,
+        }
+    return out
+
+
+def _aggregate_trades_sql(
+    con: duckdb.DuckDBPyConnection,
+) -> dict[int, dict[str, Any]]:
+    """Per-market trade stats with dedupe on (market_id, trade_id)."""
+    con.execute(
+        """
+        CREATE OR REPLACE VIEW trade_deduped AS
+        SELECT * EXCLUDE (rn) FROM (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY market_id, trade_id ORDER BY timestamp_ms
+            ) AS rn
+            FROM trade_raw
+            WHERE type = 'trade'
+        ) WHERE rn = 1
+        """
+    )
+    slot_stats = _aggregate_trade_slots_sql(
+        con, market_windows="market_windows", trade_deduped="trade_deduped"
+    )
+    sql = """
+    WITH trade_agg AS (
         SELECT
             market_id,
             MAX(symbol) AS symbol,
@@ -98,36 +149,23 @@ def _aggregate_trades_sql(
         t.total_trade_count,
         t.total_quote_volume,
         t.median_trade_size_usd,
-        i.median_intertrade_ms,
-        sl.cnts,
-        sl.active_minutes,
-        sl.minute_slots,
-        sl.market_observation_seconds
+        i.median_intertrade_ms
     FROM trade_agg t
     LEFT JOIN intertrade i ON t.market_id = i.market_id
-    LEFT JOIN slot_lists sl ON t.market_id = sl.market_id
     """
     out: dict[int, dict[str, Any]] = {}
     for row in con.execute(sql).fetchall():
-        mid, tc, vol, med_size, inter_ms, cnts, active_minutes, minute_slots, obs_s = row
-        tc = int(tc or 0)
-        obs_s = float(obs_s or 0)
-        effective_minutes_float = max(obs_s / 60.0, 1.0 / 60.0)
-        tpm_mean = float(tc) / effective_minutes_float
-        slots = max(1, int(minute_slots or 0))
-        cnt_list = [float(c) for c in (cnts or [])]
-        if len(cnt_list) < slots:
-            cnt_list = cnt_list + [0.0] * (slots - len(cnt_list))
-        elif len(cnt_list) > slots:
-            cnt_list = cnt_list[:slots]
-        out[int(mid)] = {
-            "total_trade_count": tc,
+        mid, tc, vol, med_size, inter_ms = row
+        mid = int(mid)
+        slots = slot_stats.get(mid, _empty_trade_stats())
+        out[mid] = {
+            "total_trade_count": int(tc or 0),
             "total_quote_volume": float(vol or 0),
             "median_trade_size_usd": med_size,
             "median_intertrade_ms": inter_ms,
-            "trades_per_minute_mean": tpm_mean,
-            "trades_per_minute_median": percentile(cnt_list, 50) or 0.0,
-            "trades_per_minute_p90": percentile(cnt_list, 90) or 0.0,
+            "trades_per_minute_mean": slots["trades_per_minute_mean"],
+            "trades_per_minute_median": slots["trades_per_minute_median"],
+            "trades_per_minute_p90": slots["trades_per_minute_p90"],
         }
     return out
 

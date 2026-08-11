@@ -150,6 +150,16 @@ def _book_projection(available: set[str]) -> str:
     """
 
 
+def _market_id_filter_clause(market_ids: frozenset[int] | None) -> str:
+    """SQL fragment ``AND market_id IN (...)`` for Stage 2 market filtering."""
+    if market_ids is None:
+        return ""
+    if not market_ids:
+        return " AND market_id IN (NULL)"
+    ids = ", ".join(str(int(m)) for m in sorted(market_ids))
+    return f" AND market_id IN ({ids})"
+
+
 def _read_view(
     con: duckdb.DuckDBPyConnection,
     view_name: str,
@@ -158,6 +168,7 @@ def _read_view(
     start_ms: int,
     end_ms: int,
     file_paths: list[Path] | None = None,
+    market_ids: frozenset[int] | None = None,
 ) -> bool:
     """Create a DuckDB view over parquet with time window + column projection."""
     if file_paths:
@@ -166,6 +177,7 @@ def _read_view(
         listed = _parquet_list(patterns)
     else:
         return False
+    market_filter = _market_id_filter_clause(market_ids)
     con.execute(
         f"""
         CREATE OR REPLACE VIEW {view_name} AS
@@ -173,6 +185,7 @@ def _read_view(
         FROM read_parquet({listed}, hive_partitioning=1, union_by_name=true)
         WHERE timestamp_ms >= {start_ms}
           AND timestamp_ms <= {end_ms}
+          {market_filter}
         """
     )
     return True

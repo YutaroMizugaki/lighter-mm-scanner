@@ -111,6 +111,13 @@ class Settings(BaseSettings):
     min_median_trades_per_minute: float | None = None
     min_observation_hours_for_candidate: float = Field(default=1.0, ge=0.0)
 
+    # Analyzer two-stage screening (Stage 1 fast filter → Stage 2 full analysis)
+    analyzer_two_stage_enabled: bool = False
+    analyzer_stage1_min_coverage: float = Field(default=0.90, ge=0.0, le=1.0)
+    analyzer_stage1_min_trades: int = Field(default=20, ge=0)
+    analyzer_stage1_min_spread_bps: float = Field(default=0.5, ge=0.0)
+    analyzer_stage2_top_n: int = Field(default=40, ge=1)
+
     dashboard_refresh_seconds: float = 2.0
     dashboard_top_n: int = 10
     structured_logging: bool = False
@@ -169,6 +176,26 @@ class Settings(BaseSettings):
             "scheduled_analysis_window_hours": (
                 "SCHEDULED_ANALYSIS_WINDOW_HOURS",
                 "LIGHTER_MM_SCHEDULED_ANALYSIS_WINDOW_HOURS",
+            ),
+            "analyzer_two_stage_enabled": (
+                "ANALYZER_TWO_STAGE_ENABLED",
+                "LIGHTER_MM_ANALYZER_TWO_STAGE_ENABLED",
+            ),
+            "analyzer_stage1_min_coverage": (
+                "ANALYZER_STAGE1_MIN_COVERAGE",
+                "LIGHTER_MM_ANALYZER_STAGE1_MIN_COVERAGE",
+            ),
+            "analyzer_stage1_min_trades": (
+                "ANALYZER_STAGE1_MIN_TRADES",
+                "LIGHTER_MM_ANALYZER_STAGE1_MIN_TRADES",
+            ),
+            "analyzer_stage1_min_spread_bps": (
+                "ANALYZER_STAGE1_MIN_SPREAD_BPS",
+                "LIGHTER_MM_ANALYZER_STAGE1_MIN_SPREAD_BPS",
+            ),
+            "analyzer_stage2_top_n": (
+                "ANALYZER_STAGE2_TOP_N",
+                "LIGHTER_MM_ANALYZER_STAGE2_TOP_N",
             ),
         }
         for field, names in mapping.items():

@@ -125,11 +125,27 @@ export type EstimatedFillSideRates = {
   ask_conservative?: number | null;
 };
 
+export type Stage1Summary = {
+  eligible: boolean;
+  screening_score: number | null;
+  observation_coverage: number;
+  trade_count: number;
+  median_spread_bps: number | null;
+  book_observation_count?: number;
+  book_update_count?: number;
+  trade_volume?: number;
+  mean_spread_bps?: number | null;
+  p25_spread_bps?: number | null;
+  p75_spread_bps?: number | null;
+};
+
 export type MarketRow = {
   symbol: string;
   market_id: number;
-  score: number;
-  letter_rank: string;
+  score: number | null;
+  letter_rank: string | null;
+  analysis_stage?: "full" | "screened";
+  stage1?: Stage1Summary | null;
   is_candidate: boolean;
   median_spread_bps: number | null;
   pct_time_spread_ge_5bps: number | null;

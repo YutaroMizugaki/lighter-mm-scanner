@@ -15,6 +15,10 @@ import type { MarketRow } from "@/lib/types";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
+function isScreened(m: MarketRow): boolean {
+  return m.analysis_stage === "screened";
+}
+
 export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
   const [q, setQ] = useState("");
   const [sort, setSort] = useState<
@@ -31,7 +35,7 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
     }
     xs.sort((a, b) => {
       const pick = (m: MarketRow) => {
-        if (sort === "score") return m.score;
+        if (sort === "score") return m.score ?? -Infinity;
         if (sort === "spread") return m.median_spread_bps || 0;
         if (sort === "fill30") return m.estimated_maker_fill_rate_30s_conservative ?? -1;
         if (sort === "tpm") return m.trades_per_minute_median || 0;
@@ -84,6 +88,7 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
           <thead>
             <tr>
               <th className="sticky-col">Market</th>
+              <th>Analysis</th>
               <th>Rank</th>
               <th title={TOOLTIPS.score}>Score</th>
               <th title={ESTIMATED_FILL_TOOLTIP}>Est. Fill</th>
@@ -103,7 +108,18 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
             {rows.map((m) => (
               <tr key={m.symbol}>
                 <td className="sticky-col">
-                  <Link href={`/markets/${encodeURIComponent(m.symbol)}`}>{m.symbol}</Link>
+                  {isScreened(m) ? (
+                    <span>{m.symbol}</span>
+                  ) : (
+                    <Link href={`/markets/${encodeURIComponent(m.symbol)}`}>{m.symbol}</Link>
+                  )}
+                </td>
+                <td>
+                  {isScreened(m) ? (
+                    <span className="badge analysis-badge screened">Screened</span>
+                  ) : (
+                    <span className="badge analysis-badge full">Full</span>
+                  )}
                 </td>
                 <td>
                   <RankBadge letter={m.letter_rank} />
