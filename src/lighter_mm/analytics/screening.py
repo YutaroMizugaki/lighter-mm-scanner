@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import duckdb
 
+from lighter_mm.analytics.book_metrics import _spread_persistence_from_relation
+from lighter_mm.analytics.book_semantics import (
+    BOOK_METRICS_GOOD_PREDICATE,
+    BOOK_OBSERVED_PREDICATE,
+    EFFECTIVE_SPREAD_EXPR,
+)
+from lighter_mm.analytics.markout_metrics import _aggregate_markouts_sql
 from lighter_mm.analytics.parquet_source import (
     _book_projection,
     _isolate_readable_parquet_files,
@@ -20,15 +26,6 @@ from lighter_mm.scoring import _pct_rank
 from lighter_mm.storage.state import MarketLifecycleEntry
 
 log = logging.getLogger(__name__)
-
-VALID_SPREAD_EXPR = """
-    CASE
-        WHEN best_bid IS NOT NULL AND best_ask IS NOT NULL AND mid IS NOT NULL
-             AND best_bid > 0 AND best_ask > 0 AND mid > 0 AND best_ask >= best_bid
-        THEN (best_ask - best_bid) / mid * 10000.0
-        ELSE NULL
-    END
-"""
 
 
 def _register_market_lifecycle_table(
@@ -81,6 +78,7 @@ class Stage1Market:
     pct_time_spread_ge_5bps: float | None = None
     trades_per_minute_median: float | None = None
     trades_per_minute_mean: float | None = None
+    maker_markout_5s_median_bps: float | None = None
     observation_hours: float = 0.0
     observation_coverage_pct: float = 0.0
     data_coverage_pct: float = 0.0
@@ -97,7 +95,7 @@ def _create_stage1_market_windows_view(
     market_lifecycle: dict[int, MarketLifecycleEntry] | None,
     interval_ms: int,
 ) -> None:
-    """Lifecycle-aware observation bounds from lightweight book bounds (no book_deduped)."""
+    """Lifecycle-aware observation bounds from deduped book bounds."""
     has_lifecycle = _register_market_lifecycle_table(con, market_lifecycle)
 
     if has_lifecycle:
@@ -147,6 +145,57 @@ def _create_stage1_market_windows_view(
     )
 
 
+def _prepare_stage1_book_views(con: duckdb.DuckDBPyConnection) -> None:
+    """Lightweight dedup + usability views aligned with Full Analyzer semantics."""
+    con.execute(
+        """
+        CREATE OR REPLACE VIEW stage1_book_deduped AS
+        SELECT * EXCLUDE (rn) FROM (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY market_id, timestamp_ms ORDER BY timestamp_ms
+            ) AS rn
+            FROM stage1_book_raw
+        ) WHERE rn = 1
+        """
+    )
+    con.execute(
+        f"""
+        CREATE OR REPLACE VIEW stage1_book_observed AS
+        SELECT * FROM stage1_book_deduped
+        WHERE {BOOK_OBSERVED_PREDICATE}
+        """
+    )
+    con.execute(
+        f"""
+        CREATE OR REPLACE VIEW stage1_book_metrics_good AS
+        SELECT * FROM stage1_book_deduped
+        WHERE {BOOK_METRICS_GOOD_PREDICATE}
+        """
+    )
+    con.execute(
+        f"""
+        CREATE OR REPLACE VIEW stage1_spread_observed AS
+        SELECT
+            *,
+            {EFFECTIVE_SPREAD_EXPR} AS effective_spread_bps
+        FROM stage1_book_observed
+        """
+    )
+    con.execute(
+        """
+        CREATE OR REPLACE VIEW stage1_book_bounds AS
+        SELECT
+            market_id,
+            MAX(symbol) AS symbol,
+            COUNT(*) AS book_observation_count,
+            MIN(timestamp_ms) AS first_observed_ms,
+            MAX(timestamp_ms) AS last_observed_ms
+        FROM stage1_book_deduped
+        GROUP BY market_id
+        """
+    )
+
+
 def run_stage1(
     con: duckdb.DuckDBPyConnection,
     settings: Settings,
@@ -155,6 +204,7 @@ def run_stage1(
     end_ms: int,
     book_valid: list[str],
     trade_valid: list[str],
+    markout_valid: list[str] | None = None,
     market_lifecycle: dict[int, MarketLifecycleEntry] | None = None,
 ) -> list[Stage1Market]:
     """Lightweight per-market aggregation over all markets (no heavy materialization)."""
@@ -183,35 +233,7 @@ def run_stage1(
         return []
 
     interval_ms = int(settings.book_sample_interval_seconds * 1000)
-
-    con.execute(
-        f"""
-        CREATE OR REPLACE VIEW stage1_valid_spread AS
-        SELECT
-            market_id,
-            symbol,
-            timestamp_ms,
-            {VALID_SPREAD_EXPR} AS spread_bps,
-            two_sided_depth_10bps_usd
-        FROM stage1_book_raw
-        WHERE best_bid IS NOT NULL AND best_ask IS NOT NULL AND mid IS NOT NULL
-          AND best_bid > 0 AND best_ask > 0 AND mid > 0 AND best_ask >= best_bid
-        """
-    )
-
-    con.execute(
-        """
-        CREATE OR REPLACE VIEW stage1_book_bounds AS
-        SELECT
-            market_id,
-            MAX(symbol) AS symbol,
-            COUNT(*) AS book_observation_count,
-            MIN(timestamp_ms) AS first_observed_ms,
-            MAX(timestamp_ms) AS last_observed_ms
-        FROM stage1_book_raw
-        GROUP BY market_id
-        """
-    )
+    _prepare_stage1_book_views(con)
 
     _create_stage1_market_windows_view(
         con,
@@ -221,12 +243,19 @@ def run_stage1(
         interval_ms=interval_ms,
     )
 
-    book_sql = f"""
+    persistence = _spread_persistence_from_relation(
+        con,
+        "stage1_spread_observed",
+        settings.spread_thresholds_bps,
+        settings.book_sample_interval_seconds,
+    )
+
+    book_sql = """
     SELECT
         mw.market_id,
         COALESCE(b.symbol, mw.symbol) AS symbol,
-        COALESCE(b.book_observation_count, 0) AS book_observation_count,
-        COALESCE(b.book_observation_count, 0) AS book_update_count,
+        COALESCE(c.observed_samples, 0) AS book_observation_count,
+        COALESCE(c.observed_samples, 0) AS book_update_count,
         b.first_observed_ms AS book_first_seen_at,
         b.last_observed_ms AS book_last_seen_at,
         s.mean_spread_bps,
@@ -234,14 +263,13 @@ def run_stage1(
         s.p25_spread_bps,
         s.p75_spread_bps,
         d.median_two_sided_depth_10bps_usd,
-        p.pct_time_spread_ge_5bps,
         LEAST(
             100.0,
-            100.0 * COALESCE(b.book_observation_count, 0) / GREATEST(1, mw.expected_samples)
+            100.0 * COALESCE(c.observed_samples, 0) / GREATEST(1, mw.expected_samples)
         ) AS observation_coverage_pct,
         LEAST(
             100.0,
-            100.0 * COALESCE(b.book_observation_count, 0) / GREATEST(1, mw.expected_samples)
+            100.0 * COALESCE(c.observed_samples, 0) / GREATEST(1, mw.expected_samples)
         ) AS data_coverage_pct,
         mw.market_observation_seconds / 3600.0 AS observation_hours
     FROM stage1_market_windows mw
@@ -249,38 +277,34 @@ def run_stage1(
     LEFT JOIN (
         SELECT
             market_id,
-            AVG(spread_bps) AS mean_spread_bps,
-            quantile_cont(spread_bps, 0.5) AS median_spread_bps,
-            quantile_cont(spread_bps, 0.25) AS p25_spread_bps,
-            quantile_cont(spread_bps, 0.75) AS p75_spread_bps
-        FROM stage1_valid_spread
-        WHERE spread_bps IS NOT NULL
+            COUNT(*) AS observed_samples
+        FROM stage1_book_deduped
+        GROUP BY market_id
+    ) c ON c.market_id = mw.market_id
+    LEFT JOIN (
+        SELECT
+            market_id,
+            AVG(effective_spread_bps) AS mean_spread_bps,
+            quantile_cont(effective_spread_bps, 0.5) AS median_spread_bps,
+            quantile_cont(effective_spread_bps, 0.25) AS p25_spread_bps,
+            quantile_cont(effective_spread_bps, 0.75) AS p75_spread_bps
+        FROM stage1_spread_observed
+        WHERE effective_spread_bps IS NOT NULL
         GROUP BY market_id
     ) s ON s.market_id = mw.market_id
     LEFT JOIN (
         SELECT
             market_id,
             quantile_cont(two_sided_depth_10bps_usd, 0.5) AS median_two_sided_depth_10bps_usd
-        FROM stage1_valid_spread
+        FROM stage1_book_metrics_good
         WHERE two_sided_depth_10bps_usd IS NOT NULL
         GROUP BY market_id
     ) d ON d.market_id = mw.market_id
-    LEFT JOIN (
-        SELECT
-            market_id,
-            AVG(CASE WHEN spread_bps >= 5.0 THEN 1.0 ELSE 0.0 END) AS pct_time_spread_ge_5bps
-        FROM stage1_valid_spread
-        WHERE spread_bps IS NOT NULL
-        GROUP BY market_id
-    ) p ON p.market_id = mw.market_id
-  """
+    """
 
-    book_rows = {
-        int(r[0]): r
-        for r in con.execute(book_sql).fetchall()
-    }
+    book_rows = {int(r[0]): r for r in con.execute(book_sql).fetchall()}
 
-    trade_rows: dict[int, tuple] = {}
+    trade_rows: dict[int, tuple[Any, ...]] = {}
     if trade_valid:
         try:
             trade_available = _probe_parquet_columns(con, file_paths=trade_valid)
@@ -302,26 +326,88 @@ def run_stage1(
             end_ms,
             file_paths=trade_valid,
         ):
-            trade_sql = """
+            con.execute(
+                """
+                CREATE OR REPLACE VIEW stage1_trade_deduped AS
+                SELECT * EXCLUDE (rn) FROM (
+                    SELECT *, ROW_NUMBER() OVER (
+                        PARTITION BY market_id, trade_id ORDER BY timestamp_ms
+                    ) AS rn
+                    FROM stage1_trade_raw
+                    WHERE type = 'trade'
+                ) WHERE rn = 1
+                """
+            )
+            trade_count_sql = """
             SELECT
                 market_id,
                 MAX(symbol) AS symbol,
-                COUNT(*) FILTER (WHERE type = 'trade') AS trade_count,
-                SUM(usd_amount) FILTER (WHERE type = 'trade') AS trade_volume,
-                MIN(timestamp_ms) FILTER (WHERE type = 'trade') AS trade_first_seen_at,
-                MAX(timestamp_ms) FILTER (WHERE type = 'trade') AS trade_last_seen_at
-            FROM stage1_trade_raw
+                COUNT(*) AS trade_count,
+                SUM(usd_amount) AS trade_volume,
+                MIN(timestamp_ms) AS trade_first_seen_at,
+                MAX(timestamp_ms) AS trade_last_seen_at
+            FROM stage1_trade_deduped
             GROUP BY market_id
             """
-            for row in con.execute(trade_sql).fetchall():
-                trade_rows[int(row[0])] = row
+            tpm_sql = """
+            WITH per_minute AS (
+                SELECT
+                    market_id,
+                    (timestamp_ms // 60000) AS minute_idx,
+                    COUNT(*)::DOUBLE AS cnt
+                FROM stage1_trade_deduped
+                GROUP BY market_id, minute_idx
+            )
+            SELECT
+                market_id,
+                AVG(cnt) AS trades_per_minute_mean,
+                quantile_cont(cnt, 0.5) AS trades_per_minute_median
+            FROM per_minute
+            GROUP BY market_id
+            """
+            tpm_by_id = {
+                int(r[0]): (r[1], r[2])
+                for r in con.execute(tpm_sql).fetchall()
+            }
+            for row in con.execute(trade_count_sql).fetchall():
+                mid = int(row[0])
+                tpm = tpm_by_id.get(mid)
+                trade_rows[mid] = row + (
+                    tpm[0] if tpm else None,
+                    tpm[1] if tpm else None,
+                )
 
-    all_ids = set(book_rows.keys()) | set(trade_rows.keys())
+    markout_by_id: dict[int, dict[str, Any]] = {}
+    if markout_valid:
+        markout_cols = (
+            "timestamp_ms, market_id, symbol, trade_id, horizon_s, maker_markout_bps"
+        )
+        if _read_view(
+            con,
+            "stage1_markout_raw_view",
+            None,
+            markout_cols,
+            start_ms,
+            end_ms,
+            file_paths=markout_valid,
+        ):
+            con.execute(
+                "CREATE OR REPLACE TABLE markout_raw AS "
+                "SELECT * FROM stage1_markout_raw_view"
+            )
+            markout_by_id = _aggregate_markouts_sql(con)
+            try:
+                con.execute("DROP TABLE IF EXISTS markout_raw")
+            except Exception:  # noqa: BLE001
+                pass
+
+    all_ids = set(book_rows.keys()) | set(trade_rows.keys()) | set(markout_by_id.keys())
     markets: list[Stage1Market] = []
 
     for mid in sorted(all_ids):
         br = book_rows.get(mid)
         tr = trade_rows.get(mid)
+        mo = markout_by_id.get(mid, {})
 
         if br:
             (
@@ -336,13 +422,12 @@ def run_stage1(
                 p25_spread,
                 p75_spread,
                 depth10,
-                pct_ge5,
                 obs_cov_pct,
                 data_cov_pct,
                 obs_hours,
             ) = br
         else:
-            symbol = tr[1] if tr else None
+            symbol = tr[1] if tr else markout_by_id.get(mid, {}).get("symbol")
             book_obs = 0
             book_upd = 0
             book_first = None
@@ -352,7 +437,6 @@ def run_stage1(
             p25_spread = None
             p75_spread = None
             depth10 = None
-            pct_ge5 = None
             obs_cov_pct = 0.0
             data_cov_pct = 0.0
             obs_hours = 0.0
@@ -361,11 +445,11 @@ def run_stage1(
         trade_volume = float(tr[3] or 0.0) if tr else 0.0
         trade_first = int(tr[4]) if tr and tr[4] is not None else None
         trade_last = int(tr[5]) if tr and tr[5] is not None else None
+        tpm_mean = float(tr[6]) if tr and tr[6] is not None else None
+        tpm_median = float(tr[7]) if tr and tr[7] is not None else None
 
-        obs_hours_f = float(obs_hours or 0.0)
-        tpm_mean = (
-            trade_count / max(obs_hours_f * 60.0, 0.01) if trade_count > 0 else None
-        )
+        pers = persistence.get(mid, {})
+        pct_ge5 = pers.get("pct_time_spread_ge_5bps")
 
         m = Stage1Market(
             market_id=mid,
@@ -388,8 +472,9 @@ def run_stage1(
             ),
             pct_time_spread_ge_5bps=float(pct_ge5) if pct_ge5 is not None else None,
             trades_per_minute_mean=tpm_mean,
-            trades_per_minute_median=tpm_mean,
-            observation_hours=obs_hours_f,
+            trades_per_minute_median=tpm_median,
+            maker_markout_5s_median_bps=mo.get("maker_markout_5s_median_bps"),
+            observation_hours=float(obs_hours or 0.0),
             observation_coverage_pct=float(obs_cov_pct or 0.0),
             data_coverage_pct=float(data_cov_pct or 0.0),
         )
@@ -433,18 +518,25 @@ def select_stage2_markets(
     stage1: list[Stage1Market],
     *,
     top_n: int,
+    extra_market_ids: set[int] | None = None,
 ) -> list[int]:
     """Return market_ids for Stage 2 full analysis."""
     eligible = [m for m in stage1 if m.eligible]
     if not eligible:
-        return []
-    eligible.sort(
-        key=lambda m: (m.screening_score is not None, m.screening_score or 0.0),
-        reverse=True,
-    )
-    if len(eligible) <= top_n:
-        return [m.market_id for m in eligible]
-    return [m.market_id for m in eligible[:top_n]]
+        base: list[int] = []
+    else:
+        eligible.sort(
+            key=lambda m: (m.screening_score is not None, m.screening_score or 0.0),
+            reverse=True,
+        )
+        if len(eligible) <= top_n:
+            base = [m.market_id for m in eligible]
+        else:
+            base = [m.market_id for m in eligible[:top_n]]
+
+    if extra_market_ids:
+        return sorted(set(base) | extra_market_ids)
+    return base
 
 
 def stage1_to_peer_row(m: Stage1Market, hours: float) -> dict[str, Any]:
@@ -458,12 +550,12 @@ def stage1_to_peer_row(m: Stage1Market, hours: float) -> dict[str, Any]:
         "trades_per_minute_median": m.trades_per_minute_median,
         "trades_per_minute_mean": m.trades_per_minute_mean,
         "total_trade_count": m.trade_count,
+        "maker_markout_5s_median_bps": m.maker_markout_5s_median_bps,
         "observation_coverage_pct": m.observation_coverage_pct,
         "data_coverage_pct": m.data_coverage_pct,
         "observation_hours": m.observation_hours or hours,
         "analysis_window_hours": hours,
         "analysis_scope": "rolling",
-        # Stage 2-only fields remain absent for peer percentile exclusion
     }
 
 
@@ -547,9 +639,6 @@ def merge_screening_and_full_results(
     selected_set = frozenset(selected_market_ids)
     full_scored = full_results.get("scored") or []
     scored_by_id = {int(s.row.get("market_id")): s for s in full_scored}
-    full_rows_by_id = {
-        int(r["market_id"]): r for r in full_results.get("markets") or []
-    }
 
     screened: list[dict[str, Any]] = []
     all_market_rows: list[dict[str, Any]] = []
@@ -597,6 +686,9 @@ def merge_screening_and_full_results(
             "stage2_selection_ratio": (
                 len(selected_market_ids) / len(stage1) if stage1 else 0.0
             ),
+            "stage2_book_row_count": full_results.get("book_row_count", 0),
+            "stage2_trade_row_count": full_results.get("trade_row_count", 0),
+            "stage2_markout_row_count": full_results.get("markout_row_count", 0),
         },
     }
     if full_results.get("benchmark_profile"):
@@ -621,17 +713,15 @@ def log_stage1_complete(
     )
 
 
-def log_two_stage_summary(
-    stage1_elapsed: float,
-    stage2_elapsed: float,
-    stage2_markets: int,
-) -> None:
-    log.info("[Analyzer] Stage 2 started: markets=%s", stage2_markets)
-    log.info(
-        "[Analyzer] Stage 2 completed: markets=%s elapsed=%.3fs",
-        stage2_markets,
-        stage2_elapsed,
-    )
+def log_stage2_started(markets: int) -> None:
+    log.info("[Analyzer] Stage 2 started: markets=%s", markets)
+
+
+def log_stage2_completed(markets: int, elapsed: float) -> None:
+    log.info("[Analyzer] Stage 2 completed: markets=%s elapsed=%.3fs", markets, elapsed)
+
+
+def log_two_stage_completed(stage1_elapsed: float, stage2_elapsed: float) -> None:
     log.info(
         "[Analyzer] completed: total_elapsed=%.3fs",
         stage1_elapsed + stage2_elapsed,

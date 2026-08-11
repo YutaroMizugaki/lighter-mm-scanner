@@ -8,13 +8,14 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from lighter_mm.analytics.aggregation import analyze_range, _analyze_range_impl
+from lighter_mm.analytics.aggregation import _analyze_range_impl, analyze_range
+from lighter_mm.analytics.parquet_source import _connect
 from lighter_mm.analytics.screening import (
+    Stage1Market,
+    _apply_screening_scores,
     run_stage1,
     select_stage2_markets,
-    stage1_to_peer_row,
 )
-from lighter_mm.analytics.parquet_source import AnalysisSources, _connect
 from lighter_mm.config import Settings
 
 
@@ -25,6 +26,8 @@ def _book_row(
     *,
     bid: float = 100.0,
     ask: float = 100.10,
+    is_usable: bool = True,
+    is_stale: bool = False,
 ) -> dict:
     mid = (bid + ask) / 2.0
     spread_bps = (ask - bid) / mid * 10000.0
@@ -41,8 +44,8 @@ def _book_row(
         "best_ask_size_base": 1.0,
         "best_bid_size_usd": 100.0,
         "best_ask_size_usd": 100.0,
-        "is_stale": False,
-        "is_usable": True,
+        "is_stale": is_stale,
+        "is_usable": is_usable,
         "is_inactive": False,
         "book_update_age_ms": 1000,
         "nonce": 1,
@@ -115,9 +118,7 @@ def _seed_multi_market_fixture(tmp_path: Path, n_markets: int = 5) -> tuple[int,
         ask = 100.0 + spread / 100.0
         for j in range(30):
             ts = base + j * 120_000
-            books.append(
-                _book_row(ts, mid, symbol, bid=100.0, ask=ask)
-            )
+            books.append(_book_row(ts, mid, symbol, bid=100.0, ask=ask))
         for t in range(25):
             ts = base + t * 140_000
             trades.append(_trade_row(ts, mid, symbol, t + 1))
@@ -136,15 +137,11 @@ def _seed_multi_market_fixture(tmp_path: Path, n_markets: int = 5) -> tuple[int,
 def test_stage1_aggregates_all_markets(tmp_path: Path) -> None:
     start_ms, end_ms = _seed_multi_market_fixture(tmp_path, n_markets=4)
     settings = Settings(data_dir=tmp_path)
-    sources = AnalysisSources(
-        books=tmp_path / "book_samples",
-        trades=tmp_path / "trades",
-        markouts=tmp_path / "markouts",
-    )
     from lighter_mm.storage.parquet_validation import prepare_parquet_dataset
 
-    book_valid, _ = prepare_parquet_dataset(sources.books, quarantine=False)
-    trade_valid, _ = prepare_parquet_dataset(sources.trades, quarantine=False)
+    book_valid, _ = prepare_parquet_dataset(tmp_path / "book_samples", quarantine=False)
+    trade_valid, _ = prepare_parquet_dataset(tmp_path / "trades", quarantine=False)
+    markout_valid, _ = prepare_parquet_dataset(tmp_path / "markouts", quarantine=False)
     con = _connect(tmp_path)
     stage1 = run_stage1(
         con,
@@ -153,6 +150,7 @@ def test_stage1_aggregates_all_markets(tmp_path: Path) -> None:
         end_ms=end_ms,
         book_valid=book_valid,
         trade_valid=trade_valid,
+        markout_valid=markout_valid,
     )
     con.close()
 
@@ -165,21 +163,20 @@ def test_stage1_aggregates_all_markets(tmp_path: Path) -> None:
         assert m.median_spread_bps > 0
 
 
-def test_stage1_excludes_invalid_spread_books(tmp_path: Path) -> None:
+def test_stage1_dedupes_duplicate_books(tmp_path: Path) -> None:
     start_ms = int(time.time() * 1000) - 3_600_000
     end_ms = start_ms + 3_600_000
-    bad = _book_row(start_ms, 1, "BAD", bid=0.0, ask=100.0)
-    bad["best_bid"] = 0.0
-    good = _book_row(start_ms + 1000, 1, "BAD", bid=100.0, ask=100.20)
+    ts = start_ms + 1000
+    dup = _book_row(ts, 1, "DUP")
+    dup2 = dict(dup)
+    books = [dup, dup2]
     book_dir = tmp_path / "book_samples/date=2026-08-09/hour=10"
-    _write_parquet(book_dir / "books.parquet", [bad, good])
+    _write_parquet(book_dir / "books.parquet", books)
 
     settings = Settings(data_dir=tmp_path)
     from lighter_mm.storage.parquet_validation import prepare_parquet_dataset
 
-    book_valid, _ = prepare_parquet_dataset(
-        tmp_path / "book_samples", quarantine=False
-    )
+    book_valid, _ = prepare_parquet_dataset(tmp_path / "book_samples", quarantine=False)
     con = _connect(tmp_path)
     stage1 = run_stage1(
         con,
@@ -190,14 +187,75 @@ def test_stage1_excludes_invalid_spread_books(tmp_path: Path) -> None:
         trade_valid=[],
     )
     con.close()
+    assert len(stage1) == 1
+    assert stage1[0].book_observation_count == 1
 
+
+def test_stage1_excludes_unusable_books_from_spread(tmp_path: Path) -> None:
+    start_ms = int(time.time() * 1000) - 3_600_000
+    end_ms = start_ms + 3_600_000
+    bad = _book_row(start_ms, 1, "BAD", bid=100.0, ask=100.20, is_usable=False)
+    good = _book_row(start_ms + 1000, 1, "BAD", bid=100.0, ask=100.20, is_usable=True)
+    book_dir = tmp_path / "book_samples/date=2026-08-09/hour=10"
+    _write_parquet(book_dir / "books.parquet", [bad, good])
+
+    settings = Settings(data_dir=tmp_path)
+    from lighter_mm.storage.parquet_validation import prepare_parquet_dataset
+
+    book_valid, _ = prepare_parquet_dataset(tmp_path / "book_samples", quarantine=False)
+    con = _connect(tmp_path)
+    stage1 = run_stage1(
+        con,
+        settings,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        book_valid=book_valid,
+        trade_valid=[],
+    )
+    con.close()
     assert len(stage1) == 1
     assert stage1[0].median_spread_bps is not None
 
 
-def test_eligibility_and_top_n_selection() -> None:
-    from lighter_mm.analytics.screening import Stage1Market
+def test_stage1_tpm_median_not_mean(tmp_path: Path) -> None:
+    start_ms = int(time.time() * 1000) - 3_600_000
+    end_ms = start_ms + 3_600_000
+    trades = [
+        _trade_row(start_ms + 60_000, 1, "TPM", 1),
+        _trade_row(start_ms + 120_000, 1, "TPM", 2),
+    ]
+    for i in range(100):
+        trades.append(_trade_row(start_ms + 180_000 + i, 1, "TPM", 100 + i))
+    book = _book_row(start_ms, 1, "TPM")
+    book_dir = tmp_path / "book_samples/date=2026-08-09/hour=10"
+    trade_dir = tmp_path / "trades/date=2026-08-09/hour=10"
+    _write_parquet(book_dir / "books.parquet", [book])
+    _write_parquet(trade_dir / "trades.parquet", trades)
 
+    settings = Settings(data_dir=tmp_path)
+    from lighter_mm.storage.parquet_validation import prepare_parquet_dataset
+
+    book_valid, _ = prepare_parquet_dataset(tmp_path / "book_samples", quarantine=False)
+    trade_valid, _ = prepare_parquet_dataset(tmp_path / "trades", quarantine=False)
+    con = _connect(tmp_path)
+    stage1 = run_stage1(
+        con,
+        settings,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        book_valid=book_valid,
+        trade_valid=trade_valid,
+    )
+    con.close()
+    m = stage1[0]
+    assert m.trades_per_minute_median is not None
+    assert m.trades_per_minute_mean is not None
+    assert m.trades_per_minute_median == 1.0
+    assert m.trades_per_minute_mean > 10.0
+    assert m.trades_per_minute_median != m.trades_per_minute_mean
+
+
+def test_eligibility_and_top_n_selection() -> None:
     markets = [
         Stage1Market(
             market_id=1,
@@ -236,6 +294,13 @@ def test_eligibility_and_top_n_selection() -> None:
         [Stage1Market(market_id=9, eligible=False)], top_n=40
     )
     assert none_eligible == []
+
+    with_extra = select_stage2_markets(
+        [Stage1Market(market_id=9, eligible=False)],
+        top_n=1,
+        extra_market_ids={42},
+    )
+    assert with_extra == [42]
 
 
 def test_market_ids_filter_limits_stage2_input(tmp_path: Path) -> None:
@@ -323,18 +388,38 @@ def test_all_markets_stage2_equivalent_scores(tmp_path: Path) -> None:
         read_only=True,
     )
 
-    legacy_by_id = {
-        int(s.row["market_id"]): s.score for s in legacy["scored"]
-    }
+    legacy_by_id = {int(s.row["market_id"]): s.score for s in legacy["scored"]}
     for s in staged["scored"]:
         mid = int(s.row["market_id"])
         assert mid in legacy_by_id
         assert abs(s.score - legacy_by_id[mid]) < 0.01
 
 
-def test_screening_score_ordering() -> None:
-    from lighter_mm.analytics.screening import Stage1Market, _apply_screening_scores
+def test_paper_mm_market_forced_into_stage2(tmp_path: Path) -> None:
+    start_ms, end_ms = _seed_multi_market_fixture(tmp_path, n_markets=5)
+    settings = Settings(
+        data_dir=tmp_path,
+        analyzer_two_stage_enabled=True,
+        analyzer_stage1_min_coverage=0.0,
+        analyzer_stage1_min_trades=0,
+        analyzer_stage1_min_spread_bps=0.0,
+        analyzer_stage2_top_n=1,
+        paper_mm_enabled=True,
+    )
+    result = analyze_range(
+        settings,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        read_only=True,
+        paper_mm_market_ids={5},
+        paper_mm_top_n_override=2,
+        paper_mm_order_usd_override=50.0,
+    )
+    scored_ids = {int(s.row["market_id"]) for s in result["scored"]}
+    assert 5 in scored_ids
 
+
+def test_screening_score_ordering() -> None:
     markets = [
         Stage1Market(
             market_id=1,
@@ -355,3 +440,32 @@ def test_screening_score_ordering() -> None:
     assert markets[0].screening_score is not None
     assert markets[1].screening_score is not None
     assert markets[0].screening_score > markets[1].screening_score
+
+
+def test_top_n_subset_score_differs_from_legacy(tmp_path: Path) -> None:
+    """Document that Estimated Fill peer pool shrinks when TOP N < all markets."""
+    start_ms, end_ms = _seed_multi_market_fixture(tmp_path, n_markets=5)
+    legacy = analyze_range(
+        Settings(data_dir=tmp_path, analyzer_two_stage_enabled=False),
+        start_ms=start_ms,
+        end_ms=end_ms,
+        read_only=True,
+    )
+    subset = analyze_range(
+        Settings(
+            data_dir=tmp_path,
+            analyzer_two_stage_enabled=True,
+            analyzer_stage1_min_coverage=0.0,
+            analyzer_stage1_min_trades=0,
+            analyzer_stage1_min_spread_bps=0.0,
+            analyzer_stage2_top_n=2,
+        ),
+        start_ms=start_ms,
+        end_ms=end_ms,
+        read_only=True,
+    )
+    legacy_by_id = {int(s.row["market_id"]): s.score for s in legacy["scored"]}
+    for s in subset["scored"]:
+        mid = int(s.row["market_id"])
+        # Spread/activity/coverage peers match; fill peer may differ — scores may diverge.
+        assert mid in legacy_by_id

@@ -42,7 +42,9 @@ from lighter_mm.analytics.parquet_source import (
 )
 from lighter_mm.analytics.screening import (
     log_stage1_complete,
-    log_two_stage_summary,
+    log_stage2_completed,
+    log_stage2_started,
+    log_two_stage_completed,
     merge_screening_and_full_results,
     run_stage1,
     select_stage2_markets,
@@ -588,11 +590,11 @@ def _run_markout_metrics(
     return markout_agg
 
 
-def _enrich_peer_rows_for_scoring(
+def _enrich_peer_fill_only(
     peer_rows: list[dict[str, Any]],
     full_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Merge Stage 2 markout/fill/depth into Stage 1 peer rows for scoring percentiles."""
+    """Add Estimated Maker Fill to peer rows for Stage 2 analyzed markets only."""
     full_by_id = {int(r["market_id"]): r for r in full_rows}
     enriched: list[dict[str, Any]] = []
     for peer in peer_rows:
@@ -600,27 +602,26 @@ def _enrich_peer_rows_for_scoring(
         mid = int(row["market_id"])
         if mid in full_by_id:
             fr = full_by_id[mid]
-            row.update(
-                {
-                    "median_spread_bps": fr.get("median_spread_bps"),
-                    "observation_coverage_pct": fr.get("observation_coverage_pct"),
-                    "data_coverage_pct": fr.get("data_coverage_pct"),
-                    "median_two_sided_depth_10bps_usd": fr.get(
-                        "median_two_sided_depth_10bps_usd"
-                    ),
-                    "pct_time_spread_ge_5bps": fr.get("pct_time_spread_ge_5bps"),
-                    "trades_per_minute_median": fr.get("trades_per_minute_median"),
-                    "trades_per_minute_mean": fr.get("trades_per_minute_mean"),
-                    "total_trade_count": fr.get("total_trade_count"),
-                    "observation_hours": fr.get("observation_hours"),
-                    "maker_markout_5s_median_bps": fr.get("maker_markout_5s_median_bps"),
-                    "estimated_maker_fill_rate_30s_conservative": fr.get(
-                        "estimated_maker_fill_rate_30s_conservative"
-                    ),
-                }
+            row["estimated_maker_fill_rate_30s_conservative"] = fr.get(
+                "estimated_maker_fill_rate_30s_conservative"
             )
         enriched.append(row)
     return enriched
+
+
+def _scoring_peer_rows(
+    rows: list[dict[str, Any]],
+    peer_rows: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]] | None:
+    """Choose peer population for cross-sectional score percentiles."""
+    if peer_rows is None:
+        return None
+    row_ids = {int(r["market_id"]) for r in rows}
+    peer_ids = {int(p["market_id"]) for p in peer_rows}
+    if row_ids == peer_ids:
+        # All peer markets received full analysis — use full rows for exact semantics.
+        return None
+    return _enrich_peer_fill_only(peer_rows, rows)
 
 
 def _empty_full_results(
@@ -688,6 +689,9 @@ def analyze_range(
             read_only=read_only,
             market_ids=None,
             peer_rows=None,
+            paper_mm_market_ids=paper_mm_market_ids,
+            paper_mm_top_n_override=paper_mm_top_n_override,
+            paper_mm_order_usd_override=paper_mm_order_usd_override,
         )
 
     # Two-stage: Stage 1 screening → Stage 2 full analysis on selected markets
@@ -723,24 +727,28 @@ def analyze_range(
         threads=duckdb_threads,
     )
     t_stage1 = time.monotonic()
-    stage1_markets = run_stage1(
-        stage1_con,
-        settings,
-        start_ms=start_ms,
-        end_ms=end_ms,
-        book_valid=book_valid,
-        trade_valid=trade_valid,
-        market_lifecycle=market_lifecycle,
-    )
     try:
-        stage1_con.close()
-    except Exception:  # noqa: BLE001
-        pass
+        stage1_markets = run_stage1(
+            stage1_con,
+            settings,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            book_valid=book_valid,
+            trade_valid=trade_valid,
+            markout_valid=markout_valid,
+            market_lifecycle=market_lifecycle,
+        )
+    finally:
+        try:
+            stage1_con.close()
+        except Exception:  # noqa: BLE001
+            pass
     stage1_elapsed = time.monotonic() - t_stage1
 
     selected = select_stage2_markets(
         stage1_markets,
         top_n=settings.analyzer_stage2_top_n,
+        extra_market_ids=paper_mm_market_ids,
     )
     eligible_count = sum(1 for m in stage1_markets if m.eligible)
     log_stage1_complete(
@@ -752,6 +760,7 @@ def analyze_range(
 
     peer_rows = [stage1_to_peer_row(m, hours) for m in stage1_markets]
 
+    log_stage2_started(len(selected))
     t_stage2 = time.monotonic()
     if selected:
         full_results = _analyze_range_impl(
@@ -775,6 +784,9 @@ def analyze_range(
                 all_corrupt,
                 parquet_health,
             ),
+            paper_mm_market_ids=paper_mm_market_ids,
+            paper_mm_top_n_override=paper_mm_top_n_override,
+            paper_mm_order_usd_override=paper_mm_order_usd_override,
         )
     else:
         full_results = _empty_full_results(
@@ -784,7 +796,8 @@ def analyze_range(
             parquet_health=parquet_health,
         )
     stage2_elapsed = time.monotonic() - t_stage2
-    log_two_stage_summary(stage1_elapsed, stage2_elapsed, len(selected))
+    log_stage2_completed(len(selected), stage2_elapsed)
+    log_two_stage_completed(stage1_elapsed, stage2_elapsed)
 
     return merge_screening_and_full_results(
         stage1_markets,
@@ -820,6 +833,9 @@ def _analyze_range_impl(
         list[dict[str, str]],
         dict[str, Any],
     ] | None = None,
+    paper_mm_market_ids: set[int] | None = None,
+    paper_mm_top_n_override: int | None = None,
+    paper_mm_order_usd_override: float | None = None,
 ) -> dict[str, Any]:
     """Core analyzer pipeline (optionally filtered to ``market_ids``)."""
     src = sources or _default_sources(settings.data_dir)
@@ -968,9 +984,7 @@ def _analyze_range_impl(
         min_median_trades_per_minute=settings.min_median_trades_per_minute,
         min_observation_hours=settings.min_observation_hours_for_candidate,
     )
-    scoring_peers = peer_rows
-    if peer_rows is not None:
-        scoring_peers = _enrich_peer_rows_for_scoring(peer_rows, rows)
+    scoring_peers = _scoring_peer_rows(rows, peer_rows)
     scored = score_markets(rows, thresholds=thresholds, peer_rows=scoring_peers)
     rss = _rss_mb()
     if benchmark_profile:
