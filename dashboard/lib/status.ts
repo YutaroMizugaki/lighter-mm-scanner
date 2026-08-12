@@ -61,7 +61,8 @@ export function effectiveAnalysisStatus(
   if (analysis.status === "ERROR") return { status: "ERROR", stale: false };
 
   if (analysis.status === "RUNNING") {
-    const runningStamp = analysis.started_at || analysis.generated_at || null;
+    const runningStamp =
+      analysis.heartbeat_at || analysis.started_at || analysis.generated_at || null;
     const runningAge = ageMinutes(runningStamp);
     if (runningAge !== null && runningAge > runningStaleMinutes) {
       return { status: "STALE", stale: true };

@@ -211,7 +211,14 @@ def generate_dashboard_data(
     mdir.mkdir(exist_ok=True)
     for sym, detail in payload["market_details"].items():
         (mdir / f"{sym}.json").write_text(json.dumps(detail, indent=2), encoding="utf-8")
-    # Also publish through backend public prefix (same keys as collector)
+    if settings.is_cloud:
+        console.print(
+            "[yellow]Skipping public GCS upload in cloud; "
+            "use `lighter-mm cloud-analyze` so generation bundles stay consistent.[/yellow]"
+        )
+        console.print(f"Wrote dashboard JSON to {out_dir}")
+        return
+    # Local backend public prefix (same keys as collector)
     prefix = settings.gcs_public_prefix.rstrip("/")
     backend.upload_json(f"{prefix}/latest.json", payload["latest"], public=True)
     backend.upload_json(
@@ -265,15 +272,29 @@ def analyze(
         f"Analyzed {len(scored)} markets over {hours}h · "
         f"candidates={len(result.get('candidates') or [])}"
     )
-    table = Table(title=f"Top 15 by MM Opportunity Score ({hours}h)")
-    for col in ("#", "Symbol", "Score", "Rank", "Spread", "Depth10", "TPM", "M5", "M30"):
+    table = Table(title=f"Top 15 by Effective MM Score ({hours}h)")
+    for col in (
+        "#",
+        "Symbol",
+        "Effective",
+        "Raw",
+        "Conf",
+        "Rank",
+        "Spread",
+        "Depth10",
+        "TPM",
+        "M5",
+        "M30",
+    ):
         table.add_column(col)
     for i, s in enumerate(scored[:15], 1):
         r = s.row
         table.add_row(
             str(i),
             str(r.get("symbol")),
+            f"{s.effective_score:.1f}",
             f"{s.score:.1f}",
+            f"{s.confidence:.2f}",
             s.letter_rank,
             _n(r.get("median_spread_bps")),
             _n(r.get("median_two_sided_depth_10bps_usd")),
@@ -303,7 +324,8 @@ def rank(
         console.print("(none passed filters)")
     for i, s in enumerate(cands, 1):
         console.print(
-            f"{i:2d}. {s.row.get('symbol'):12s} {s.letter_rank} {s.score:5.1f} "
+            f"{i:2d}. {s.row.get('symbol'):12s} {s.letter_rank} "
+            f"eff={s.effective_score:5.1f} raw={s.score:5.1f} "
             f"rec=${s.recommended_max_order_usd or '-'}"
         )
 

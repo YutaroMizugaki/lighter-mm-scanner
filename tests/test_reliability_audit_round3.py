@@ -19,7 +19,7 @@ from lighter_mm.cloud.analyzer import (
     select_run_to_analyze,
 )
 from lighter_mm.cloud.dashboard_data import build_dashboard_payload
-from lighter_mm.cloud.sync import DurableSync
+from lighter_mm.cloud.sync import DurableSync, PartialParquetUploadError
 from lighter_mm.collector import CollectorApp
 from lighter_mm.config import Settings
 from lighter_mm.storage.local_backend import LocalStorageBackend
@@ -485,7 +485,7 @@ def test_network_upload_failure_retains_local(tmp_path: Path) -> None:
     try:
         sync.upload_new_parquets(data_root, paths=[local])
         raise AssertionError("expected failure")
-    except OSError:
+    except PartialParquetUploadError:
         pass
     assert local.exists()
 

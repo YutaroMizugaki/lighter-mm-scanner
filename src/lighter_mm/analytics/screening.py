@@ -128,14 +128,20 @@ def _create_stage1_market_windows_view(
             bounds.first_observed_ms,
             bounds.last_observed_ms,
             {effective_start_expr} AS effective_start_ms,
-            {effective_end_expr} AS effective_end_ms,
-            CAST({effective_end_expr} - {effective_start_expr} AS DOUBLE) / 1000.0
-                AS market_observation_seconds,
+            GREATEST({effective_start_expr}, {effective_end_expr}) AS effective_end_ms,
+            CAST(
+                GREATEST({effective_start_expr}, {effective_end_expr})
+                - {effective_start_expr} AS DOUBLE
+            ) / 1000.0 AS market_observation_seconds,
             CAST(
                 GREATEST(
                     1,
                     CAST(
-                        ({effective_end_expr} - {effective_start_expr}) / {interval_ms}
+                        GREATEST(
+                            0,
+                            GREATEST({effective_start_expr}, {effective_end_expr})
+                            - {effective_start_expr}
+                        ) / {interval_ms}
                         AS DOUBLE
                     ) + 1
                 ) AS BIGINT
@@ -146,11 +152,11 @@ def _create_stage1_market_windows_view(
     )
 
 
-def _prepare_stage1_book_views(con: duckdb.DuckDBPyConnection) -> None:
-    """Lightweight dedup + usability views aligned with Full Analyzer semantics."""
+def _prepare_stage1_book_tables(con: duckdb.DuckDBPyConnection) -> None:
+    """Materialize Stage 1 books once (same GCS FUSE OOM guard as Stage 2)."""
     con.execute(
         """
-        CREATE OR REPLACE VIEW stage1_book_deduped AS
+        CREATE OR REPLACE TABLE stage1_book_deduped AS
         SELECT * EXCLUDE (rn) FROM (
             SELECT *, ROW_NUMBER() OVER (
                 PARTITION BY market_id, timestamp_ms ORDER BY timestamp_ms
@@ -159,23 +165,27 @@ def _prepare_stage1_book_views(con: duckdb.DuckDBPyConnection) -> None:
         ) WHERE rn = 1
         """
     )
+    try:
+        con.execute("DROP VIEW IF EXISTS stage1_book_raw")
+    except Exception:  # noqa: BLE001
+        pass
     con.execute(
         f"""
-        CREATE OR REPLACE VIEW stage1_book_observed AS
+        CREATE OR REPLACE TABLE stage1_book_observed AS
         SELECT * FROM stage1_book_deduped
         WHERE {BOOK_OBSERVED_PREDICATE}
         """
     )
     con.execute(
         f"""
-        CREATE OR REPLACE VIEW stage1_book_metrics_good AS
+        CREATE OR REPLACE TABLE stage1_book_metrics_good AS
         SELECT * FROM stage1_book_deduped
         WHERE {BOOK_METRICS_GOOD_PREDICATE}
         """
     )
     con.execute(
         f"""
-        CREATE OR REPLACE VIEW stage1_spread_observed AS
+        CREATE OR REPLACE TABLE stage1_spread_observed AS
         SELECT
             *,
             {EFFECTIVE_SPREAD_EXPR} AS effective_spread_bps
@@ -208,10 +218,10 @@ def run_stage1(
     markout_valid: list[str] | None = None,
     market_lifecycle: dict[int, MarketLifecycleEntry] | None = None,
 ) -> tuple[list[Stage1Market], dict[str, Any]]:
-    """Lightweight per-market aggregation over all markets (no heavy materialization).
+    """Lightweight per-market aggregation over all markets.
 
-    Returns per-market Stage 1 metrics plus window-level row counts aligned with the
-    full Analyzer (all markets in the analysis window, not Stage 2 subset).
+    Books are materialized once (same GCS FUSE OOM guard as Stage 2); Stage 1 SQL
+    stays lighter (no estimated fill / paper MM).
     """
     empty_stats: dict[str, Any] = {
         "book_row_count": 0,
@@ -244,7 +254,7 @@ def run_stage1(
         return [], empty_stats
 
     interval_ms = int(settings.book_sample_interval_seconds * 1000)
-    _prepare_stage1_book_views(con)
+    _prepare_stage1_book_tables(con)
 
     _create_stage1_market_windows_view(
         con,
@@ -601,12 +611,23 @@ def stage1_to_dict(m: Stage1Market) -> dict[str, Any]:
     }
 
 
-def screened_market_row(m: Stage1Market, hours: float) -> dict[str, Any]:
+def screened_market_row(
+    m: Stage1Market,
+    hours: float,
+    *,
+    analysis_stage: str = "screened",
+) -> dict[str, Any]:
     """Dashboard row for Stage-2-skipped markets (null semantics for unanalyzed fields)."""
+    keep_stage1_markout = analysis_stage == "selected_incomplete"
+    warnings = (
+        ["Selected for Stage 2 but full analysis produced no scored row"]
+        if keep_stage1_markout
+        else []
+    )
     return {
         "symbol": m.symbol,
         "market_id": m.market_id,
-        "analysis_stage": "screened",
+        "analysis_stage": analysis_stage,
         "stage1": stage1_to_dict(m),
         "score": None,
         "letter_rank": None,
@@ -620,7 +641,9 @@ def screened_market_row(m: Stage1Market, hours: float) -> dict[str, Any]:
         "markout_5s_count": None,
         "markout_30s_count": None,
         "markout_sample_quality": None,
-        "maker_markout_5s_median_bps": None,
+        "maker_markout_5s_median_bps": (
+            m.maker_markout_5s_median_bps if keep_stage1_markout else None
+        ),
         "maker_markout_30s_median_bps": None,
         "estimated_maker_fill_rate_5s_conservative": None,
         "estimated_maker_fill_rate_30s_conservative": None,
@@ -644,7 +667,7 @@ def screened_market_row(m: Stage1Market, hours: float) -> dict[str, Any]:
         "latest_book_update_age_seconds": None,
         "p95_book_update_age_seconds": None,
         "recommended_max_order_usd": None,
-        "warnings": [],
+        "warnings": warnings,
         "pros": [],
         "cons": [],
     }
@@ -668,6 +691,7 @@ def merge_screening_and_full_results(
     scored_by_id = {int(s.row.get("market_id")): s for s in full_scored}
 
     screened: list[dict[str, Any]] = []
+    incomplete: list[dict[str, Any]] = []
     all_market_rows: list[dict[str, Any]] = []
 
     for m in stage1:
@@ -678,6 +702,11 @@ def merge_screening_and_full_results(
             row["stage1"] = stage1_to_dict(m)
             s.row.update({"analysis_stage": "full", "stage1": stage1_to_dict(m)})
             all_market_rows.append(row)
+        elif m.market_id in selected_set:
+            incomplete.append(
+                screened_market_row(m, hours, analysis_stage="selected_incomplete")
+            )
+            all_market_rows.append(incomplete[-1])
         else:
             screened.append(screened_market_row(m, hours))
             all_market_rows.append(screened[-1])
@@ -722,6 +751,7 @@ def merge_screening_and_full_results(
             "markets_eligible": eligible_count,
             "markets_selected": len(selected_market_ids),
             "markets_full_analyzed": len(scored),
+            "markets_selected_incomplete": len(incomplete),
             "stage2_selection_ratio": (
                 len(selected_market_ids) / len(stage1) if stage1 else 0.0
             ),

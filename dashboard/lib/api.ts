@@ -85,9 +85,7 @@ export async function getOverviewResult(
     `${resolved.prefix}latest.json`,
     "generation",
   );
-  if (result.ok) return result;
-
-  return fetchJson<Overview>("latest.json", "live");
+  return result;
 }
 
 export async function getCollectorStatusResult(): Promise<FetchResult<CollectorStatus>> {
@@ -111,9 +109,7 @@ export async function getMarketsResult(
     `${resolved.prefix}markets.json`,
     "generation",
   );
-  if (result.ok) return result;
-
-  return fetchJson<{ markets: MarketRow[] }>("markets.json", "live");
+  return result;
 }
 
 export async function getCandidatesResult(
@@ -129,9 +125,7 @@ export async function getCandidatesResult(
     `${resolved.prefix}candidates.json`,
     "generation",
   );
-  if (result.ok) return result;
-
-  return fetchJson<{ candidates: MarketRow[] }>("candidates.json", "live");
+  return result;
 }
 
 /** Compatibility helper — prefer getMarketsResult() when failure must surface. */
@@ -156,8 +150,5 @@ export async function getMarket(
     `${resolved.prefix}market/${encoded}.json`,
     "generation",
   );
-  if (result.ok) return result.data;
-
-  const legacy = await fetchJson<MarketRow>(`market/${encoded}.json`, "live");
-  return legacy.ok ? legacy.data : null;
+  return result.ok ? result.data : null;
 }

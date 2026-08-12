@@ -17,6 +17,11 @@ from lighter_mm.analytics.book_metrics import (
     _volatility_explain_plans,
     _volatility_sql,
 )
+from lighter_mm.analytics.book_semantics import (
+    BOOK_METRICS_GOOD_PREDICATE,
+    BOOK_OBSERVED_PREDICATE,
+    EFFECTIVE_SPREAD_EXPR,
+)
 from lighter_mm.analytics.estimated_fill_metrics import (
     aggregate_estimated_fill_sql,
     attach_estimated_maker_edge,
@@ -173,9 +178,11 @@ def _create_market_windows_view(
             bounds.first_observed_ms,
             bounds.last_observed_ms,
             {effective_start_expr} AS effective_start_ms,
-            {effective_end_expr} AS effective_end_ms,
-            CAST({effective_end_expr} - {effective_start_expr} AS DOUBLE) / 1000.0
-                AS market_observation_seconds
+            GREATEST({effective_start_expr}, {effective_end_expr}) AS effective_end_ms,
+            CAST(
+                GREATEST({effective_start_expr}, {effective_end_expr})
+                - {effective_start_expr} AS DOUBLE
+            ) / 1000.0 AS market_observation_seconds
         FROM (
             SELECT
                 market_id,
@@ -326,25 +333,18 @@ def _prepare_book_dataset(
     except Exception:  # noqa: BLE001
         pass
     con.execute(
-        """
+        f"""
         CREATE OR REPLACE TABLE book_observed AS
         SELECT * FROM book_deduped
-        WHERE is_usable = true
-           OR (is_usable IS NULL AND mid IS NOT NULL)
+        WHERE {BOOK_OBSERVED_PREDICATE}
         """
     )
     con.execute(
-        """
+        f"""
         CREATE OR REPLACE TABLE book_spread_observed AS
         SELECT
             *,
-            CASE
-                WHEN spread_bps IS NOT NULL THEN spread_bps
-                WHEN best_bid IS NOT NULL AND best_ask IS NOT NULL AND mid IS NOT NULL
-                     AND mid > 0 AND best_ask >= best_bid
-                THEN (best_ask - best_bid) / mid * 10000.0
-                ELSE NULL
-            END AS effective_spread_bps
+            {EFFECTIVE_SPREAD_EXPR} AS effective_spread_bps
         FROM book_observed
         """
     )
@@ -352,20 +352,13 @@ def _prepare_book_dataset(
     # depth zeros (is_stale=true with no is_usable column). Legacy spread may be
     # recovered from best_bid/best_ask/mid when spread_bps was nulled by old collector.
     con.execute(
-        """
+        f"""
         CREATE OR REPLACE TABLE book_metrics_good AS
         SELECT
             *,
-            CASE
-                WHEN spread_bps IS NOT NULL THEN spread_bps
-                WHEN best_bid IS NOT NULL AND best_ask IS NOT NULL AND mid IS NOT NULL
-                     AND mid > 0 AND best_ask >= best_bid
-                THEN (best_ask - best_bid) / mid * 10000.0
-                ELSE NULL
-            END AS effective_spread_bps
+            {EFFECTIVE_SPREAD_EXPR} AS effective_spread_bps
         FROM book_deduped
-        WHERE is_usable = true
-           OR (is_usable IS NULL AND is_stale = false AND mid IS NOT NULL)
+        WHERE {BOOK_METRICS_GOOD_PREDICATE}
         """
     )
     _create_market_windows_view(

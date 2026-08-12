@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -159,8 +160,8 @@ class GCSStorageBackend(StorageBackend):
         *,
         cache_control: str,
     ) -> None:
-        """Upload JSON via a staging key, then server-side copy to the final key."""
-        staging_key = f"{remote_key}.staging"
+        """Upload JSON via a unique staging key, then server-side copy to the final key."""
+        staging_key = f"{remote_key}.staging.{uuid.uuid4().hex}"
         staging = bucket.blob(staging_key)
         staging.cache_control = cache_control
         staging.upload_from_string(data, content_type="application/json")

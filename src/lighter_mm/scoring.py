@@ -65,6 +65,29 @@ class ScoredMarket:
     confidence_breakdown: dict[str, Any] = field(default_factory=dict)
 
 
+def _first_present_number(row: dict[str, Any], *keys: str) -> float | None:
+    """Return the first non-None numeric value, including 0.0 (unlike ``or``)."""
+    for key in keys:
+        val = row.get(key)
+        if val is None:
+            continue
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _coverage_pct(row: dict[str, Any]) -> float:
+    cov = _first_present_number(row, "observation_coverage_pct", "data_coverage_pct")
+    return 0.0 if cov is None else cov
+
+
+def _observation_hours(row: dict[str, Any]) -> float:
+    hours = _first_present_number(row, "observation_hours")
+    return max(hours if hours is not None else 1.0, 0.01)
+
+
 def _pct_rank(values: list[float | None], x: float | None) -> float:
     xs = [v for v in values if v is not None]
     if not xs or x is None:
@@ -328,7 +351,7 @@ def _compute_rank_components_for_row(
         pr_fill = _pct_rank(estimated_fill, fill_val)
 
     pers_val = row.get("pct_time_spread_ge_5bps")
-    cov_val = row.get("observation_coverage_pct") or row.get("data_coverage_pct")
+    cov_val = _first_present_number(row, "observation_coverage_pct", "data_coverage_pct")
     dq_raw = _dq_raw_value(pers_val, cov_val)
     pr_dq = _pct_rank(dq_vals, dq_raw)
 
@@ -420,14 +443,14 @@ def _apply_score_penalties(
     thresholds: CandidateThresholds,
 ) -> tuple[float, list[str]]:
     penalties: list[str] = []
-    cov = row.get("observation_coverage_pct") or row.get("data_coverage_pct") or 0.0
+    cov = _coverage_pct(row)
     if cov < thresholds.min_coverage_pct:
         score *= 0.55
         penalties.append(
             f"strong penalty: observation coverage < {thresholds.min_coverage_pct:.0f}%"
         )
     tc = row.get("total_trade_count") or 0
-    hours = max(row.get("observation_hours") or 1.0, 0.01)
+    hours = _observation_hours(row)
     if tc < thresholds.min_trades_per_hour * hours * 0.25:
         score *= 0.5
         penalties.append("strong penalty: extremely low trade count")
@@ -465,7 +488,7 @@ def _is_candidate(
     pr_act: float,
     peer_count: int,
 ) -> bool:
-    cov = row.get("observation_coverage_pct") or row.get("data_coverage_pct") or 0.0
+    cov = _coverage_pct(row)
     d10 = row.get("median_two_sided_depth_10bps_usd") or 0.0
     m5 = row.get("maker_markout_5s_median_bps")
     m30 = row.get("maker_markout_30s_median_bps")
@@ -473,7 +496,7 @@ def _is_candidate(
 
     tpm_median = float(row.get("trades_per_minute_median") or 0.0)
     tpm_mean = float(row.get("trades_per_minute_mean") or 0.0)
-    hours_obs = max(row.get("observation_hours") or 1.0, 0.01)
+    hours_obs = _observation_hours(row)
     trades_per_hour = (row.get("total_trade_count") or 0) / hours_obs
     trades_per_hour_from_mean = tpm_mean * 60.0
     activity_ok = (

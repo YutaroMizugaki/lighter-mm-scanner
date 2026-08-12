@@ -150,6 +150,21 @@ def test_score_penalties() -> None:
     assert scored[1].letter_rank in {"C", "D"}
 
 
+def test_zero_observation_coverage_is_not_treated_as_missing() -> None:
+    from lighter_mm.scoring import CandidateThresholds, _apply_score_penalties, _coverage_pct
+
+    row = {
+        "observation_coverage_pct": 0.0,
+        "data_coverage_pct": 99.0,
+        "observation_hours": 0.0,
+        "total_trade_count": 0,
+    }
+    assert _coverage_pct(row) == 0.0
+    score, penalties = _apply_score_penalties(row, 80.0, CandidateThresholds())
+    assert any("coverage" in p for p in penalties)
+    assert score < 80.0
+
+
 def test_token_bucket_rate() -> None:
     async def _run() -> None:
         b = TokenBucket(rate_per_minute=6000, capacity=2)  # 100/sec
