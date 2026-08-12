@@ -159,6 +159,29 @@ def test_json_staging_blob_deleted_when_copy_fails(
     final_blob.patch.assert_not_called()
 
 
+@patch("google.cloud.storage.Client")
+def test_json_staging_blob_deleted_when_upload_fails(
+    mock_client_cls: MagicMock, tmp_path: Path
+) -> None:
+    client = MagicMock()
+    mock_client_cls.return_value = client
+    private_bucket = MagicMock()
+    staging_blob = MagicMock()
+    staging_blob.upload_from_string.side_effect = RuntimeError("upload failed")
+    private_bucket.blob.return_value = staging_blob
+    client.bucket.return_value = private_bucket
+
+    backend = GCSStorageBackend("priv-bucket", local_root=tmp_path, public_bucket_name=None)
+    try:
+        backend.upload_json("lighter-mm/state/state.json", {"v": 1})
+        raise AssertionError("expected upload failure")
+    except RuntimeError as exc:
+        assert "upload failed" in str(exc)
+
+    staging_blob.delete.assert_called()
+    private_bucket.copy_blob.assert_not_called()
+
+
 def test_generate_dashboard_data_skips_cloud_public_upload() -> None:
     from pathlib import Path
 

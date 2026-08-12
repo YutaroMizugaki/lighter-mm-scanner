@@ -164,15 +164,15 @@ class GCSStorageBackend(StorageBackend):
         staging_key = f"{remote_key}.staging.{uuid.uuid4().hex}"
         staging = bucket.blob(staging_key)
         staging.cache_control = cache_control
-        staging.upload_from_string(data, content_type="application/json")
         try:
+            staging.upload_from_string(data, content_type="application/json")
             bucket.copy_blob(staging, bucket, remote_key)
             final = bucket.blob(remote_key)
             final.cache_control = cache_control
             final.patch()
         finally:
             # Unique staging keys are not overwritten on retry; always attempt
-            # delete even when copy/patch fails so objects cannot accumulate.
+            # delete even when upload/copy/patch fails so objects cannot accumulate.
             try:
                 staging.delete()
             except Exception as exc:  # noqa: BLE001
