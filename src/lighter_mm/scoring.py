@@ -78,8 +78,13 @@ def _first_present_number(row: dict[str, Any], *keys: str) -> float | None:
     return None
 
 
+def _coverage_value(row: dict[str, Any]) -> float | None:
+    """Prefer observation coverage, including 0.0 (unlike ``or``)."""
+    return _first_present_number(row, "observation_coverage_pct", "data_coverage_pct")
+
+
 def _coverage_pct(row: dict[str, Any]) -> float:
-    cov = _first_present_number(row, "observation_coverage_pct", "data_coverage_pct")
+    cov = _coverage_value(row)
     return 0.0 if cov is None else cov
 
 
@@ -179,7 +184,7 @@ def build_narratives(
 
     if funding is not None and abs(float(funding)) > 0.01:
         warnings.append("funding relatively high")
-    cov = row.get("observation_coverage_pct") or row.get("data_coverage_pct") or 0
+    cov = _coverage_pct(row)
     if coverage_floor <= cov < 95:
         warnings.append("data coverage below 95%")
     for p in penalties:
@@ -351,7 +356,7 @@ def _compute_rank_components_for_row(
         pr_fill = _pct_rank(estimated_fill, fill_val)
 
     pers_val = row.get("pct_time_spread_ge_5bps")
-    cov_val = _first_present_number(row, "observation_coverage_pct", "data_coverage_pct")
+    cov_val = _coverage_value(row)
     dq_raw = _dq_raw_value(pers_val, cov_val)
     pr_dq = _pct_rank(dq_vals, dq_raw)
 
@@ -371,7 +376,7 @@ def _peer_dq_values(
     return [
         _dq_raw_value(
             r.get("pct_time_spread_ge_5bps"),
-            r.get("observation_coverage_pct") or r.get("data_coverage_pct"),
+            _coverage_value(r),
         )
         for r in peer
     ]
@@ -552,9 +557,7 @@ def score_markets(
         markout = [r.get("maker_markout_5s_median_bps") for r in peer]
         estimated_fill = [r.get("estimated_maker_fill_rate_30s_conservative") for r in peer]
         persistence = [r.get("pct_time_spread_ge_5bps") for r in peer]
-        coverage = [
-            r.get("observation_coverage_pct") or r.get("data_coverage_pct") for r in peer
-        ]
+        coverage = [_coverage_value(r) for r in peer]
         dq_vals = _peer_dq_values(peer)
         peer_count = len(peer)
     else:
@@ -564,9 +567,7 @@ def score_markets(
         markout = [r.get("maker_markout_5s_median_bps") for r in rows]
         estimated_fill = [r.get("estimated_maker_fill_rate_30s_conservative") for r in rows]
         persistence = [r.get("pct_time_spread_ge_5bps") for r in rows]
-        coverage = [
-            r.get("observation_coverage_pct") or r.get("data_coverage_pct") for r in rows
-        ]
+        coverage = [_coverage_value(r) for r in rows]
         dq_vals = _peer_dq_values(rows)
         peer_count = len(rows)
 

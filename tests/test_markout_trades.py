@@ -165,6 +165,44 @@ def test_zero_observation_coverage_is_not_treated_as_missing() -> None:
     assert score < 80.0
 
 
+def test_zero_observation_coverage_ranks_below_true_high_coverage() -> None:
+    from lighter_mm.scoring import _peer_dq_values, score_markets
+
+    high = {
+        "symbol": "HIGH",
+        "market_id": 1,
+        "observation_hours": 24,
+        "observation_coverage_pct": 99.0,
+        "data_coverage_pct": 99.0,
+        "pct_time_spread_ge_5bps": 0.5,
+        "median_spread_bps": 8,
+        "median_two_sided_depth_10bps_usd": 5000,
+        "median_two_sided_depth_5bps_usd": 2000,
+        "trades_per_minute_median": 10,
+        "trades_per_minute_mean": 10,
+        "total_trade_count": 10000,
+        "maker_markout_5s_median_bps": 1.5,
+        "maker_markout_30s_median_bps": 0.5,
+    }
+    zero_obs = {
+        **high,
+        "symbol": "ZERO",
+        "market_id": 2,
+        "observation_coverage_pct": 0.0,
+        "data_coverage_pct": 99.0,
+    }
+    peer_dq = _peer_dq_values([high, zero_obs])
+    assert peer_dq[0] is not None and peer_dq[1] is not None
+    assert peer_dq[1] < peer_dq[0]
+
+    scored = score_markets([high, zero_obs])
+    by_sym = {s.row["symbol"]: s for s in scored}
+    high_dq = by_sym["HIGH"].rank_components["data_quality_persistence"]
+    zero_dq = by_sym["ZERO"].rank_components["data_quality_persistence"]
+    assert high_dq is not None and zero_dq is not None
+    assert zero_dq < high_dq
+
+
 def test_token_bucket_rate() -> None:
     async def _run() -> None:
         b = TokenBucket(rate_per_minute=6000, capacity=2)  # 100/sec

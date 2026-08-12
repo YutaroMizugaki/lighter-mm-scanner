@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -25,6 +25,7 @@ from lighter_mm.cloud.sync import DurableSync, PartialParquetUploadError, Upload
 from lighter_mm.collector import CollectorApp
 from lighter_mm.config import Settings
 from lighter_mm.storage.local_backend import LocalStorageBackend
+from lighter_mm.storage.lock import LostLeadershipError
 from lighter_mm.storage.parquet_store import ParquetStore, _book_schema
 from lighter_mm.storage.parquet_validation import validate_parquet_file
 from lighter_mm.storage.state import RunState, now_iso
@@ -329,3 +330,61 @@ def test_partial_parquet_upload_advances_watermark(tmp_path: Path) -> None:
     assert not p1.exists()
     assert p2.exists()
     assert app._consecutive_sync_failures == 1
+
+
+def test_partial_upload_lost_leadership_does_not_write_state(tmp_path: Path) -> None:
+    app = _make_collector_app(tmp_path)
+    event_ms = _ms("2026-01-01T14:30:00+00:00")
+    uploaded = [
+        UploadedParquet(
+            Path("x.parquet"),
+            "remote/x.parquet",
+            100,
+            max_event_timestamp_ms=event_ms,
+        )
+    ]
+
+    def fail_partial(*_a: object, **_k: object) -> list[UploadedParquet]:
+        raise PartialParquetUploadError(RuntimeError("second failed"), uploaded)
+
+    def require(*, phase: str) -> None:
+        if phase == "partial-upload watermark persist":
+            raise LostLeadershipError("lost during partial persist")
+
+    persist = MagicMock()
+    app._persist_durable_state = persist  # type: ignore[method-assign]
+    app._require_leadership = require  # type: ignore[method-assign]
+    with patch.object(app.sync, "upload_new_parquets", side_effect=fail_partial):
+        with patch.object(app.store, "take_closed_paths", return_value=[]):
+            with patch.object(app.store, "maybe_flush"):
+                with patch.object(app.store, "rotate_all"):
+                    with pytest.raises(LostLeadershipError):
+                        app._sync_only(final=False)
+    persist.assert_not_called()
+    assert app.state.last_durable_event_ms == event_ms
+
+
+def test_partial_upload_persist_lost_leadership_is_not_swallowed(tmp_path: Path) -> None:
+    app = _make_collector_app(tmp_path)
+    event_ms = _ms("2026-01-01T14:30:00+00:00")
+    uploaded = [
+        UploadedParquet(
+            Path("x.parquet"),
+            "remote/x.parquet",
+            100,
+            max_event_timestamp_ms=event_ms,
+        )
+    ]
+
+    def fail_partial(*_a: object, **_k: object) -> list[UploadedParquet]:
+        raise PartialParquetUploadError(RuntimeError("second failed"), uploaded)
+
+    app._persist_durable_state = MagicMock(  # type: ignore[method-assign]
+        side_effect=LostLeadershipError("lost inside persist")
+    )
+    with patch.object(app.sync, "upload_new_parquets", side_effect=fail_partial):
+        with patch.object(app.store, "take_closed_paths", return_value=[]):
+            with patch.object(app.store, "maybe_flush"):
+                with patch.object(app.store, "rotate_all"):
+                    with pytest.raises(LostLeadershipError):
+                        app._sync_only(final=False)

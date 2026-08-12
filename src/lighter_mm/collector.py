@@ -550,8 +550,14 @@ class CollectorApp:
             self._last_sync_error = str(exc)
             self._apply_uploaded_watermark(uploaded)
             if uploaded:
+                # Same single-leader gate as the success path. Do not persist
+                # state.json / active_run.json after losing the lock, and do not
+                # swallow LostLeadershipError as a generic persist failure.
+                self._require_leadership(phase="partial-upload watermark persist")
                 try:
                     self._persist_durable_state(status=self.state.status)
+                except LostLeadershipError:
+                    raise
                 except Exception as persist_exc:  # noqa: BLE001
                     log.warning("partial-upload watermark persist failed: %s", persist_exc)
             raise
