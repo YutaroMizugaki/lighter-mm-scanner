@@ -34,6 +34,7 @@ export type AnalysisStatus = {
   run_id: string | null;
   generated_at: string;
   started_at?: string | null;
+  heartbeat_at?: string | null;
   error?: string | null;
   last_successful_analysis_at?: string | null;
   duration_seconds?: number | null;
@@ -150,7 +151,7 @@ export type MarketRow = {
   confidence_reasons?: string[];
   confidence_breakdown?: Record<string, number | null> | null;
   letter_rank: string | null;
-  analysis_stage?: "full" | "screened";
+  analysis_stage?: "full" | "screened" | "selected_incomplete";
   stage1?: Stage1Summary | null;
   is_candidate: boolean;
   median_spread_bps: number | null;

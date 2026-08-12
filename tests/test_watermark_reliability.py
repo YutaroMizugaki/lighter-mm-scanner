@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import threading
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from lighter_mm.analytics.aggregation import analyze_range
 from lighter_mm.cloud.analyzer_target import _analysis_window_ms, _durable_watermark_ms
@@ -19,10 +21,11 @@ from lighter_mm.cloud.health import (
     build_collector_status_payload,
     latest_data_timestamp_iso,
 )
-from lighter_mm.cloud.sync import DurableSync, UploadedParquet
+from lighter_mm.cloud.sync import DurableSync, PartialParquetUploadError, UploadedParquet
 from lighter_mm.collector import CollectorApp
 from lighter_mm.config import Settings
 from lighter_mm.storage.local_backend import LocalStorageBackend
+from lighter_mm.storage.lock import LostLeadershipError
 from lighter_mm.storage.parquet_store import ParquetStore, _book_schema
 from lighter_mm.storage.parquet_validation import validate_parquet_file
 from lighter_mm.storage.state import RunState, now_iso
@@ -94,6 +97,7 @@ def _make_collector_app(tmp_path: Path) -> CollectorApp:
     app._last_sync_error = None
     app._last_sync_attempt_at = None
     app._lost_leadership = False
+    app._durable_write_lock = threading.RLock()
     app.lock = type("L", (), {"renew": lambda *a, **k: True})()
     app._write_state = lambda: None  # noqa: E731
     app._require_leadership = lambda **kwargs: None  # noqa: E731
@@ -285,3 +289,102 @@ def test_parquet_rename_failure_preserves_retryable_data(tmp_path: Path) -> None
     assert store.samples_written == 0
     assert tmp_path_file.exists()
     assert not final_path.exists()
+
+
+def test_partial_parquet_upload_advances_watermark(tmp_path: Path) -> None:
+    app = _make_collector_app(tmp_path)
+    data_root = app.settings.data_dir
+    schema = _book_schema([5, 10, 25])
+    ts_new = _ms("2026-01-01T14:30:00+00:00")
+    ts_old = _ms("2026-01-01T14:25:00+00:00")
+    p1 = data_root / "book_samples/date=2026-01-01/hour=14/part-a.parquet"
+    p2 = data_root / "book_samples/date=2026-01-01/hour=14/part-b.parquet"
+    p1.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.Table.from_pylist([_book_row(ts_new)], schema=schema), p1)
+    pq.write_table(pa.Table.from_pylist([_book_row(ts_old)], schema=schema), p2)
+
+    class FailSecond:
+        def __init__(self, inner: LocalStorageBackend) -> None:
+            self.inner = inner
+            self.n = 0
+
+        def upload_file(self, local_path, remote_key, **kwargs):  # noqa: ANN001
+            self.n += 1
+            if self.n >= 2:
+                raise RuntimeError("second failed")
+            return self.inner.upload_file(local_path, remote_key, **kwargs)
+
+        def __getattr__(self, name: str):  # noqa: ANN001
+            return getattr(self.inner, name)
+
+    app.sync.backend = FailSecond(app.backend)
+    before = app.state.last_durable_event_ms
+    with patch.object(app.store, "take_closed_paths", return_value=[p1, p2]):
+        with patch.object(app.store, "maybe_flush"):
+            with patch.object(app.store, "rotate_all"):
+                with patch.object(app, "_publish_collector_status"):
+                    with pytest.raises(PartialParquetUploadError):
+                        app._sync_only(final=False)
+    assert app.state.last_durable_event_ms == ts_new
+    assert app.state.last_durable_event_ms > before
+    assert not p1.exists()
+    assert p2.exists()
+    assert app._consecutive_sync_failures == 1
+
+
+def test_partial_upload_lost_leadership_does_not_write_state(tmp_path: Path) -> None:
+    app = _make_collector_app(tmp_path)
+    event_ms = _ms("2026-01-01T14:30:00+00:00")
+    uploaded = [
+        UploadedParquet(
+            Path("x.parquet"),
+            "remote/x.parquet",
+            100,
+            max_event_timestamp_ms=event_ms,
+        )
+    ]
+
+    def fail_partial(*_a: object, **_k: object) -> list[UploadedParquet]:
+        raise PartialParquetUploadError(RuntimeError("second failed"), uploaded)
+
+    def require(*, phase: str) -> None:
+        if phase == "partial-upload watermark persist":
+            raise LostLeadershipError("lost during partial persist")
+
+    persist = MagicMock()
+    app._persist_durable_state = persist  # type: ignore[method-assign]
+    app._require_leadership = require  # type: ignore[method-assign]
+    with patch.object(app.sync, "upload_new_parquets", side_effect=fail_partial):
+        with patch.object(app.store, "take_closed_paths", return_value=[]):
+            with patch.object(app.store, "maybe_flush"):
+                with patch.object(app.store, "rotate_all"):
+                    with pytest.raises(LostLeadershipError):
+                        app._sync_only(final=False)
+    persist.assert_not_called()
+    assert app.state.last_durable_event_ms == event_ms
+
+
+def test_partial_upload_persist_lost_leadership_is_not_swallowed(tmp_path: Path) -> None:
+    app = _make_collector_app(tmp_path)
+    event_ms = _ms("2026-01-01T14:30:00+00:00")
+    uploaded = [
+        UploadedParquet(
+            Path("x.parquet"),
+            "remote/x.parquet",
+            100,
+            max_event_timestamp_ms=event_ms,
+        )
+    ]
+
+    def fail_partial(*_a: object, **_k: object) -> list[UploadedParquet]:
+        raise PartialParquetUploadError(RuntimeError("second failed"), uploaded)
+
+    app._persist_durable_state = MagicMock(  # type: ignore[method-assign]
+        side_effect=LostLeadershipError("lost inside persist")
+    )
+    with patch.object(app.sync, "upload_new_parquets", side_effect=fail_partial):
+        with patch.object(app.store, "take_closed_paths", return_value=[]):
+            with patch.object(app.store, "maybe_flush"):
+                with patch.object(app.store, "rotate_all"):
+                    with pytest.raises(LostLeadershipError):
+                        app._sync_only(final=False)

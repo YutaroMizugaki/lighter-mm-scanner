@@ -111,3 +111,83 @@ def test_build_storage_backend_reads_unprefixed_public_env(
     backend = build_storage_backend(settings)
     assert isinstance(backend, GCSStorageBackend)
     assert backend.public_bucket_name == "pub-bucket"
+
+
+@patch("google.cloud.storage.Client")
+def test_json_staging_key_is_unique_per_upload(mock_client_cls: MagicMock, tmp_path: Path) -> None:
+    client = MagicMock()
+    mock_client_cls.return_value = client
+    private_bucket = MagicMock()
+    private_blob = MagicMock()
+    private_bucket.blob.return_value = private_blob
+    client.bucket.return_value = private_bucket
+
+    backend = GCSStorageBackend("priv-bucket", local_root=tmp_path, public_bucket_name=None)
+    backend.upload_json("lighter-mm/state/state.json", {"v": 1})
+    backend.upload_json("lighter-mm/state/state.json", {"v": 2})
+
+    keys = [call.args[0] for call in private_bucket.blob.call_args_list]
+    staging = [k for k in keys if ".staging." in str(k)]
+    assert len(staging) >= 2
+    assert len(set(staging)) == len(staging)
+    assert all(k != "lighter-mm/state/state.json.staging" for k in staging)
+
+
+@patch("google.cloud.storage.Client")
+def test_json_staging_blob_deleted_when_copy_fails(
+    mock_client_cls: MagicMock, tmp_path: Path
+) -> None:
+    client = MagicMock()
+    mock_client_cls.return_value = client
+    private_bucket = MagicMock()
+    staging_blob = MagicMock()
+    final_blob = MagicMock()
+    private_bucket.copy_blob.side_effect = RuntimeError("copy failed")
+
+    def _blob(key: str) -> MagicMock:
+        return staging_blob if ".staging." in str(key) else final_blob
+
+    private_bucket.blob.side_effect = _blob
+    client.bucket.return_value = private_bucket
+    backend = GCSStorageBackend("priv-bucket", local_root=tmp_path, public_bucket_name=None)
+    try:
+        backend.upload_json("lighter-mm/state/state.json", {"v": 1})
+        raise AssertionError("expected copy failure")
+    except RuntimeError as exc:
+        assert "copy failed" in str(exc)
+    staging_blob.delete.assert_called()
+    final_blob.patch.assert_not_called()
+
+
+@patch("google.cloud.storage.Client")
+def test_json_staging_blob_deleted_when_upload_fails(
+    mock_client_cls: MagicMock, tmp_path: Path
+) -> None:
+    client = MagicMock()
+    mock_client_cls.return_value = client
+    private_bucket = MagicMock()
+    staging_blob = MagicMock()
+    staging_blob.upload_from_string.side_effect = RuntimeError("upload failed")
+    private_bucket.blob.return_value = staging_blob
+    client.bucket.return_value = private_bucket
+
+    backend = GCSStorageBackend("priv-bucket", local_root=tmp_path, public_bucket_name=None)
+    try:
+        backend.upload_json("lighter-mm/state/state.json", {"v": 1})
+        raise AssertionError("expected upload failure")
+    except RuntimeError as exc:
+        assert "upload failed" in str(exc)
+
+    staging_blob.delete.assert_called()
+    private_bucket.copy_blob.assert_not_called()
+
+
+def test_generate_dashboard_data_skips_cloud_public_upload() -> None:
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "src/lighter_mm/cli.py").read_text(
+        encoding="utf-8"
+    )
+    assert "Skipping public GCS upload in cloud" in src
+    assert "settings.is_cloud" in src
+    assert "effective_score" in src

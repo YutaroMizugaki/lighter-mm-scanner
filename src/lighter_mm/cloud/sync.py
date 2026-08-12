@@ -33,6 +33,20 @@ class UploadedParquet:
     max_event_timestamp_ms: int | None = None
 
 
+class PartialParquetUploadError(Exception):
+    """Raised when some Parquet files uploaded before a later file failed.
+
+    ``uploaded`` is already durable (and local copies may already be deleted).
+    Callers must advance the event watermark from these items and only requeue
+    paths that still exist locally.
+    """
+
+    def __init__(self, cause: BaseException, uploaded: list[UploadedParquet]) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+        self.uploaded = uploaded
+
+
 class DurableSync:
     def __init__(
         self,
@@ -154,13 +168,13 @@ class DurableSync:
                     UploadedParquet(path, remote, size, max_event_timestamp_ms=max_event_ts)
                 )
                 continue
-            except Exception:
+            except Exception as exc:
                 log.warning(
                     "parquet upload failed for %s",
                     path,
                     extra={"event": "parquet_upload_failed", "path": remote},
                 )
-                raise
+                raise PartialParquetUploadError(exc, uploaded) from exc
             self._uploaded.add(key)
             self.bytes_uploaded += size
             uploaded.append(

@@ -58,3 +58,27 @@ def test_stop_invalidates_books() -> None:
     asyncio.run(_run())
     assert book.synced is False
     assert not book.bids and not book.asks
+
+
+def test_clean_disconnect_invalidates_shard_books() -> None:
+    from lighter_mm.ws.manager import ShardPlan
+
+    settings = Settings()
+    markets = {0: _meta(0)}
+    mgr = WsManager(settings=settings, markets=markets)
+    book = mgr.books[0]
+    book.apply_snapshot(
+        {
+            "nonce": 10,
+            "begin_nonce": 0,
+            "bids": [{"price": "1", "size": "1"}],
+            "asks": [{"price": "2", "size": "1"}],
+        }
+    )
+    assert book.synced
+    shard = ShardPlan(shard_id=0, market_ids=[0])
+    mgr._handle_shard_disconnect(shard, "clean close")
+    assert book.synced is False
+    assert not book.bids and not book.asks
+    assert mgr.runtime.dropped_connections == 1
+    assert mgr.runtime.book_resyncs >= 1

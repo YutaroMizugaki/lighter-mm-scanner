@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 from lighter_mm.analytics.aggregation import AnalysisSources, analyze_range
 from lighter_mm.cloud.analyzer import select_run_to_analyze
 from lighter_mm.cloud.dashboard_data import build_collector_status_payload
-from lighter_mm.cloud.sync import DurableSync
+from lighter_mm.cloud.sync import DurableSync, PartialParquetUploadError
 from lighter_mm.collector import CollectorApp
 from lighter_mm.config import Settings
 from lighter_mm.storage.local_backend import LocalStorageBackend
@@ -96,7 +96,7 @@ def test_upload_failure_retains_local_file(tmp_path: Path) -> None:
     try:
         sync.upload_new_parquets(data_root, paths=[local])
         raise AssertionError("expected upload failure")
-    except OSError:
+    except PartialParquetUploadError:
         pass
     assert local.exists()
 
@@ -203,6 +203,7 @@ def test_collector_publishes_collector_status(tmp_path: Path) -> None:
     app._last_usable_book_sample_ts = None
     app._last_book_row_written_ts = None
     app._trades_without_reference_mid = 0
+    app._durable_write_lock = __import__("threading").RLock()
     app._publish_collector_status()
     payload = app.backend.download_json("lighter-mm/public/collector_status.json")
     assert payload is not None
@@ -223,6 +224,7 @@ def test_collector_does_not_write_ranking_json(tmp_path: Path) -> None:
     app._last_usable_book_sample_ts = None
     app._last_book_row_written_ts = None
     app._trades_without_reference_mid = 0
+    app._durable_write_lock = __import__("threading").RLock()
     app._publish_collector_status()
     assert app.backend.download_json("lighter-mm/public/latest.json") is None
     assert app.backend.download_json("lighter-mm/public/markets.json") is None

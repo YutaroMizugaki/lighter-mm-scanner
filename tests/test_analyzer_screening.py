@@ -13,6 +13,7 @@ from lighter_mm.analytics.parquet_source import _connect
 from lighter_mm.analytics.screening import (
     Stage1Market,
     _apply_screening_scores,
+    merge_screening_and_full_results,
     run_stage1,
     select_stage2_markets,
 )
@@ -161,6 +162,38 @@ def test_stage1_aggregates_all_markets(tmp_path: Path) -> None:
         assert m.observation_coverage > 0
         assert m.median_spread_bps is not None
         assert m.median_spread_bps > 0
+
+
+def test_stage1_materializes_book_tables(tmp_path: Path) -> None:
+    start_ms, end_ms = _seed_multi_market_fixture(tmp_path, n_markets=2)
+    settings = Settings(data_dir=tmp_path)
+    from lighter_mm.storage.parquet_validation import prepare_parquet_dataset
+
+    book_valid, _ = prepare_parquet_dataset(tmp_path / "book_samples", quarantine=False)
+    con = _connect(tmp_path)
+    try:
+        run_stage1(
+            con,
+            settings,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            book_valid=book_valid,
+            trade_valid=[],
+        )
+        tables = {
+            row[0]
+            for row in con.execute(
+                "SELECT table_name FROM duckdb_tables() "
+                "WHERE table_name IN ('stage1_book_deduped', 'stage1_book_observed')"
+            ).fetchall()
+        }
+        assert tables == {"stage1_book_deduped", "stage1_book_observed"}
+        raw_views = con.execute(
+            "SELECT COUNT(*) FROM duckdb_views() WHERE view_name = 'stage1_book_raw'"
+        ).fetchone()
+        assert raw_views is not None and raw_views[0] == 0
+    finally:
+        con.close()
 
 
 def test_stage1_dedupes_duplicate_books(tmp_path: Path) -> None:
@@ -509,3 +542,31 @@ def test_top_n_subset_score_differs_from_legacy(tmp_path: Path) -> None:
         mid = int(s.row["market_id"])
         # Spread/activity/coverage peers match; fill peer may differ — scores may diverge.
         assert mid in legacy_by_id
+
+
+def test_selected_but_unscored_is_not_labeled_screened() -> None:
+    stage1 = [
+        Stage1Market(
+            market_id=1,
+            symbol="KEEP",
+            maker_markout_5s_median_bps=1.25,
+            eligible=True,
+        ),
+        Stage1Market(market_id=2, symbol="SKIP", eligible=False),
+    ]
+    result = merge_screening_and_full_results(
+        stage1,
+        {"scored": []},
+        hours=24,
+        start_ms=0,
+        end_ms=1,
+        stage1_elapsed=0.1,
+        stage2_elapsed=0.1,
+        selected_market_ids=[1],
+    )
+    by_id = {int(row["market_id"]): row for row in result["markets"]}
+    assert by_id[1]["analysis_stage"] == "selected_incomplete"
+    assert by_id[1]["maker_markout_5s_median_bps"] == 1.25
+    assert by_id[2]["analysis_stage"] == "screened"
+    assert by_id[2]["maker_markout_5s_median_bps"] is None
+    assert result["two_stage"]["markets_selected_incomplete"] == 1

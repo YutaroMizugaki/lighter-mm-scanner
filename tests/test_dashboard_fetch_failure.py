@@ -108,7 +108,21 @@ def test_get_market_cache_policy() -> None:
     assert '"generation"' in src
 
 
-def test_generation_success_no_legacy_fallback_in_candidates() -> None:
+def test_generation_fetch_does_not_mix_legacy_fallback() -> None:
     src = API_TS.read_text(encoding="utf-8")
-    # Early return on generation success — legacy fetch only after failure branch.
-    assert "if (result.ok) return result;" in src
+    # Legacy mode still reads live root files once.
+    assert src.count('fetchJson<Overview>("latest.json", "live")') == 1
+    assert src.count('fetchJson<{ markets: MarketRow[] }>("markets.json", "live")') == 1
+    assert src.count('fetchJson<{ candidates: MarketRow[] }>("candidates.json", "live")') == 1
+    # Generation misses must fail closed — no second live fetch after prefix 404.
+    assert "if (result.ok) return result;" not in src
+
+
+def test_markets_client_null_sort_does_not_coerce_zero() -> None:
+    src = (ROOT / "dashboard" / "app" / "markets" / "MarketsClient.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert "maker_markout_5s_median_bps ?? -Infinity" in src
+    assert "median_spread_bps ?? -Infinity" in src
+    assert "maker_markout_5s_median_bps || 0" not in src
+    assert "selected_incomplete" in src

@@ -174,6 +174,32 @@ class WsManager:
                 book.mark_resync()
                 self.runtime.book_resyncs += 1
 
+    def invalidate_shard_books(self, shard: ShardPlan) -> None:
+        for mid in shard.market_ids:
+            book = self.books.get(mid)
+            if book is None:
+                continue
+            if book.synced or book.bids or book.asks or book.nonce is not None:
+                book.mark_resync()
+                self.runtime.book_resyncs += 1
+
+    def _handle_shard_disconnect(self, shard: ShardPlan, reason: str) -> None:
+        """Count a drop and discard local books so sampling cannot use a stale BBO."""
+        self.runtime.dropped_connections += 1
+        log.warning("WS shard %s disconnected: %s", shard.shard_id, reason)
+        self.invalidate_shard_books(shard)
+
+    async def _reconnect_wait(self, attempt: int) -> None:
+        delay = backoff_delay(
+            attempt,
+            self.settings.ws_reconnect_base_seconds,
+            self.settings.ws_reconnect_max_seconds,
+        )
+        try:
+            await asyncio.wait_for(self._stop.wait(), timeout=delay)
+        except TimeoutError:
+            return
+
     async def add_market(self, meta: MarketMeta) -> None:
         self.markets[meta.market_id] = meta
         self.books[meta.market_id] = LocalOrderBook(market_id=meta.market_id, symbol=meta.symbol)
@@ -262,24 +288,17 @@ class WsManager:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 — reconnect is expected
-                self.runtime.dropped_connections += 1
-                log.warning("WS shard %s disconnected: %s", shard.shard_id, exc)
-                # Invalidate books on this shard — must rebuild from snapshot
-                for mid in shard.market_ids:
-                    book = self.books.get(mid)
-                    if book:
-                        book.mark_resync()
-                        self.runtime.book_resyncs += 1
-                delay = backoff_delay(
-                    attempt,
-                    self.settings.ws_reconnect_base_seconds,
-                    self.settings.ws_reconnect_max_seconds,
-                )
+                self._handle_shard_disconnect(shard, str(exc))
+                await self._reconnect_wait(attempt)
                 attempt += 1
-                try:
-                    await asyncio.wait_for(self._stop.wait(), timeout=delay)
-                except TimeoutError:
-                    continue
+                continue
+            if self._stop.is_set():
+                return
+            # websockets 17 __aiter__ swallows ConnectionClosedOK (1000/1001).
+            # Without this, books stay synced and sampling writes stale usable rows.
+            self._handle_shard_disconnect(shard, "clean close")
+            await self._reconnect_wait(attempt)
+            attempt += 1
 
     async def _subscribe_shard(self, ws: ClientConnection, shard: ShardPlan) -> None:
         # Pace subscriptions and yield so the reader can drain snapshots.

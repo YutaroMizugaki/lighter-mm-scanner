@@ -16,7 +16,17 @@ import Link from "next/link";
 import { useMemo, useState } from "react";
 
 function isScreened(m: MarketRow): boolean {
-  return m.analysis_stage === "screened";
+  return m.analysis_stage === "screened" || m.analysis_stage === "selected_incomplete";
+}
+
+function analysisBadge(m: MarketRow): { label: string; kind: "screened" | "full" } {
+  if (m.analysis_stage === "selected_incomplete") {
+    return { label: "Incomplete", kind: "screened" };
+  }
+  if (m.analysis_stage === "screened") {
+    return { label: "Screened", kind: "screened" };
+  }
+  return { label: "Full", kind: "full" };
 }
 
 export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
@@ -44,12 +54,12 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
       const pick = (m: MarketRow) => {
         if (sort === "effective") return m.effective_score ?? m.score ?? -Infinity;
         if (sort === "score") return m.score ?? -Infinity;
-        if (sort === "spread") return m.median_spread_bps || 0;
+        if (sort === "spread") return m.median_spread_bps ?? -Infinity;
         if (sort === "fill30") return m.estimated_maker_fill_rate_30s_conservative ?? -1;
-        if (sort === "tpm") return m.trades_per_minute_median || 0;
-        if (sort === "tpm_avg") return m.trades_per_minute_mean || 0;
+        if (sort === "tpm") return m.trades_per_minute_median ?? -Infinity;
+        if (sort === "tpm_avg") return m.trades_per_minute_mean ?? -Infinity;
         if (sort === "edge30") return m.estimated_maker_edge_30s_bps ?? -999;
-        return m.maker_markout_5s_median_bps || 0;
+        return m.maker_markout_5s_median_bps ?? -Infinity;
       };
       return pick(b) - pick(a);
     });
@@ -126,11 +136,12 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
                   )}
                 </td>
                 <td>
-                  {isScreened(m) ? (
-                    <span className="badge analysis-badge screened">Screened</span>
-                  ) : (
-                    <span className="badge analysis-badge full">Full</span>
-                  )}
+                  {(() => {
+                    const badge = analysisBadge(m);
+                    return (
+                      <span className={`badge analysis-badge ${badge.kind}`}>{badge.label}</span>
+                    );
+                  })()}
                 </td>
                 <td>
                   <RankBadge letter={m.letter_rank} />

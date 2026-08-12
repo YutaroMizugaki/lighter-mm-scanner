@@ -51,6 +51,29 @@ def test_deterministic_replay() -> None:
     assert a == b
 
 
+def test_null_is_maker_ask_is_skipped_not_coerced() -> None:
+    con = duckdb.connect()
+    books = [(1, "T", 10_000, 100.5, True, 100.0, 101.0, 100.0, 100.0)]
+    trades_with_null = [
+        (1, 1, 10_001, 100.0, 50.0, None, "trade"),
+        (1, 2, 10_011, 101.0, 50.0, True, "trade"),
+    ]
+    trades_without_null = [(1, 2, 10_011, 101.0, 50.0, True, "trade")]
+    setup_paper_mm_tables(con, books=books, trades=trades_with_null)
+
+    from lighter_mm.paper_mm.metrics import paper_mm_config_from_settings
+    from lighter_mm.paper_mm.replay import run_paper_mm_replay
+
+    cfg = paper_mm_config_from_settings(Settings())
+    with_null = run_paper_mm_replay(con, 1, 0, 20_000, cfg, 1.0)
+
+    con2 = duckdb.connect()
+    setup_paper_mm_tables(con2, books=books, trades=trades_without_null)
+    without_null = run_paper_mm_replay(con2, 1, 0, 20_000, cfg, 1.0)
+    assert with_null["paper_mm_bid_fills"] == without_null["paper_mm_bid_fills"]
+    assert with_null["paper_mm_ask_fills"] == without_null["paper_mm_ask_fills"]
+
+
 def test_not_simulated_status_fields() -> None:
     from lighter_mm.paper_mm.metrics import empty_paper_mm_result
 

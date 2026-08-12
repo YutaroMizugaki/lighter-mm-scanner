@@ -47,10 +47,11 @@ def _effective_analysis_status(
     generated_at: str | None,
     last_ok: str | None = None,
     started_at: str | None = None,
+    heartbeat_at: str | None = None,
     stale_minutes: float = 30,
     running_stale_minutes: float = 30,
 ) -> str:
-    """Mirror dashboard/lib/data.ts effectiveAnalysisStatus."""
+    """Mirror dashboard/lib/status.ts effectiveAnalysisStatus."""
     if status is None:
         return "NOT_STARTED"
     if status == "NOT_STARTED":
@@ -60,7 +61,7 @@ def _effective_analysis_status(
     if status == "ERROR":
         return "ERROR"
     if status == "RUNNING":
-        running_stamp = started_at or generated_at
+        running_stamp = heartbeat_at or started_at or generated_at
         if running_stamp:
             age_min = (
                 datetime.now(UTC) - datetime.fromisoformat(running_stamp.replace("Z", "+00:00"))
@@ -160,6 +161,23 @@ def test_running_over_30m_becomes_stale() -> None:
     now = datetime.now(UTC)
     old = _iso(now - timedelta(minutes=45))
     assert _effective_analysis_status("RUNNING", old, started_at=old) == "STALE"
+
+
+def test_running_with_fresh_heartbeat_not_stale() -> None:
+    now = datetime.now(UTC)
+    old = _iso(now - timedelta(minutes=45))
+    beat = _iso(now - timedelta(minutes=1))
+    assert (
+        _effective_analysis_status("RUNNING", old, started_at=old, heartbeat_at=beat)
+        == "RUNNING"
+    )
+
+
+def test_status_ts_prefers_heartbeat_at() -> None:
+    status = (ROOT / "dashboard" / "lib" / "status.ts").read_text(encoding="utf-8")
+    types = (ROOT / "dashboard" / "lib" / "types.ts").read_text(encoding="utf-8")
+    assert "heartbeat_at" in status
+    assert "heartbeat_at?: string | null" in types
 
 
 def test_degraded_over_30m_becomes_stale() -> None:

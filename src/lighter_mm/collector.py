@@ -6,13 +6,14 @@ import asyncio
 import logging
 import os
 import signal
+import threading
 import uuid
 from collections import defaultdict, deque
 from datetime import UTC, datetime
 from typing import Any
 
 from lighter_mm.cloud.dashboard_data import build_collector_status_payload
-from lighter_mm.cloud.sync import DurableSync
+from lighter_mm.cloud.sync import DurableSync, PartialParquetUploadError, UploadedParquet
 from lighter_mm.config import Settings, build_storage_backend, ensure_dirs
 from lighter_mm.dashboard import LiveDashboard
 from lighter_mm.engine.markout import MarkoutEngine
@@ -108,6 +109,7 @@ class CollectorApp:
         self._last_sync_error: str | None = None
         self._consecutive_sync_failures = 0
         self._last_sync_attempt_at: str | None = None
+        self._durable_write_lock = threading.RLock()
 
         self.run_id, self.state, resumed = self._resolve_run()
         self.sync = DurableSync(
@@ -449,14 +451,8 @@ class CollectorApp:
             await asyncio.to_thread(self._sync_only, final=False)
         else:
             self._require_leadership(phase="state heartbeat upload")
-            self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
-            self.backend.upload_json(
-                self.sync.active_pointer_key(),
-                build_active_run_pointer(
-                    run_id=self.run_id,
-                    status=self.state.status,
-                    git_sha=self.settings.git_sha,
-                ),
+            await asyncio.to_thread(
+                self._persist_durable_state, status=self.state.status
             )
 
     def _create_final_analysis_request(self) -> None:
@@ -492,9 +488,48 @@ class CollectorApp:
             consecutive_sync_failures=getattr(self, "_consecutive_sync_failures", 0),
             last_sync_attempt_at=getattr(self, "_last_sync_attempt_at", None),
         )
-        self.backend.upload_json(
-            self.sync.public_key("collector_status.json"), payload, public=True
+        with self._durable_write_lock:
+            self.backend.upload_json(
+                self.sync.public_key("collector_status.json"), payload, public=True
+            )
+
+    def _apply_uploaded_watermark(self, uploaded: list[UploadedParquet]) -> None:
+        if not uploaded:
+            return
+        uploaded_max = max(
+            (
+                item.max_event_timestamp_ms
+                for item in uploaded
+                if item.max_event_timestamp_ms is not None
+            ),
+            default=None,
         )
+        if uploaded_max is None:
+            return
+        prev = self.state.last_durable_event_ms
+        self.state.last_durable_event_ms = (
+            max(prev, uploaded_max) if prev is not None else uploaded_max
+        )
+
+    def _requeue_remaining_closed(self, closed: list) -> None:
+        remaining = [path for path in closed if path.exists()]
+        if remaining:
+            self.store.requeue_closed_paths(remaining)
+
+    def _persist_durable_state(self, *, status: str, note: str | None = None) -> None:
+        """Serialize state.json / active_run.json under the durable-write lock."""
+        with self._durable_write_lock:
+            self._write_state()
+            self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+            self.backend.upload_json(
+                self.sync.active_pointer_key(),
+                build_active_run_pointer(
+                    run_id=self.run_id,
+                    status=status,
+                    git_sha=self.settings.git_sha,
+                    note=note,
+                ),
+            )
 
     def _sync_only(self, *, final: bool) -> None:
         """Upload closed Parquet parts — no DuckDB analysis."""
@@ -503,15 +538,35 @@ class CollectorApp:
         self.store.maybe_flush()
         self.store.rotate_all()
         closed = self.store.take_closed_paths()
+        uploaded: list[UploadedParquet] = []
         try:
             uploaded = self.sync.upload_new_parquets(
                 self.settings.data_dir, paths=closed, delete_local_on_success=True
             )
+        except PartialParquetUploadError as exc:
+            uploaded = exc.uploaded
+            self._requeue_remaining_closed(closed)
+            self._consecutive_sync_failures += 1
+            self._last_sync_error = str(exc)
+            self._apply_uploaded_watermark(uploaded)
+            if uploaded:
+                # Same single-leader gate as the success path. Do not persist
+                # state.json / active_run.json after losing the lock, and do not
+                # swallow LostLeadershipError as a generic persist failure.
+                self._require_leadership(phase="partial-upload watermark persist")
+                try:
+                    self._persist_durable_state(status=self.state.status)
+                except LostLeadershipError:
+                    raise
+                except Exception as persist_exc:  # noqa: BLE001
+                    log.warning("partial-upload watermark persist failed: %s", persist_exc)
+            raise
         except Exception as exc:
-            self.store.requeue_closed_paths(closed)
+            self._requeue_remaining_closed(closed)
             self._consecutive_sync_failures += 1
             self._last_sync_error = str(exc)
             raise
+        self._requeue_remaining_closed(closed)
         self._require_leadership(phase="post-sync state upload")
         log_event(
             log,
@@ -522,50 +577,18 @@ class CollectorApp:
         )
         flush_at = now_iso()
         self.state.last_successful_flush = flush_at
-        if uploaded:
-            uploaded_max = max(
-                (
-                    item.max_event_timestamp_ms
-                    for item in uploaded
-                    if item.max_event_timestamp_ms is not None
-                ),
-                default=None,
-            )
-            if uploaded_max is not None:
-                prev = self.state.last_durable_event_ms
-                self.state.last_durable_event_ms = (
-                    max(prev, uploaded_max) if prev is not None else uploaded_max
-                )
+        self._apply_uploaded_watermark(uploaded)
         self._consecutive_sync_failures = 0
         self._last_sync_error = None
-        self._write_state()
-        self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
-        self.backend.upload_json(
-            self.sync.active_pointer_key(),
-            build_active_run_pointer(
-                run_id=self.run_id,
-                status=self.state.status,
-                git_sha=self.settings.git_sha,
-            ),
-        )
+        self._persist_durable_state(status=self.state.status)
         self._publish_collector_status()
 
     def _heartbeat_running(self, note: str) -> None:
         """Advance active_run/state and publish collector_status without analysis."""
         if getattr(self, "_lost_leadership", False):
             return
-        self._write_state()
         self._require_leadership(phase="heartbeat upload")
-        self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
-        self.backend.upload_json(
-            self.sync.active_pointer_key(),
-            build_active_run_pointer(
-                run_id=self.run_id,
-                status="running",
-                git_sha=self.settings.git_sha,
-                note=note,
-            ),
-        )
+        self._persist_durable_state(status="running", note=note)
         try:
             self._publish_collector_status()
         except Exception as exc:  # noqa: BLE001
@@ -605,6 +628,11 @@ class CollectorApp:
                 except Exception as hb_exc:  # noqa: BLE001
                     log.warning("sync-failure heartbeat failed: %s", hb_exc)
 
+    def _upload_state_json(self) -> None:
+        with self._durable_write_lock:
+            self._write_state()
+            self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+
     async def _state_heartbeat_loop(self) -> None:
         interval = min(60.0, self.settings.analysis_interval_minutes * 60)
         while not self._stop.is_set():
@@ -616,9 +644,8 @@ class CollectorApp:
             try:
                 if self._lost_leadership:
                     return
-                self._write_state()
                 self._require_leadership(phase="state heartbeat")
-                self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+                await asyncio.to_thread(self._upload_state_json)
             except LostLeadershipError:
                 return
             except Exception as exc:  # noqa: BLE001

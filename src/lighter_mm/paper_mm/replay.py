@@ -103,6 +103,8 @@ def run_paper_mm_replay(
         ) = row
 
         if event_type == "trade":
+            if is_maker_ask is None or price is None or usd_amount is None:
+                continue
             trade = TradeEvent(
                 timestamp_ms=int(ts_ms),
                 trade_id=int(trade_id or 0),
