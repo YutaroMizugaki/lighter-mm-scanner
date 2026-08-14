@@ -6,7 +6,7 @@ import asyncio
 import math
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import duckdb
 import pyarrow as pa
@@ -183,6 +183,52 @@ def test_collector_renew_failure_blocks_sync(tmp_path: Path) -> None:
         pass
     assert app._lost_leadership is True
     assert app.backend.download_json("lighter-mm/runs/r1/state/state.json") is None
+
+
+async def test_lost_leadership_shutdown_still_releases_lock() -> None:
+    app = CollectorApp.__new__(CollectorApp)
+    app._lost_leadership = True
+    app._stop = asyncio.Event()
+    app._ws = None
+    app._completed = False
+    app._dashboard_enabled = False
+    app.run_id = "r1"
+    app.markout = MagicMock()
+    app.mid_histories = {}
+    app.lock = MagicMock()
+    app.discovery = MagicMock()
+    app.discovery.close = AsyncMock()
+    app.dashboard = MagicMock()
+    app.meta = MagicMock()
+    app.store = MagicMock()
+    app.store.samples_written = 0
+    app.store.trades_written = 0
+    app.store.markouts_written = 0
+    await app.shutdown()
+    app.lock.release.assert_called_once()
+    app.meta.close.assert_called_once()
+    app.discovery.close.assert_awaited_once()
+    app.store.close.assert_not_called()
+
+
+async def test_lock_renew_loop_skips_renew_when_stop_set_after_timeout() -> None:
+    app = CollectorApp.__new__(CollectorApp)
+    app._stop = asyncio.Event()
+    app._lost_leadership = False
+    app.lock = MagicMock()
+    app.run_id = "r1"
+    app.settings = MagicMock()
+    app.settings.git_sha = "abc"
+
+    async def timeout_then_notice_stop(awaitable, timeout=None):  # noqa: ANN001, ARG001
+        awaitable.close()
+        app._stop.set()
+        raise TimeoutError
+
+    with patch("lighter_mm.collector.asyncio.wait_for", timeout_then_notice_stop):
+        await app._lock_renew_loop()
+    app.lock.renew.assert_not_called()
+    assert app._lost_leadership is False
 
 
 # H — Analyzer renew failure blocks public publish

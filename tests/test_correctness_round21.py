@@ -81,6 +81,7 @@ class _MockAtomicBackend:
         self.upload_json_calls = 0
         self.cas_calls = 0
         self.mutate_before_next_cas: Callable[[], None] | None = None
+        self._cas_lock = threading.Lock()
 
     def download_json_with_generation(self, _key: str) -> VersionedJson:
         return VersionedJson(self.payload, self.generation)
@@ -88,18 +89,19 @@ class _MockAtomicBackend:
     def compare_and_swap_json(
         self, _key: str, payload: dict, *, if_generation_match: int
     ) -> bool:
-        self.cas_calls += 1
-        if self.mutate_before_next_cas is not None:
-            self.mutate_before_next_cas()
-            self.mutate_before_next_cas = None
-        if if_generation_match == 0:
-            if self.payload is not None:
+        with self._cas_lock:
+            self.cas_calls += 1
+            if self.mutate_before_next_cas is not None:
+                self.mutate_before_next_cas()
+                self.mutate_before_next_cas = None
+            if if_generation_match == 0:
+                if self.payload is not None:
+                    return False
+            elif self.generation != if_generation_match:
                 return False
-        elif self.generation != if_generation_match:
-            return False
-        self.payload = payload
-        self.generation = (self.generation or 0) + 1
-        return True
+            self.payload = payload
+            self.generation = (self.generation or 0) + 1
+            return True
 
     def upload_json(self, *_a, **_k) -> str:
         self.upload_json_calls += 1
@@ -255,6 +257,85 @@ def test_renew_generation_conflict_returns_false() -> None:
     assert backend.payload is not None
     assert backend.payload["holder_id"] == "a"
     assert lock.cas_conflicts == 1
+
+
+def test_same_holder_concurrent_renew_does_not_lose_lock() -> None:
+    """Collector renews from the event loop and from to_thread sync.
+
+    GCS CAS is atomic: two overlapping same-holder renews must not look like
+    lost leadership. In-process ops are serialized; generation conflicts from
+    another writer still fail (see test_renew_generation_conflict_returns_false).
+    """
+    backend = _MockAtomicBackend()
+    original_download = backend.download_json_with_generation
+
+    def slow_download(key: str) -> VersionedJson:
+        time.sleep(0.02)
+        return original_download(key)
+
+    backend.download_json_with_generation = slow_download  # type: ignore[method-assign]
+    lock = LeaderLock(backend, "lock.json", holder_id="a", lease_seconds=60)
+    assert lock.acquire("run1") is True
+
+    n = 8
+    results = [False] * n
+
+    def worker(idx: int) -> None:
+        results[idx] = lock.renew("run1")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+        assert not thread.is_alive()
+
+    assert all(results)
+    assert lock.cas_conflicts == 0
+    assert lock.renew("run1") is True
+    assert backend.payload is not None
+    assert backend.payload["holder_id"] == "a"
+
+
+def test_renew_after_release_does_not_revive_lease() -> None:
+    backend = _MockAtomicBackend()
+    lock = LeaderLock(backend, "lock.json", holder_id="a", lease_seconds=60)
+    assert lock.acquire("run1") is True
+    lock.release()
+    assert backend.payload is not None
+    assert backend.payload.get("released") is True
+    released_expiry = backend.payload["expires_at"]
+    released_gen = backend.generation
+
+    assert lock.renew("run1") is False
+    assert backend.payload.get("released") is True
+    assert backend.payload["expires_at"] == released_expiry
+    assert backend.generation == released_gen
+
+
+def test_concurrent_release_and_renew_stays_released() -> None:
+    backend = _MockAtomicBackend()
+    lock = LeaderLock(backend, "lock.json", holder_id="a", lease_seconds=60)
+    assert lock.acquire("run1") is True
+
+    def do_release() -> None:
+        lock.release()
+
+    def do_renew() -> None:
+        lock.renew("run1")
+
+    t_release = threading.Thread(target=do_release)
+    t_renew = threading.Thread(target=do_renew)
+    t_release.start()
+    t_renew.start()
+    t_release.join(timeout=10)
+    t_renew.join(timeout=10)
+    assert not t_release.is_alive()
+    assert not t_renew.is_alive()
+
+    assert backend.payload is not None
+    assert backend.payload.get("released") is True
+    assert backend.payload["holder_id"] == "a"
 
 
 def test_reference_mid_rejects_future_sample() -> None:
