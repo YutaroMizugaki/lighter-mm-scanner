@@ -297,6 +297,47 @@ def test_same_holder_concurrent_renew_does_not_lose_lock() -> None:
     assert backend.payload["holder_id"] == "a"
 
 
+def test_renew_after_release_does_not_revive_lease() -> None:
+    backend = _MockAtomicBackend()
+    lock = LeaderLock(backend, "lock.json", holder_id="a", lease_seconds=60)
+    assert lock.acquire("run1") is True
+    lock.release()
+    assert backend.payload is not None
+    assert backend.payload.get("released") is True
+    released_expiry = backend.payload["expires_at"]
+    released_gen = backend.generation
+
+    assert lock.renew("run1") is False
+    assert backend.payload.get("released") is True
+    assert backend.payload["expires_at"] == released_expiry
+    assert backend.generation == released_gen
+
+
+def test_concurrent_release_and_renew_stays_released() -> None:
+    backend = _MockAtomicBackend()
+    lock = LeaderLock(backend, "lock.json", holder_id="a", lease_seconds=60)
+    assert lock.acquire("run1") is True
+
+    def do_release() -> None:
+        lock.release()
+
+    def do_renew() -> None:
+        lock.renew("run1")
+
+    t_release = threading.Thread(target=do_release)
+    t_renew = threading.Thread(target=do_renew)
+    t_release.start()
+    t_renew.start()
+    t_release.join(timeout=10)
+    t_renew.join(timeout=10)
+    assert not t_release.is_alive()
+    assert not t_renew.is_alive()
+
+    assert backend.payload is not None
+    assert backend.payload.get("released") is True
+    assert backend.payload["holder_id"] == "a"
+
+
 def test_reference_mid_rejects_future_sample() -> None:
     hist = MidHistory()
     hist.add(1005, 101.0)

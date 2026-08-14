@@ -176,6 +176,26 @@ def test_collector_resume_does_not_hydrate() -> None:
     assert "hydrate_run_parquets" not in src
 
 
+def test_collector_cancels_renew_loop_before_shutdown() -> None:
+    src = inspect.getsource(CollectorApp.run)
+    cancel_at = src.find("lock_task.cancel()")
+    shutdown_at = src.find("await self.shutdown()")
+    assert cancel_at != -1
+    assert shutdown_at != -1
+    assert cancel_at < shutdown_at
+
+
+def test_renew_loop_rechecks_stop_after_timeout() -> None:
+    src = inspect.getsource(CollectorApp._lock_renew_loop)
+    timeout_at = src.find("except TimeoutError:")
+    stop_at = src.find("if self._stop.is_set()")
+    renew_at = src.find("self.lock.renew")
+    assert timeout_at != -1
+    assert stop_at != -1
+    assert renew_at != -1
+    assert timeout_at < stop_at < renew_at
+
+
 # TEST F — periodic sync does not analyze
 def test_collector_sync_does_not_analyze() -> None:
     src = inspect.getsource(CollectorApp._durable_sync_loop)

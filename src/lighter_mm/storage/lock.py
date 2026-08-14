@@ -121,6 +121,8 @@ class LeaderLock:
             current = self.backend.download_json_with_generation(self.lock_key)
             if not current.payload or current.payload.get("holder_id") != self.holder_id:
                 return False
+            if current.payload.get("released"):
+                return False
             if current.generation is None:
                 return False
             payload = self._lock_payload(run_id, git_sha)

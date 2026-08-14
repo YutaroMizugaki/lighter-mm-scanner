@@ -211,6 +211,26 @@ async def test_lost_leadership_shutdown_still_releases_lock() -> None:
     app.store.close.assert_not_called()
 
 
+async def test_lock_renew_loop_skips_renew_when_stop_set_after_timeout() -> None:
+    app = CollectorApp.__new__(CollectorApp)
+    app._stop = asyncio.Event()
+    app._lost_leadership = False
+    app.lock = MagicMock()
+    app.run_id = "r1"
+    app.settings = MagicMock()
+    app.settings.git_sha = "abc"
+
+    async def timeout_then_notice_stop(awaitable, timeout=None):  # noqa: ANN001, ARG001
+        awaitable.close()
+        app._stop.set()
+        raise TimeoutError
+
+    with patch("lighter_mm.collector.asyncio.wait_for", timeout_then_notice_stop):
+        await app._lock_renew_loop()
+    app.lock.renew.assert_not_called()
+    assert app._lost_leadership is False
+
+
 # H — Analyzer renew failure blocks public publish
 def test_analyzer_lock_loss_blocks_publish(tmp_path: Path) -> None:
     settings = Settings(

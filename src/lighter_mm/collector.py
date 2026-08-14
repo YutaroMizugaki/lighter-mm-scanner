@@ -322,9 +322,11 @@ class CollectorApp:
             await asyncio.gather(*tasks)
         finally:
             self._stop.set()
-            await self.shutdown()
+            # Stop renew before shutdown release. Otherwise a timeout-woken
+            # loop can renew after release and revive the 120s lease.
             lock_task.cancel()
             await asyncio.gather(lock_task, return_exceptions=True)
+            await self.shutdown()
 
     async def _request_stop(self) -> None:
         log_event(log, "collector_stopping", "shutdown signal received", run_id=self.run_id)
@@ -661,6 +663,8 @@ class CollectorApp:
                 return
             except TimeoutError:
                 pass
+            if self._stop.is_set():
+                return
             if not self.lock.renew(self.run_id, git_sha=self.settings.git_sha):
                 log.error("lost leader lock; stopping collector")
                 self._lost_leadership = True
