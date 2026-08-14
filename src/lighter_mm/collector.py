@@ -362,58 +362,61 @@ class CollectorApp:
             self.markout.poll(utc_ms(), self.mid_histories)
         except Exception as exc:  # noqa: BLE001
             log.warning("final markout drain failed: %s", exc)
-        if self._lost_leadership:
-            log.warning("skipping shutdown durable writes — leadership lost")
-            return
         try:
-            await asyncio.to_thread(self._sync_only, final=True)
             if self._lost_leadership:
+                log.warning("skipping shutdown durable writes — leadership lost")
                 return
-            self.store.close()
-            if self._completed:
-                self.state.status = "completed"
-                self.state.ended_at = now_iso()
-                self._write_state()
-                self._require_leadership(phase="completed state upload")
-                self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
-                self.backend.upload_json(
-                    self.sync.active_pointer_key(),
-                    build_active_run_pointer(
-                        run_id=self.run_id,
-                        status="completed",
-                        git_sha=self.settings.git_sha,
-                        shutdown_reason="completed",
-                    ),
-                )
-                self._create_final_analysis_request()
-            else:
-                self.state.status = "running"
-                self._write_state()
-                self._require_leadership(phase="shutdown state upload")
-                self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
-                self.backend.upload_json(
-                    self.sync.active_pointer_key(),
-                    build_active_run_pointer(
-                        run_id=self.run_id,
-                        status="running",
-                        git_sha=self.settings.git_sha,
-                        shutdown_reason="preempted_or_signal",
-                    ),
-                )
-            if not self._lost_leadership:
-                self._publish_collector_status()
-            self.meta.end_run(self.run_id, status="completed" if self._completed else "stopped")
-        except LostLeadershipError:
-            log.error("shutdown aborted — lost leadership")
-        except Exception as exc:  # noqa: BLE001
-            log.exception("shutdown flush failed: %s", exc)
-            if not self._lost_leadership:
-                self.state.status = "error"
-                try:
+            try:
+                await asyncio.to_thread(self._sync_only, final=True)
+                if self._lost_leadership:
+                    return
+                self.store.close()
+                if self._completed:
+                    self.state.status = "completed"
+                    self.state.ended_at = now_iso()
+                    self._write_state()
+                    self._require_leadership(phase="completed state upload")
                     self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
-                except Exception:  # noqa: BLE001
-                    pass
+                    self.backend.upload_json(
+                        self.sync.active_pointer_key(),
+                        build_active_run_pointer(
+                            run_id=self.run_id,
+                            status="completed",
+                            git_sha=self.settings.git_sha,
+                            shutdown_reason="completed",
+                        ),
+                    )
+                    self._create_final_analysis_request()
+                else:
+                    self.state.status = "running"
+                    self._write_state()
+                    self._require_leadership(phase="shutdown state upload")
+                    self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+                    self.backend.upload_json(
+                        self.sync.active_pointer_key(),
+                        build_active_run_pointer(
+                            run_id=self.run_id,
+                            status="running",
+                            git_sha=self.settings.git_sha,
+                            shutdown_reason="preempted_or_signal",
+                        ),
+                    )
+                if not self._lost_leadership:
+                    self._publish_collector_status()
+                self.meta.end_run(self.run_id, status="completed" if self._completed else "stopped")
+            except LostLeadershipError:
+                log.error("shutdown aborted — lost leadership")
+            except Exception as exc:  # noqa: BLE001
+                log.exception("shutdown flush failed: %s", exc)
+                if not self._lost_leadership:
+                    self.state.status = "error"
+                    try:
+                        self.backend.upload_json(self.sync.state_key(), self.state.to_public_dict())
+                    except Exception:  # noqa: BLE001
+                        pass
         finally:
+            # release() is a no-op when holder_id no longer matches (true loss).
+            # Always run it so a false-positive loss still drops the lease.
             self.lock.release()
             await self.discovery.close()
             if getattr(self, "_dashboard_enabled", False):
