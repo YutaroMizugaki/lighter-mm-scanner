@@ -735,6 +735,7 @@ def merge_screening_and_full_results(
         "markets": all_market_rows,
         "scored": scored,
         "screened": screened,
+        "incomplete": incomplete,
         "candidates": [s for s in scored if s.candidate],
         "avoid": full_results.get("avoid") or [],
         "book_row_count": stage1_window_stats.get("book_row_count", 0),
