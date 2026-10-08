@@ -43,6 +43,7 @@
   .desktopOnly { display: none; }
   .table thead th:first-child { width: 32%; }
   .table thead th:nth-child(2) { width: 18%; }
+  .table thead th:nth-child(3), .table thead th:nth-child(4) { width: 25%; }
   .controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
   .controls > input { grid-column: 1 / -1; min-width: 0; }
   .controls select { width: auto; flex: 1; min-width: 0; max-width: none; }
