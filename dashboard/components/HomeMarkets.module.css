@@ -25,7 +25,7 @@
 .table th, .table td { padding: 16px; }
 .table thead th { font-size: 13px; }
 .table tbody th { position: static; font-size: 18px; font-weight: 650; color: var(--text); }
-.table tbody :global(.sticky-col) { position: sticky; z-index: 1; background: var(--surface); min-width: 155px; }
+.table tbody :global(.sticky-col) { position: sticky; top: auto; z-index: 1; background: var(--surface); min-width: 155px; }
 .table .candidate { margin-left: 8px; }
 .stage { display: block; font-size: 12px; color: var(--text-muted); font-weight: 400; }
 .more { display: flex; justify-content: center; margin-top: 24px; }
