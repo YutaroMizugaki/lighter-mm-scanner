@@ -44,10 +44,10 @@ function marketMetrics(m: MarketRow) {
     { label: "スプレッド", value: `${fmt(m.median_spread_bps)} bp` },
     { label: "板の厚さ ±10bp", value: formatDepth(m.median_two_sided_depth_10bps_usd), title: TOOLTIPS.depth10bp },
     { label: "取引回数 / 分", value: formatActivity(m.trades_per_minute_median), title: TOOLTIPS.tradesPerMin },
-    { label: "総取引回数", value: m.total_trade_count == null ? "—" : m.total_trade_count.toLocaleString("ja-JP") },
+    { label: "総取引回数", value: m.total_trade_count == null ? "—" : m.total_trade_count.toLocaleString("ja-JP"), title: "表示中の分析対象期間内に観測した取引回数です。" },
     { label: "推定約定率 · 30秒", value: fmtEstimatedFill(m.estimated_maker_fill_rate_30s_conservative, m.estimated_maker_fill_sample_quality), title: ESTIMATED_FILL_TOOLTIP },
     { label: "約定30秒後", value: <SignedValue value={m.maker_markout_30s_median_bps} />, title: TOOLTIPS.makerMarkout },
-    { label: "資金調達率", value: m.current_funding_rate == null ? "—" : `${fmt(m.current_funding_rate, 4, true)}%` },
+    { label: "資金調達率（推定）", value: m.current_funding_rate == null ? "—" : `${fmt(m.current_funding_rate, 4, true)}%`, title: "観測時点の次回資金調達率の推定値です。" },
     { label: "データ網羅率", value: m.data_coverage_pct == null ? "—" : `${fmt(m.data_coverage_pct, 1)}%`, title: TOOLTIPS.coverage },
   ];
 }

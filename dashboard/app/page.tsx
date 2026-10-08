@@ -125,7 +125,10 @@ export default async function HomePage() {
       <header className={styles.heading}>
         <div className={styles.titleRow}>
           <h1>銘柄一覧</h1>
-          <span className={styles.counts}>{analyzed ?? "—"}市場 · 候補 {overview.candidates ?? 0}</span>
+          <span className={styles.counts}>
+            {analyzed ?? "—"}市場 · 候補 {overview.candidates ?? 0}
+            {overview.analysis_window_hours != null && ` · 集計 ${fmt(overview.analysis_window_hours, 0)}時間`}
+          </span>
         </div>
         <DataFreshness
           status={analysisFreshness.status}
