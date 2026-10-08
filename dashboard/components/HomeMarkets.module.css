@@ -10,9 +10,9 @@
 .toggle button[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
 .resultCount { display: flex; justify-content: space-between; margin: 14px 0 10px; color: var(--text-muted); font-size: 12px; }
 .table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-variant-numeric: tabular-nums; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
-.symbolCol { width: 23%; }
-.scoreCol { width: 12%; }
-.table th, .table td { padding: 0 18px; text-align: right; }
+.table thead th:first-child { width: 23%; }
+.table thead th:nth-child(2) { width: 12%; }
+.table th, .table td { padding: 0 18px; text-align: right; white-space: nowrap; }
 .table thead th { height: 52px; position: sticky; top: 0; z-index: 2; background: #f0f3f5; border-bottom: 1px solid var(--border-strong); font-size: 13px; font-weight: 600; color: var(--text-muted); line-height: 1.35; }
 .table thead th:first-child { text-align: left; border-radius: 8px 0 0 0; }
 .table thead th:last-child { border-radius: 0 8px 0 0; }
@@ -30,7 +30,7 @@
 .score { font-weight: 650; }
 .feeNote { display: block; color: var(--text-muted); font-size: 10px; }
 .detailRow > td { padding: 0; border-bottom: 1px solid var(--border-strong); text-align: left; }
-.details { padding: 20px 24px; background: #f3f8f5; }
+.details { padding: 20px 24px; background: #f3f8f5; white-space: normal; }
 .detailsHeading { display: flex; align-items: baseline; gap: 12px; font-size: 13px; }
 .detailsHeading > a { margin-left: auto; }
 .metrics { margin: 18px 0 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px 20px; }
@@ -41,12 +41,12 @@
 .empty { padding: 40px 20px; text-align: center; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
 @media (max-width: 760px) {
   .desktopOnly { display: none; }
-  .symbolCol { width: 32%; }
-  .scoreCol { width: 18%; }
-  .controls { gap: 10px; }
-  .controls > input { flex: 1 1 100%; }
+  .table thead th:first-child { width: 32%; }
+  .table thead th:nth-child(2) { width: 18%; }
+  .controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+  .controls > input { grid-column: 1 / -1; min-width: 0; }
   .controls select { width: auto; flex: 1; min-width: 0; max-width: none; }
-  .toggle { margin-left: auto; }
+  .toggle { grid-column: 1 / -1; justify-self: end; }
   .table th, .table td { padding: 0 8px; }
   .table thead th { font-size: 11px; }
   .table thead th > span { font-size: 10px; }

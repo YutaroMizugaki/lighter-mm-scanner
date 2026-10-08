@@ -60,7 +60,6 @@ export default function HomeMarkets({ markets }: { markets: MarketRow[] }) {
     <div className={styles.resultCount}><span role="status">{visible.length} / {rows.length} 銘柄</span><span>＋で詳細</span></div>
     {rows.length === 0 ? <p className={styles.empty}>{markets.length === 0 ? "最新の分析に表示できる銘柄はありません。" : "条件に一致する銘柄はありません。"}</p> : <table className={styles.table}>
       <caption className="sr-only">{liquidity ? "銘柄の流動性比較" : "銘柄の約定・価格変化の比較"}</caption>
-      <colgroup><col className={styles.symbolCol} /><col className={styles.scoreCol} /><col /><col /><col className={styles.desktopOnly} /><col className={styles.desktopOnly} /></colgroup>
       <thead><tr><th scope="col">銘柄</th><th scope="col" title={TOOLTIPS.effectiveScore}>スコア</th>
         {liquidity ? <><th scope="col">スプレッド<span>bp</span></th><th scope="col" title={TOOLTIPS.depth10bp}>板の厚さ<span>±10bp · USD</span></th><th scope="col" className={styles.desktopOnly} title={TOOLTIPS.tradesPerMin}>取引回数<span>/ 分</span></th><th scope="col" className={styles.desktopOnly} title={ESTIMATED_FILL_TOOLTIP}>推定約定率<span>$50 · 30秒</span></th></> : <><th scope="col" title={ESTIMATED_FILL_TOOLTIP}>推定約定率<span>$50 · 30秒</span></th><th scope="col" title={TOOLTIPS.makerMarkout}>約定30秒後<span>bp</span></th><th scope="col" className={styles.desktopOnly} title={TOOLTIPS.makerMarkout}>約定5秒後<span>bp</span></th><th scope="col" className={styles.desktopOnly} title={ESTIMATED_EDGE_TOOLTIP}>推定エッジ<span>30秒 · bp</span></th></>}
       </tr></thead>
