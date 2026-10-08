@@ -1,12 +1,8 @@
-.panel { padding: var(--space-5); }
-.grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-5); }
-.grid :global(.metric-card) { min-height: 70px; padding: 0; border: 0; border-radius: 0; background: transparent; }
-.grid :global(.metric-card) + :global(.metric-card) { border-left: 1px solid var(--border); padding-left: var(--space-5); }
-.grid :global(.metric-value) { font-size: 1.85rem; letter-spacing: -0.03em; }
-@media (max-width: 480px) {
-  .panel { padding: var(--space-4); }
-  .grid { gap: var(--space-3); }
-  .grid :global(.metric-card) + :global(.metric-card) { padding-left: var(--space-3); }
-  .grid :global(.metric-value) { font-size: 1.5rem; }
-  .grid :global(.metric-label) { font-size: 0.72rem; }
+.heading { margin-bottom: 24px; }
+.titleRow { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px 20px; }
+.titleRow h1 { margin: 0; font-size: 26px; letter-spacing: -0.03em; }
+.counts { color: var(--text-muted); font-size: 14px; }
+.heading :global(.data-freshness) { margin: 8px 0 0; padding: 0; border: 0; background: transparent; }
+@media (max-width: 600px) {
+  .titleRow h1 { font-size: 24px; }
 }

@@ -1,14 +1,12 @@
 import DataFreshness from "@/components/DataFreshness";
 import DataHealthNotice from "@/components/DataHealthNotice";
 import Diagnostics from "@/components/Diagnostics";
-import Hero from "@/components/Hero";
-import MetricCard from "@/components/MetricCard";
+import HomeMarkets from "@/components/HomeMarkets";
 import PublicErrorState from "@/components/PublicErrorState";
 import ScoreExplainer from "@/components/ScoreExplainer";
-import TopOpportunities from "@/components/TopOpportunities";
 import {
   getAnalysisStatusResult,
-  getCandidatesResult,
+  getMarketsResult,
   getCollectorStatusResult,
   getOverviewResult,
   resolveDashboardBundle,
@@ -31,12 +29,12 @@ export default async function HomePage() {
     overviewResult,
     collectorResult,
     analysisStatusResult,
-    candidatesResult,
+    marketsResult,
   ] = await Promise.all([
     getOverviewResult(bundle),
     getCollectorStatusResult(),
     getAnalysisStatusResult(),
-    getCandidatesResult(bundle),
+    getMarketsResult(bundle),
   ]);
   const configured = Boolean(process.env.NEXT_PUBLIC_DATA_BASE_URL);
 
@@ -68,8 +66,8 @@ export default async function HomePage() {
   };
   const lastAnalysisAt = publicAnalysis.lastAnalysisAt;
   const analysisStatusFetchFailed = publicAnalysis.analysisStatusFetchFailed;
-  const candidates = candidatesResult.ok ? candidatesResult.data.candidates ?? [] : [];
-  const marketDataFetchFailed = !candidatesResult.ok;
+  const markets = marketsResult.ok ? marketsResult.data.markets ?? [] : [];
+  const marketDataFetchFailed = !marketsResult.ok;
 
   const analyzed = overview.markets_analyzed ?? overview.markets;
   const analysisError = analysisData?.status === "ERROR";
@@ -124,39 +122,16 @@ export default async function HomePage() {
 
   return (
     <>
-      <Hero />
-
-      <section
-        className={`panel ${styles.panel}`}
-        aria-labelledby="summary-heading"
-      >
-        <div className="section-header">
-          <h2 id="summary-heading">市場の概要</h2>
-        </div>
-
-        <div className={styles.grid}>
-          <MetricCard label="分析した市場" value={analyzed ?? "—"} />
-          <MetricCard label="候補の市場" value={overview.candidates ?? 0} />
-          <MetricCard
-            label="データ取得率"
-            value={
-              overview.coverage_pct != null
-                ? `${overview.coverage_pct.toFixed(1)}%`
-                : "—"
-            }
-          />
-
+      <header className={styles.heading}>
+        <div className={styles.titleRow}>
+          <h1>銘柄一覧</h1>
+          <span className={styles.counts}>{analyzed ?? "—"}市場 · 候補 {overview.candidates ?? 0}</span>
         </div>
         <DataFreshness
           status={analysisFreshness.status}
           lastAnalysisAt={lastAnalysisAt}
         />
-      </section>
-
-      <TopOpportunities candidates={candidates} fetchFailed={marketDataFetchFailed} />
-
-      <ScoreExplainer />
-
+      </header>
       <DataHealthNotice
         show={showHealthBanner}
         primaryMessages={primaryMessages}
@@ -165,6 +140,14 @@ export default async function HomePage() {
         analysisError={analysisError}
         marketDataFetchFailed={marketDataFetchFailed}
       />
+
+      {marketDataFetchFailed ? (
+        <p className="muted">市場データを読み込めませんでした。</p>
+      ) : (
+        <HomeMarkets markets={markets} />
+      )}
+
+      <ScoreExplainer />
 
       <Diagnostics
         overview={overview}
@@ -177,8 +160,9 @@ export default async function HomePage() {
         marketDataFetchFailed={marketDataFetchFailed}
       />
 
-      <section className="disclaimer" aria-labelledby="disclaimer-heading">
-        <h2 id="disclaimer-heading">ご利用にあたって</h2>
+      <details className="diagnostics">
+        <summary>ご利用にあたって</summary>
+        <div className="diagnostics-body">
         <p className="section-lead">
           公開データに基づく調査用ツールです。数値は売買の推奨や利益の保証ではありません。
           実際の取引では、約定確率・逆選択・在庫リスクを別途確認してください。
@@ -204,7 +188,8 @@ export default async function HomePage() {
           )}
 
         </p>
-      </section>
+        </div>
+      </details>
     </>
   );
 }
