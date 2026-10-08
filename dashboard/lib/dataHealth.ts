@@ -13,6 +13,7 @@ export type CollectionHealth = {
   issues: string[];
   checkedAt: string;
   reportedAt: string | null;
+  collectorRevision: string | null;
 };
 
 function validTimestamp(value: string | null | undefined, now: number): string | null {
@@ -28,6 +29,7 @@ export function collectionHealth(
   now = Date.now(),
 ): CollectionHealth {
   const checkedAt = new Date(now).toISOString();
+  const collectorRevision = collector?.git_sha && /^[a-f0-9]{40}$/i.test(collector.git_sha) ? collector.git_sha : null;
   const reportedAt = validTimestamp(collector?.generated_at, now);
   const reportFresh = reportedAt != null && now - Date.parse(reportedAt) <= 20 * 60_000;
   const checks: HealthCheck[] = [
@@ -38,7 +40,7 @@ export function collectionHealth(
   const issues: string[] = [];
   if (!collector) {
     issues.push("収集状況を取得できませんでした。再確認しても続く場合は管理者による確認が必要です。");
-    return { checks, issues, checkedAt, reportedAt };
+    return { checks, issues, checkedAt, reportedAt, collectorRevision };
   }
   const sync = checks[0];
   sync.timestamp = validTimestamp(collector.last_successful_sync, now);
@@ -91,5 +93,5 @@ export function collectionHealth(
   if (collector.status === "COMPLETED") issues.push("このデータ収集は完了しています。新しい市場データの収集は行われていません。");
   else if (collector.status === "ERROR") issues.push("収集処理でエラーが報告されています。管理者による確認が必要です。");
   else if (collector.status === "DEGRADED" && issues.length === 0) issues.push("収集処理が品質低下を報告しています。同期・保存時刻・接続以外の原因は、管理者が収集ログで確認してください。");
-  return { checks, issues: [...new Set(issues)], checkedAt, reportedAt };
+  return { checks, issues: [...new Set(issues)], checkedAt, reportedAt, collectorRevision };
 }

@@ -27,9 +27,9 @@ export default function Diagnostics({
   const ws = collectorData?.ws ?? null;
   const corruptSkipped = analysisData?.corrupt_parquet_files ?? 0;
   const channelCount = ws?.subscribed_channels ?? ws?.acked_channels ?? null;
-  const subErrors = ws?.subscription_errors ?? 0;
-  const tradeParseErrors = ws?.trade_parse_errors ?? 0;
-  const syncFailures = collectorData?.consecutive_sync_failures ?? 0;
+  const subErrors = ws?.subscription_errors ?? "不明";
+  const tradeParseErrors = ws?.trade_parse_errors ?? "不明";
+  const syncFailures = collectorData?.consecutive_sync_failures ?? "不明";
 
   return (
     <section className="diagnostics panel">
@@ -66,6 +66,10 @@ export default function Diagnostics({
             <div>
               <dt>最終分析</dt>
               <dd>{fmtJst(lastAnalysisAt)}</dd>
+            </div>
+            <div>
+              <dt>収集側 Git SHA</dt>
+              <dd className="tabular">{collectorData?.git_sha || "不明"}</dd>
             </div>
             <div>
               <dt>Git SHA</dt>
