@@ -5,7 +5,6 @@ export default function AppFooter() {
     <footer className="app-footer">
       <div className="app-footer-brand">
         <strong>Lighter 市場リサーチ</strong>
-        <p>公開データを使った分析ツール。ウォレット接続や売買は行いません。</p>
       </div>
       <nav className="app-footer-links" aria-label="関連情報">
         <Link href="/#methodology">スコアについて</Link>
