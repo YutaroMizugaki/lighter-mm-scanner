@@ -35,9 +35,11 @@ export async function fetchJson<T>(
             cache: "no-store",
             next: { revalidate: 0 },
             headers: { "Cache-Control": "no-cache" },
+            signal: AbortSignal.timeout(10_000),
           }
         : {
             next: { revalidate: false },
+            signal: AbortSignal.timeout(10_000),
           },
     );
     if (!res.ok) {

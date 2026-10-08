@@ -1,4 +1,5 @@
 import DataFreshness from "@/components/DataFreshness";
+import CollectionHealth from "@/components/CollectionHealth";
 import DataHealthNotice from "@/components/DataHealthNotice";
 import Diagnostics from "@/components/Diagnostics";
 import HomeMarkets from "@/components/HomeMarkets";
@@ -12,6 +13,7 @@ import {
   resolveDashboardBundle,
 } from "@/lib/api";
 import { fmt } from "@/lib/format";
+import { collectionHealth } from "@/lib/dataHealth";
 import {
   effectiveCollectorStatus,
   effectivePublicAnalysisStatus,
@@ -50,7 +52,12 @@ export default async function HomePage() {
     const msg = missing
       ? publicAnalysisPendingMessage()
       : publicDataUnavailableMessage("overview");
-    return <PublicErrorState title={msg.title} body={msg.body} />;
+    return (
+      <>
+        <PublicErrorState title={msg.title} body={msg.body} />
+        <CollectionHealth initial={collectionHealth(collectorResult.ok ? collectorResult.data : null)} />
+      </>
+    );
   }
 
   const overview = overviewResult.data;
@@ -76,9 +83,6 @@ export default async function HomePage() {
     analysisData?.status === "DEGRADED" ||
     overview.status === "DEGRADED";
   const corruptSkipped = analysisData?.corrupt_parquet_files ?? 0;
-  const collectorNote = collectorStatus
-    ? statusHealthNote(collectorStatus, "collector")
-    : null;
   const analysisNote = statusHealthNote(analysisFreshness.status, "analysis");
   const collectorSyncAt = collectorData?.last_successful_sync ?? null;
 
@@ -93,9 +97,6 @@ export default async function HomePage() {
   }
 
   const showHealthBanner =
-    collectorStatus === "DEGRADED" ||
-    collectorStatus === "STALE" ||
-    collectorStatus === "OFFLINE" ||
     analysisFreshness.status === "ERROR" ||
     analysisFreshness.status === "STALE" ||
     analysisFreshness.status === "NOT_STARTED" ||
@@ -103,7 +104,6 @@ export default async function HomePage() {
     analysisDegraded ||
     healthWarnings.length > 0 ||
     analysisError ||
-    Boolean(collectorNote) ||
     Boolean(analysisNote) ||
     marketDataFetchFailed ||
     analysisStatusFetchFailed;
@@ -117,7 +117,6 @@ export default async function HomePage() {
       : "",
     ...healthWarnings,
     analysisNote || "",
-    collectorNote || "",
   ].filter(Boolean);
 
   return (
@@ -143,6 +142,7 @@ export default async function HomePage() {
         analysisError={analysisError}
         marketDataFetchFailed={marketDataFetchFailed}
       />
+      <CollectionHealth initial={collectionHealth(collectorData)} />
 
       {marketDataFetchFailed ? (
         <p className="muted">市場データを読み込めませんでした。</p>

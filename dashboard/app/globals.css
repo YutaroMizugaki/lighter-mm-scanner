@@ -269,6 +269,13 @@ main.app-shell {
 }
 .notice p { margin: var(--space-2) 0 0; }
 .notice-meta { margin-top: var(--space-3); font-size: 0.85rem; }
+.collection-health-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.collection-health-heading h2 { margin: 0; }
+.collection-health-detail, .collection-health-time { display: block; margin-top: 0.3rem; }
+.collection-health-time { color: var(--text-muted); font-size: 0.8rem; }
+.collection-health-warning, .health-warning, .health-error { color: #77571b; }
+.health-ok { color: #226644; }
+.health-unknown { color: var(--text-muted); }
 
 .summary-grid {
   display: grid;
