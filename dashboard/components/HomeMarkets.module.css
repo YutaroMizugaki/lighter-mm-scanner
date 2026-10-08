@@ -5,13 +5,16 @@
 .controls select { width: 200px; }
 .filter { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .filter input { width: 18px; height: 18px; accent-color: var(--accent); }
+.costControls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; margin-top: 12px; font-size: 12px; color: var(--text-muted); }
+.costControls > label { display: flex; align-items: center; gap: 6px; }
+.costControls input[type="number"] { width: 76px; min-height: 36px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); padding: 6px 8px; font: inherit; font-variant-numeric: tabular-nums; }
 .toggle { display: flex; padding: 3px; border: 1px solid var(--border); background: var(--surface); border-radius: 6px; }
 .toggle button { min-height: 36px; padding: 6px 12px; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); font: inherit; cursor: pointer; white-space: nowrap; }
 .toggle button[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
 .resultCount { display: flex; justify-content: space-between; margin: 14px 0 10px; color: var(--text-muted); font-size: 12px; }
 .table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-variant-numeric: tabular-nums; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
 .table thead th:first-child { width: 23%; }
-.table thead th:nth-child(2) { width: 12%; }
+.table thead th:nth-child(2) { width: 15%; }
 .table th, .table td { padding: 0 18px; text-align: right; white-space: nowrap; }
 .table thead th { height: 52px; position: sticky; top: 0; z-index: 2; background: #f0f3f5; border-bottom: 1px solid var(--border-strong); font-size: 13px; font-weight: 600; color: var(--text-muted); line-height: 1.35; }
 .table thead th:first-child { text-align: left; border-radius: 8px 0 0 0; }
@@ -28,6 +31,9 @@
 .symbol > a, .symbol > span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
 .symbol small { display: block; color: var(--text-muted); font-size: 10px; font-weight: 400; line-height: 1.2; margin-top: 2px; }
 .score { font-weight: 650; }
+.dataRow .primaryMetric { font-size: 18px; font-weight: 650; color: var(--text); }
+.table thead .primaryHeader { color: var(--text); }
+.secondaryMetric { color: var(--text-muted); }
 .feeNote { display: block; color: var(--text-muted); font-size: 10px; }
 .detailRow > td { padding: 0; border-bottom: 1px solid var(--border-strong); text-align: left; }
 .details { padding: 20px 24px; background: #f3f8f5; white-space: normal; }
@@ -42,8 +48,9 @@
 @media (max-width: 760px) {
   .desktopOnly { display: none; }
   .table thead th:first-child { width: 32%; }
-  .table thead th:nth-child(2) { width: 18%; }
-  .table thead th:nth-child(3), .table thead th:nth-child(4) { width: 25%; }
+  .table thead th:nth-child(2) { width: 21%; }
+  .table thead th:nth-child(3) { width: 25%; }
+  .table thead th:nth-child(4) { width: 22%; }
   .controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
   .controls > input { grid-column: 1 / -1; min-width: 0; }
   .controls select { width: auto; flex: 1; min-width: 0; max-width: none; }
@@ -52,6 +59,7 @@
   .table thead th { font-size: 11px; }
   .table thead th > span { font-size: 10px; }
   .dataRow th, .dataRow td { font-size: 15px; }
+  .dataRow .primaryMetric { font-size: 16px; }
   .identity { gap: 5px; }
   .expand { flex-basis: 24px; height: 32px; }
   .details { padding: 16px; }
