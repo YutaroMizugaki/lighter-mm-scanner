@@ -12,7 +12,7 @@ export default function SignedValue({ value, digits = 2, suffix = "bp" }: Props)
     return <span className="tabular">—</span>;
   }
   const tone = value > 0 ? "signed-pos" : value < 0 ? "signed-neg" : "signed-neu";
-  const signWord = value > 0 ? "positive" : value < 0 ? "negative" : "neutral";
+  const signWord = value > 0 ? "プラス" : value < 0 ? "マイナス" : "ゼロ";
   return (
     <span className={`tabular ${tone}`} title={`${signWord} ${suffix}`}>
       {fmt(value, digits, true)}

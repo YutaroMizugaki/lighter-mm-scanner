@@ -1,29 +1,28 @@
+"use client";
+
 import Link from "next/link";
+import { usePathname } from "next/navigation";
 
 const NAV = [
-  { href: "/", label: "Overview" },
-  { href: "/markets", label: "Markets" },
-  { href: "/candidates", label: "Candidates" },
-  { href: "/#methodology", label: "Methodology" },
+  { href: "/", label: "概要" },
+  { href: "/markets", label: "市場一覧" },
+  { href: "/candidates", label: "候補" },
 ] as const;
 
 export default function AppHeader() {
+  const pathname = usePathname();
   return (
     <header className="app-header">
       <div className="app-header-brand">
         <div className="app-header-titles">
           <Link href="/" className="app-brand-link">
-            <span className="app-brand">Lighter MM Scanner</span>
+            <span className="app-brand"><span className="brand-mark" aria-hidden="true">L</span>Lighter <span className="brand-caption">市場リサーチ</span></span>
           </Link>
-          <p className="app-tagline">Market-making opportunity research for Lighter</p>
         </div>
-        <span className="read-only-badge" title="No wallet connection or trading">
-          Read-only research
-        </span>
       </div>
-      <nav className="app-nav" aria-label="Primary">
+      <nav className="app-nav" aria-label="メインメニュー">
         {NAV.map((item) => (
-          <Link key={item.href} href={item.href}>
+          <Link key={item.href} href={item.href} aria-current={(item.href === "/" ? pathname === "/" : pathname.startsWith(item.href)) ? "page" : undefined}>
             {item.label}
           </Link>
         ))}

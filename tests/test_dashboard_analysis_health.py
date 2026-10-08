@@ -135,8 +135,8 @@ def test_dashboard_labels_last_analysis_and_last_sync() -> None:
     assert "lastAnalysisAt" in home
     assert "publicFreshnessCopy" in data_freshness
     assert "lastAnalysisAt" in data_freshness
-    assert "Last Sync" in diagnostics
-    assert "Last Analysis" in diagnostics
+    assert "最終同期" in diagnostics
+    assert "最終分析" in diagnostics
     assert "Last Data" not in home
     assert "Last Update" not in home
     assert "analysisDisplayTimestamp" in data

@@ -130,30 +130,30 @@ export function statusHealthNote(
 ): string | null {
   if (scope === "collector") {
     if (status === "OFFLINE") {
-      return "Market data has not been durably collected for >40m.";
+      return "市場データの保存を40分以上確認できていません。";
     }
     if (status === "STALE") {
-      return "Latest durable market event is older than 20m.";
+      return "保存済みの最新市場データは20分以上前のものです。";
     }
     if (status === "DEGRADED") {
-      return "Collector degraded — check sync failures, durable event freshness, or WebSocket health.";
+      return "データ収集に問題があります。同期状況、市場データの更新時刻、接続状態を確認してください。";
     }
     return null;
   }
   if (status === "NOT_STARTED") {
-    return "Analyzer has not published a status yet.";
+    return "分析処理の状態はまだ公開されていません。";
   }
   if (status === "NO_ACTIVE_RUN") {
-    return "No active collector run is available to analyze.";
+    return "分析対象となるデータ収集の実行がありません。";
   }
   if (status === "ERROR") {
-    return "The latest analysis run failed. Prior valid results may still be shown.";
+    return "最新の分析に失敗しました。直前の有効な分析結果を表示している場合があります。";
   }
   if (status === "DEGRADED") {
-    return "Some source data could not be processed. The latest valid analysis is still shown.";
+    return "一部のデータを処理できませんでした。表示中の分析結果は、処理できたデータに基づいています。";
   }
   if (status === "STALE") {
-    return "Analysis results are older than 30m (expected cadence: 30m).";
+    return "分析結果は30分以上前のものです（通常の更新間隔は30分です）。";
   }
   return null;
 }

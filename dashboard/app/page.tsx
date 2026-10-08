@@ -86,11 +86,11 @@ export default async function HomePage() {
 
   const healthWarnings = [...(overview.health_warnings || [])];
   if (marketDataFetchFailed) {
-    healthWarnings.unshift("Market aggregate data could not be loaded.");
+    healthWarnings.unshift("市場データを読み込めませんでした。");
   }
   if (analysisStatusFetchFailed) {
     healthWarnings.unshift(
-      "Analyzer status could not be loaded; showing the published overview snapshot.",
+      "分析の更新状況を取得できないため、公開済みの結果を表示しています。",
     );
   }
 
@@ -112,10 +112,10 @@ export default async function HomePage() {
 
   const primaryMessages = [
     analysisError
-      ? "The latest analysis run failed. Prior valid results may still be shown."
+      ? "最新の分析に失敗しました。前回の有効な結果を表示している場合があります。"
       : "",
     analysisDegraded && corruptSkipped > 0
-      ? "Some source data could not be processed. The latest valid analysis is still shown."
+      ? "一部のデータを処理できませんでした。直近の有効な分析結果を表示しています。"
       : "",
     ...healthWarnings,
     analysisNote || "",
@@ -131,14 +131,14 @@ export default async function HomePage() {
         aria-labelledby="summary-heading"
       >
         <div className="section-header">
-          <h2 id="summary-heading">Market summary</h2>
+          <h2 id="summary-heading">市場の概要</h2>
         </div>
 
         <div className={styles.grid}>
-          <MetricCard label="Markets analyzed" value={analyzed ?? "—"} />
-          <MetricCard label="Candidates" value={overview.candidates ?? 0} />
+          <MetricCard label="分析した市場" value={analyzed ?? "—"} />
+          <MetricCard label="候補の市場" value={overview.candidates ?? 0} />
           <MetricCard
-            label="Data coverage"
+            label="データ取得率"
             value={
               overview.coverage_pct != null
                 ? `${overview.coverage_pct.toFixed(1)}%`
@@ -146,11 +146,11 @@ export default async function HomePage() {
             }
           />
 
-          <DataFreshness
-            status={analysisFreshness.status}
-            lastAnalysisAt={lastAnalysisAt}
-          />
         </div>
+        <DataFreshness
+          status={analysisFreshness.status}
+          lastAnalysisAt={lastAnalysisAt}
+        />
       </section>
 
       <TopOpportunities candidates={candidates} fetchFailed={marketDataFetchFailed} />
@@ -177,31 +177,32 @@ export default async function HomePage() {
         marketDataFetchFailed={marketDataFetchFailed}
       />
 
-      <section className="panel" aria-labelledby="disclaimer-heading">
-        <h2 id="disclaimer-heading">Disclaimer</h2>
+      <section className="disclaimer" aria-labelledby="disclaimer-heading">
+        <h2 id="disclaimer-heading">ご利用にあたって</h2>
         <p className="section-lead">
-          {overview.disclaimer ||
-            "Independent, read-only market research. Estimates are not financial advice and do not guarantee fills, edge, or profit."}
+          公開データに基づく調査用ツールです。数値は売買の推奨や利益の保証ではありません。
+          実際の取引では、約定確率・逆選択・在庫リスクを別途確認してください。
+          仮想取引は注文の順番待ち、通信遅延、キャンセルなどを再現しておらず、実際の注文は行いません。
         </p>
         <p className="muted" style={{ marginTop: "0.75rem" }}>
-          Observation window{" "}
+          観測期間{" "}
           <span className="tabular">
             {overview.run_observation_hours != null
-              ? `${fmt(overview.run_observation_hours, 1)}h`
+              ? `${fmt(overview.run_observation_hours, 1)}時間`
               : overview.observation_hours != null
-                ? `${fmt(overview.observation_hours, 1)}h`
+                ? `${fmt(overview.observation_hours, 1)}時間`
                 : "—"}
           </span>
           {overview.analysis_window_hours != null && (
             <>
               {" "}
-              · ranking window{" "}
+              · スコアの集計期間{" "}
               <span className="tabular">
-                {fmt(overview.analysis_window_hours, 1)}h
+                {fmt(overview.analysis_window_hours, 1)}時間
               </span>
             </>
           )}
-          .
+
         </p>
       </section>
     </>

@@ -1,16 +1,13 @@
 import EstimatedFillValue from "@/components/EstimatedFillValue";
 import PublicErrorState from "@/components/PublicErrorState";
 import QualityChip from "@/components/QualityChip";
-import RankBadge from "@/components/RankBadge";
-import ScoreBar from "@/components/ScoreBar";
 import SignedValue from "@/components/SignedValue";
 import { getCandidatesResult } from "@/lib/api";
-import { fmt, fmtPaperCount, fmtPaperUsd } from "@/lib/format";
+import { fmt } from "@/lib/format";
 import {
-  ESTIMATED_EDGE_TOOLTIP,
   ESTIMATED_FILL_TOOLTIP,
 } from "@/lib/marketMetrics";
-import { formatDepth, publicDataUnavailableMessage, TOOLTIPS } from "@/lib/public";
+import { publicDataUnavailableMessage, TOOLTIPS } from "@/lib/public";
 import Link from "next/link";
 
 export default async function CandidatesPage() {
@@ -26,38 +23,29 @@ export default async function CandidatesPage() {
   return (
     <section className="panel">
       <div className="section-header">
-        <h1 style={{ margin: 0, fontSize: "1.35rem" }}>Candidates</h1>
+        <h1 style={{ margin: 0, fontSize: "1.35rem" }}>候補市場</h1>
         <p className="section-lead" title={ESTIMATED_FILL_TOOLTIP}>
-          Markets that currently meet all candidate thresholds. Est. Fill is Estimated Maker Fill
-          ($50 / 30s / Conservative), not market-level trade count.
+          現在の候補条件を満たす市場です。約定シミュレーションは「指値50ドル・30秒・保守的条件」の推定値で、市場全体の取引回数とは異なります。
         </p>
       </div>
       {candidates.length === 0 ? (
         <>
-          <p>No markets currently meet all candidate thresholds.</p>
+          <p>現在、すべての候補条件を満たす市場はありません。</p>
           <p>
-            <Link href="/markets">Explore all markets →</Link>
+            <Link href="/markets">市場一覧を見る →</Link>
           </p>
         </>
       ) : (
-        <div className="table-scroll">
-          <table className="market-table">
+        <div className="table-scroll" tabIndex={0} aria-label="候補市場一覧。横にスクロールできます">
+          <table className="market-table candidate-table">
             <thead>
               <tr>
-                <th className="sticky-col">Market</th>
-                <th>Rank</th>
-                <th title={TOOLTIPS.score}>Score</th>
-                <th title={TOOLTIPS.effectiveScore}>Effective</th>
-                <th title={ESTIMATED_FILL_TOOLTIP}>Est. Fill</th>
-                <th>Spread</th>
-                <th title={TOOLTIPS.depth10bp}>Depth</th>
-                <th title={TOOLTIPS.makerMarkout}>M5</th>
-                <th title={TOOLTIPS.makerMarkout}>M30</th>
-                <th title={ESTIMATED_EDGE_TOOLTIP}>Est. Edge</th>
-                <th>Paper PnL</th>
-                <th>Paper PnL/h</th>
-                <th>Round Trips</th>
-                <th title={TOOLTIPS.sampleQuality}>Quality</th>
+                <th className="sticky-col">銘柄</th>
+                <th title={TOOLTIPS.effectiveScore}>総合スコア</th>
+                <th title={ESTIMATED_FILL_TOOLTIP}>約定シミュレーション</th>
+                <th>スプレッド</th>
+                <th title={TOOLTIPS.makerMarkout}>30秒後</th>
+                <th title={TOOLTIPS.sampleQuality}>データ品質</th>
               </tr>
             </thead>
             <tbody>
@@ -65,12 +53,6 @@ export default async function CandidatesPage() {
                 <tr key={m.symbol}>
                   <td className="sticky-col">
                     <Link href={`/markets/${encodeURIComponent(m.symbol)}`}>{m.symbol}</Link>
-                  </td>
-                  <td>
-                    <RankBadge letter={m.letter_rank} />
-                  </td>
-                  <td>
-                    <ScoreBar score={m.score} />
                   </td>
                   <td className="tabular" title={TOOLTIPS.effectiveScore}>
                     {fmt(m.effective_score ?? m.score, 1)}
@@ -84,29 +66,10 @@ export default async function CandidatesPage() {
                   </td>
                   <td className="tabular">
                     {fmt(m.median_spread_bps)}
-                    <span className="unit"> bp</span>
-                  </td>
-                  <td className="tabular">{formatDepth(m.median_two_sided_depth_10bps_usd)}</td>
-                  <td>
-                    <SignedValue value={m.maker_markout_5s_median_bps} />
+                      <span className="unit"> bp</span>
                   </td>
                   <td>
                     <SignedValue value={m.maker_markout_30s_median_bps} />
-                  </td>
-                  <td title={ESTIMATED_EDGE_TOOLTIP}>
-                    <SignedValue value={m.estimated_maker_edge_30s_bps} />
-                    {m.estimated_maker_edge_fee_included === false && (
-                      <span className="edge-meta">fee excl.</span>
-                    )}
-                  </td>
-                  <td className="tabular">
-                    {fmtPaperUsd(m.paper_mm_total_pnl_usd, m.paper_mm_status, true)}
-                  </td>
-                  <td className="tabular">
-                    {fmtPaperUsd(m.paper_mm_pnl_per_hour_usd, m.paper_mm_status, true)}
-                  </td>
-                  <td className="tabular">
-                    {fmtPaperCount(m.paper_mm_round_trips, m.paper_mm_status)}
                   </td>
                   <td>
                     <QualityChip quality={m.estimated_maker_fill_sample_quality} />

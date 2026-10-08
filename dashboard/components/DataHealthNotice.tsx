@@ -28,13 +28,13 @@ export default function DataHealthNotice({
   const primary =
     corruptNotice ||
     unique[0] ||
-    "Some source data could not be processed. The latest valid analysis is still shown.";
+    "一部のデータを処理できませんでした。表示中の分析結果は、処理できたデータに基づいています。";
   const rest = unique.filter((m) => m !== primary);
 
   return (
     <section className="notice" aria-labelledby="data-health-heading">
       <h2 id="data-health-heading" className="notice-title">
-        Data quality notice
+        データ品質のお知らせ
       </h2>
       <p>{primary}</p>
       {rest.length > 0 && (
@@ -46,12 +46,12 @@ export default function DataHealthNotice({
       )}
       {(analysisError || corruptSkipped > 0) && lastAnalysisAt && (
         <p className="muted notice-meta">
-          Latest valid analysis: {fmtJst(lastAnalysisAt)}
+          最後に確認できた分析結果: {fmtJst(lastAnalysisAt)}
         </p>
       )}
       {marketDataFetchFailed && (
         <p className="muted notice-meta">
-          Market aggregate data could not be loaded for this view.
+          この画面の市場集計データを読み込めませんでした。
         </p>
       )}
     </section>

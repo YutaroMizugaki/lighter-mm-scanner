@@ -20,7 +20,7 @@ export function fmtEstimatedFill(
   quality?: string | null,
   digits = 0,
 ): string {
-  if (quality === "insufficient") return "Insufficient";
+  if (quality === "insufficient") return "データ不足";
   if (rate === null || rate === undefined || Number.isNaN(rate)) return "—";
   return fmtPctFraction(rate, digits);
 }
@@ -59,9 +59,9 @@ export function fmtPaperCount(
 
 export function fmtSampleQuality(q: string | null | undefined): string {
   if (!q) return "—";
-  if (q === "insufficient") return "Insufficient";
-  if (q === "preliminary") return "Preliminary";
-  if (q === "reliable") return "Reliable";
+  if (q === "insufficient") return "データ不足";
+  if (q === "preliminary") return "暫定";
+  if (q === "reliable") return "信頼できる";
   return q;
 }
 
