@@ -1,13 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import type { MarketRow } from "@/lib/types";
 import { fmt, fmtEstimatedFill, fmtSampleQuality } from "@/lib/format";
 import { formatDepth, TOOLTIPS } from "@/lib/public";
 import { ESTIMATED_FILL_TOOLTIP, ESTIMATED_EDGE_TOOLTIP } from "@/lib/marketMetrics";
 import SignedValue from "./SignedValue";
-import { homeOpportunityPriority, HOME_RANKING_TOOLTIP } from "@/lib/homeRanking";
+import { coversRoundTripCost, DEFAULT_ROUND_TRIP_COST_BPS, homeOpportunityPriority, HOME_RANKING_TOOLTIP, ROUND_TRIP_COST_TOOLTIP } from "@/lib/homeRanking";
 import styles from "./HomeMarkets.module.css";
 
 const PAGE_SIZE = 20;
@@ -44,13 +44,22 @@ export default function HomeMarkets({ markets }: { markets: MarketRow[] }) {
   const [liquidity, setLiquidity] = useState(true);
   const [limit, setLimit] = useState(PAGE_SIZE);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [costInput, setCostInput] = useState(String(DEFAULT_ROUND_TRIP_COST_BPS));
+  const [costOnly, setCostOnly] = useState(true);
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("home-round-trip-cost-bps");
+      if (saved != null && saved.trim() !== "" && Number.isFinite(Number(saved)) && Number(saved) >= 0) setCostInput(saved);
+    } catch { /* Storage is optional. */ }
+  }, []);
+  const costBps = costInput.trim() === "" ? null : Number(costInput);
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return markets.filter((m) => (!candidatesOnly || m.is_candidate) && m.symbol.toLowerCase().includes(q)).sort((a, b) => {
+    return markets.filter((m) => (!candidatesOnly || m.is_candidate) && (!costOnly || coversRoundTripCost(m, costBps)) && m.symbol.toLowerCase().includes(q)).sort((a, b) => {
       const av = sortValue(a, sort), bv = sortValue(b, sort);
       return av === bv ? ((b.effective_score ?? b.score ?? -Infinity) - (a.effective_score ?? a.score ?? -Infinity)) || a.symbol.localeCompare(b.symbol) : bv - av;
     });
-  }, [markets, query, sort, candidatesOnly]);
+  }, [markets, query, sort, candidatesOnly, costOnly, costBps]);
   const visible = rows.slice(0, limit);
   return <section className={styles.section} aria-label="銘柄の比較">
     <div className={styles.controls}>
@@ -59,8 +68,13 @@ export default function HomeMarkets({ markets }: { markets: MarketRow[] }) {
       <label className={styles.filter}><input type="checkbox" checked={candidatesOnly} onChange={(e) => { setCandidatesOnly(e.target.checked); setLimit(PAGE_SIZE); setExpanded(null); }} />候補のみ</label>
       <div className={styles.toggle} role="group" aria-label="比較する指標"><button type="button" aria-pressed={liquidity} onClick={() => { setLiquidity(true); setSort("opportunity"); }}>流動性</button><button type="button" aria-pressed={!liquidity} onClick={() => { setLiquidity(false); if (sort === "spread" || sort === "depth" || sort === "activity") setSort("opportunity"); }}>約定・価格変化</button></div>
     </div>
+    <div className={styles.costControls}>
+      <label title={ROUND_TRIP_COST_TOOLTIP}>往復コスト <input type="number" aria-label="往復コスト（bp）" min="0" step="0.1" inputMode="decimal" value={costInput} onChange={(e) => { const value = e.target.value; setCostInput(value); setLimit(PAGE_SIZE); setExpanded(null); try { if (value !== "" && Number.isFinite(Number(value)) && Number(value) >= 0) localStorage.setItem("home-round-trip-cost-bps", value); } catch { /* Storage is optional. */ } }} /> bp</label>
+      <label className={styles.filter}><input type="checkbox" checked={costOnly} onChange={(e) => { setCostOnly(e.target.checked); setLimit(PAGE_SIZE); setExpanded(null); }} />コスト超のみ</label>
+      <a href="https://apidocs.lighter.xyz/docs/account-types" target="_blank" rel="noreferrer" title={ROUND_TRIP_COST_TOOLTIP}>手数料 ↗</a>
+    </div>
     <div className={styles.resultCount}><span role="status">{visible.length} / {rows.length} 銘柄</span><span>＋で詳細</span></div>
-    {rows.length === 0 ? <p className={styles.empty}>{markets.length === 0 ? "最新の分析に表示できる銘柄はありません。" : "条件に一致する銘柄はありません。"}</p> : <table className={styles.table}>
+    {rows.length === 0 ? <p className={styles.empty}>{markets.length === 0 ? "最新の分析に表示できる銘柄はありません。" : costOnly && (costBps == null || !Number.isFinite(costBps) || costBps < 0) ? "有効な往復コストを入力してください。" : "条件に一致する銘柄はありません。"}</p> : <table className={styles.table}>
       <caption className="sr-only">{liquidity ? "銘柄の流動性比較" : "銘柄の約定・価格変化の比較"}</caption>
       <thead><tr><th scope="col">銘柄</th>
         {liquidity ? <><th scope="col" className={styles.primaryHeader} title={TOOLTIPS.tradesPerMin}>取引回数<span>/ 分 · 中央値</span></th><th scope="col" className={styles.primaryHeader} title={TOOLTIPS.depth10bp}>板の厚さ<span>±10bp · USD</span></th><th scope="col">スプレッド<span>bp</span></th><th scope="col" className={styles.desktopOnly} title={ESTIMATED_FILL_TOOLTIP}>推定約定率<span>$50 · 30秒</span></th><th scope="col" className={styles.desktopOnly} title={TOOLTIPS.effectiveScore}>総合スコア</th></> : <><th scope="col" title={TOOLTIPS.effectiveScore}>総合スコア</th><th scope="col" title={ESTIMATED_FILL_TOOLTIP}>推定約定率<span>$50 · 30秒</span></th><th scope="col" title={TOOLTIPS.makerMarkout}>約定30秒後<span>bp</span></th><th scope="col" className={styles.desktopOnly} title={TOOLTIPS.makerMarkout}>約定5秒後<span>bp</span></th><th scope="col" className={styles.desktopOnly} title={ESTIMATED_EDGE_TOOLTIP}>推定エッジ<span>30秒 · bp</span></th></>}

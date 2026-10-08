@@ -5,6 +5,9 @@
 .controls select { width: 200px; }
 .filter { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .filter input { width: 18px; height: 18px; accent-color: var(--accent); }
+.costControls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; margin-top: 12px; font-size: 12px; color: var(--text-muted); }
+.costControls > label { display: flex; align-items: center; gap: 6px; }
+.costControls input[type="number"] { width: 76px; min-height: 36px; border: 1px solid var(--border-strong); border-radius: 4px; background: var(--surface); color: var(--text); padding: 6px 8px; font: inherit; font-variant-numeric: tabular-nums; }
 .toggle { display: flex; padding: 3px; border: 1px solid var(--border); background: var(--surface); border-radius: 6px; }
 .toggle button { min-height: 36px; padding: 6px 12px; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); font: inherit; cursor: pointer; white-space: nowrap; }
 .toggle button[aria-pressed="true"] { color: var(--accent); background: var(--accent-soft); font-weight: 600; }
