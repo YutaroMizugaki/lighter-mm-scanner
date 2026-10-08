@@ -122,17 +122,19 @@ export default async function HomePage() {
   return (
     <>
       <header className={styles.heading}>
-        <div className={styles.titleRow}>
-          <h1>銘柄一覧</h1>
-          <span className={styles.counts}>
-            {analyzed ?? "—"}市場 · 候補 {overview.candidates ?? 0}
-            {overview.analysis_window_hours != null && ` · 集計 ${fmt(overview.analysis_window_hours, 0)}時間`}
-          </span>
+        <div className={styles.intro}>
+          <p className={styles.eyebrow}>市場リサーチ</p>
+          <h1>市場を比較する</h1>
+          <p className={styles.description}>流動性とスプレッドから、調査する銘柄を見つける。</p>
         </div>
-        <DataFreshness
-          status={analysisFreshness.status}
-          lastAnalysisAt={lastAnalysisAt}
-        />
+        <div className={styles.overview}>
+          <dl className={styles.counts}>
+            <div><dt>分析した市場</dt><dd>{analyzed ?? "—"}<span>市場</span></dd></div>
+            <div><dt>調査候補</dt><dd>{overview.candidates ?? 0}<span>市場</span></dd></div>
+            <div><dt>集計期間</dt><dd>{overview.analysis_window_hours != null ? fmt(overview.analysis_window_hours, 0) : "—"}<span>時間</span></dd></div>
+          </dl>
+          <DataFreshness status={analysisFreshness.status} lastAnalysisAt={lastAnalysisAt} />
+        </div>
       </header>
       <DataHealthNotice
         show={showHealthBanner}
@@ -142,7 +144,7 @@ export default async function HomePage() {
         analysisError={analysisError}
         marketDataFetchFailed={marketDataFetchFailed}
       />
-      <CollectionHealth initial={collectionHealth(collectorData)} />
+      <CollectionHealth initial={collectionHealth(collectorData)}>
 
       {marketDataFetchFailed ? (
         <p className="muted">市場データを読み込めませんでした。</p>
@@ -193,6 +195,7 @@ export default async function HomePage() {
         </p>
         </div>
       </details>
+      </CollectionHealth>
     </>
   );
 }

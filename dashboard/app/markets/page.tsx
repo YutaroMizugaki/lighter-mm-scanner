@@ -15,7 +15,7 @@ export default async function MarketsPage() {
   return (
     <section className="panel">
       <div className="section-header">
-        <h1 style={{ margin: 0, fontSize: "1.35rem" }}>市場一覧</h1>
+        <h1 className="page-title">市場一覧</h1>
         <p className="section-lead">
           Lighterの市場を検索・並べ替えできます。流動性や取引量と、約定シミュレーション値を分けて確認できます。
         </p>

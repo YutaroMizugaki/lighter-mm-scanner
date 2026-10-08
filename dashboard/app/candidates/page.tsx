@@ -23,7 +23,7 @@ export default async function CandidatesPage() {
   return (
     <section className="panel">
       <div className="section-header">
-        <h1 style={{ margin: 0, fontSize: "1.35rem" }}>候補市場</h1>
+        <h1 className="page-title">候補市場</h1>
         <p className="section-lead" title={ESTIMATED_FILL_TOOLTIP}>
           現在の候補条件を満たす市場です。約定シミュレーションは「指値50ドル・30秒・保守的条件」の推定値で、市場全体の取引回数とは異なります。
         </p>
