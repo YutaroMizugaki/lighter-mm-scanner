@@ -33,7 +33,7 @@ export function EstimatedFillValue({
   const display =
     quality === "insufficient"
       ? "—"
-      : value === "Insufficient"
+      : value === "データ不足"
         ? "—"
         : value;
 

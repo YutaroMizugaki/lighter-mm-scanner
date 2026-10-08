@@ -1,5 +1,5 @@
 export const ESTIMATED_FILL_TOOLTIP =
-  "Simulates whether aggressive trade flow could clear a small maker quote at the touch. Not actual fill probability. Ranking uses $50 / 30s / Conservative. Sample <100 is Insufficient (not 0%).";
+  "積極的な売買が最良気配の小口メイカー注文に到達するかを推定した値です。実際の約定確率ではありません。ランキングでは50ドル・30秒・保守的な条件を使用します。サンプル数100未満はデータ不足として扱い、0%とはみなしません。";
 
 export const ESTIMATED_EDGE_TOOLTIP =
-  "Estimated Fill × (Maker Markout − Maker Fee). Explanatory metric, not expected profit. When maker fee is unavailable, values are fee-excluded.";
+  "推定約定率 ×（メイカー約定後の価格変動 − メイカー手数料）。参考指標であり、期待利益ではありません。メイカー手数料が不明な場合は、手数料を差し引かずに表示します。";

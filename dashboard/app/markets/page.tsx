@@ -15,14 +15,13 @@ export default async function MarketsPage() {
   return (
     <section className="panel">
       <div className="section-header">
-        <h1 style={{ margin: 0, fontSize: "1.35rem" }}>Markets</h1>
+        <h1 style={{ margin: 0, fontSize: "1.35rem" }}>市場一覧</h1>
         <p className="section-lead">
-          Search, sort, and compare research rankings across Lighter markets. Depth and activity
-          are shown alongside Estimated Fill so you can separate liquidity from fill estimates.
+          Lighterの市場を検索・並べ替えできます。流動性や取引量と、約定シミュレーション値を分けて確認できます。
         </p>
       </div>
       {markets.length === 0 ? (
-        <p className="muted">No markets are available in the latest analysis yet.</p>
+        <p className="muted">最新の分析に表示できる市場はありません。</p>
       ) : (
         <MarketsClient markets={markets} />
       )}

@@ -43,7 +43,7 @@ def test_home_page_detects_candidates_fetch_failure() -> None:
     src = HOME_PAGE.read_text(encoding="utf-8")
     assert "getCandidatesResult" in src
     assert "getMarketsResult" not in src
-    assert "Market aggregate data could not be loaded." in src
+    assert "市場データを読み込めませんでした。" in src
 
 
 def test_home_page_parallel_fetch() -> None:
@@ -64,7 +64,7 @@ def test_candidates_page_uses_candidates_json() -> None:
 def test_effective_status_uses_durable_event_not_generated_at() -> None:
     src = STATUS_TS.read_text(encoding="utf-8")
     assert "last_durable_event_at" in src
-    assert "Market data has not been durably collected for >40m." in src
+    assert "市場データの保存を40分以上確認できていません。" in src
     assert "Public latest.json has not been refreshed" not in src
 
 

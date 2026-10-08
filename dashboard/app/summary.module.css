@@ -1,40 +1,12 @@
-.panel {
-  padding: var(--space-4);
-}
-
-.panel :global(.section-header) {
-  margin-bottom: var(--space-3);
-}
-
-.grid {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: var(--space-3);
-}
-
-.grid :global(.metric-card),
-.grid :global(.data-freshness) {
-  min-height: 80px;
-}
-
-.grid :global(.metric-card) {
-  padding: var(--space-2) var(--space-3);
-}
-
-.grid :global(.data-freshness) {
-  margin-top: 0;
-  padding: var(--space-2) var(--space-3);
-  align-items: center;
-}
-
-@media (max-width: 1024px) {
-  .grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
+.panel { padding: var(--space-5); }
+.grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-5); }
+.grid :global(.metric-card) { min-height: 70px; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.grid :global(.metric-card) + :global(.metric-card) { border-left: 1px solid var(--border); padding-left: var(--space-5); }
+.grid :global(.metric-value) { font-size: 1.85rem; letter-spacing: -0.03em; }
 @media (max-width: 480px) {
-  .grid {
-    grid-template-columns: 1fr;
-  }
+  .panel { padding: var(--space-4); }
+  .grid { gap: var(--space-3); }
+  .grid :global(.metric-card) + :global(.metric-card) { padding-left: var(--space-3); }
+  .grid :global(.metric-value) { font-size: 1.5rem; }
+  .grid :global(.metric-label) { font-size: 0.72rem; }
 }

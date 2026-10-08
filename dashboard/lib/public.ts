@@ -32,7 +32,7 @@ export function containsSensitiveText(text: string | null | undefined): boolean 
 /** Strip paths, bucket names, env vars, stack traces from any public string. */
 export function sanitizePublicText(
   text: string | null | undefined,
-  fallback = "Internal detail omitted.",
+  fallback = "内部情報は表示していません。",
 ): string {
   if (!text) return fallback;
   let out = text;
@@ -54,32 +54,32 @@ export function publicDataUnavailableMessage(kind: "overview" | "markets" | "mar
 } {
   if (kind === "config") {
     return {
-      title: "Market data is temporarily unavailable.",
-      body: "The dashboard could not load the latest analysis. Please try again later.",
+      title: "市場データを一時的に取得できません。",
+      body: "最新の分析データを読み込めませんでした。しばらくしてから再度お試しください。",
     };
   }
   if (kind === "markets") {
     return {
-      title: "Market data is temporarily unavailable.",
-      body: "The latest analysis could not be loaded. Please try again later.",
+      title: "市場データを一時的に取得できません。",
+      body: "最新の分析データを読み込めませんでした。しばらくしてから再度お試しください。",
     };
   }
   if (kind === "market") {
     return {
-      title: "Market detail is not available.",
-      body: "This market could not be loaded from the latest analysis. Please try again later.",
+      title: "この市場の詳細を取得できません。",
+      body: "最新の分析データから市場情報を読み込めませんでした。しばらくしてから再度お試しください。",
     };
   }
   return {
-    title: "Market data is temporarily unavailable.",
-    body: "The dashboard could not load the latest analysis. Please try again later.",
+    title: "市場データを一時的に取得できません。",
+    body: "最新の分析データを読み込めませんでした。しばらくしてから再度お試しください。",
   };
 }
 
 export function publicAnalysisPendingMessage(): { title: string; body: string } {
   return {
-    title: "Analysis data is not available yet.",
-    body: "The dashboard is waiting for the next published analysis. Please check back shortly.",
+    title: "分析データはまだありません。",
+    body: "次回の分析結果が公開されるまでお待ちください。",
   };
 }
 
@@ -127,28 +127,28 @@ export function publicFreshnessCopy(
   const level = analysisFreshnessLevel(status, lastAnalysisAt, now);
 
   if (status === "RUNNING") {
-    const runningNote = lastAnalysisAt ? "Analysis updating" : "Analysis is running";
+    const runningNote = lastAnalysisAt ? "分析を更新中" : "分析を実行中です";
     if (level === "current") {
       return {
         level,
-        label: "Data current",
+        label: "データは最新",
         detail: lastAnalysisAt
-          ? `Updated ${relative} · ${runningNote}`
+          ? `${relative}に更新 · ${runningNote}`
           : runningNote,
       };
     }
     if (level === "delayed") {
       return {
         level,
-        label: "Data delayed",
+        label: "データ更新が遅延",
         detail: lastAnalysisAt
-          ? `Latest analysis ${relative} · ${runningNote}`
+          ? `最新の分析は${relative} · ${runningNote}`
           : runningNote,
       };
     }
     return {
       level: "unavailable",
-      label: "Data unavailable",
+      label: "データを利用できません",
       detail: runningNote,
     };
   }
@@ -156,39 +156,39 @@ export function publicFreshnessCopy(
   if (level === "current") {
     return {
       level,
-      label: "Data current",
-      detail: lastAnalysisAt ? `Updated ${relative}` : "Latest analysis is available",
+      label: "データは最新",
+      detail: lastAnalysisAt ? `${relative}に更新` : "最新の分析結果を利用できます",
     };
   }
   if (level === "delayed") {
     return {
       level,
-      label: "Data delayed",
+      label: "データ更新が遅延",
       detail: lastAnalysisAt
-        ? `Latest analysis ${relative}`
-        : "Latest analysis is older than expected",
+        ? `最新の分析は${relative}`
+        : "最新の分析結果が通常より古くなっています",
     };
   }
   return {
     level,
-    label: "Data unavailable",
-    detail: "No usable analysis is currently available",
+    label: "データを利用できません",
+    detail: "現在利用できる分析結果がありません",
   };
 }
 
 export function formatRelativeAge(iso: string | null | undefined, now = Date.now()): string {
-  if (!iso) return "unknown";
+  if (!iso) return "不明";
   const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return "unknown";
+  if (Number.isNaN(t)) return "不明";
   const mins = Math.max(0, Math.round((now - t) / 60_000));
-  if (mins < 1) return "just now";
-  if (mins === 1) return "1 min ago";
-  if (mins < 60) return `${mins} min ago`;
+  if (mins < 1) return "たった今";
+  if (mins === 1) return "1分前";
+  if (mins < 60) return `${mins}分前`;
   const hours = Math.round(mins / 60);
-  if (hours === 1) return "1 hour ago";
-  if (hours < 48) return `${hours} hours ago`;
+  if (hours === 1) return "1時間前";
+  if (hours < 48) return `${hours}時間前`;
   const days = Math.round(hours / 24);
-  return days === 1 ? "1 day ago" : `${days} days ago`;
+  return days === 1 ? "1日前" : `${days}日前`;
 }
 
 export function formatUsdCompact(n: number | null | undefined, digits = 1): string {
@@ -211,13 +211,13 @@ export function formatActivity(n: number | null | undefined): string {
 export function rankLabel(letter: string | null | undefined): string {
   switch (letter) {
     case "A":
-      return "Strong";
+      return "有望";
     case "B":
-      return "Good";
+      return "良好";
     case "C":
-      return "Watch";
+      return "要確認";
     case "D":
-      return "Weak";
+      return "低評価";
     default:
       return "";
   }
@@ -226,38 +226,38 @@ export function rankLabel(letter: string | null | undefined): string {
 export function rankTooltip(letter: string | null | undefined): string {
   switch (letter) {
     case "A":
-      return "A — strongest research candidates";
+      return "A — 調査候補として特に有望";
     case "B":
-      return "B — good candidates";
+      return "B — 調査候補として良好";
     case "C":
-      return "C — mixed evidence";
+      return "C — 評価材料にばらつきあり";
     case "D":
-      return "D — weak or insufficient evidence";
+      return "D — 根拠が弱い、または不足";
     default:
-      return "Letter rank based on current research score";
+      return "現在の調査スコアに基づくランク";
   }
 }
 
 export function rankSubtext(letter: string | null | undefined, isCandidate: boolean): string {
   if (isCandidate && letter === "A") {
-    return "Strong candidate based on current observation window.";
+    return "現在の観測期間では有望な候補です。";
   }
   if (isCandidate && letter === "B") {
-    return "Good candidate based on current observation window.";
+    return "現在の観測期間では良好な候補です。";
   }
   if (isCandidate) {
-    return "Meets candidate thresholds in the current observation window.";
+    return "現在の観測期間で候補の基準を満たしています。";
   }
   if (letter === "C") {
-    return "Mixed evidence in the current observation window.";
+    return "現在の観測期間では評価材料にばらつきがあります。";
   }
-  return "Weak or insufficient evidence in the current observation window.";
+  return "現在の観測期間では根拠が弱い、または不足しています。";
 }
 
 export function publicCorruptFilesNotice(count: number): string {
   if (count <= 0) return "";
-  if (count === 1) return "1 source file could not be processed.";
-  return `${count} source files could not be processed.`;
+  if (count === 1) return "データファイル1件を処理できませんでした。";
+  return `データファイル${count}件を処理できませんでした。`;
 }
 
 export function publicHealthWarning(raw: string): string {
@@ -268,26 +268,86 @@ export function publicHealthWarning(raw: string): string {
     lower.includes("skipped") ||
     containsSensitiveText(raw)
   ) {
-    return "Some source data could not be processed. The latest valid analysis is still shown.";
+    return "一部のデータを処理できませんでした。表示中の分析結果は、処理できたデータに基づいています。";
   }
-  return sanitizePublicText(raw, "A data quality issue was detected.");
+  const translated: Record<string, string> = {
+    "Some source data could not be processed. The latest valid analysis is still shown.": "一部のデータを処理できませんでした。表示中の分析結果は、処理できたデータに基づいています。",
+    "The latest analysis run failed. Prior valid results may still be shown.": "最新の分析に失敗しました。直前の有効な分析結果を表示している場合があります。",
+    "Market data has not been durably collected for >40m.": "市場データの保存を40分以上確認できていません。",
+    "Latest durable market event is older than 20m.": "保存済みの最新市場データは20分以上前のものです。",
+    "Collector degraded — check sync failures, durable event freshness, or WebSocket health.": "データ収集に問題があります。同期状況、市場データの更新時刻、接続状態を確認してください。",
+    "Analyzer has not published a status yet.": "分析処理の状態はまだ公開されていません。",
+    "No active collector run is available to analyze.": "分析対象となるデータ収集の実行がありません。",
+    "Analysis results are older than 30m (expected cadence: 30m).": "分析結果は30分以上前のものです（通常の更新間隔は30分です）。",
+  };
+  if (translated[raw]) return translated[raw];
+  return sanitizePublicText(raw, "データ品質に関する問題を検出しました。");
+}
+
+/** Translate public pros, cons, and warnings generated by scoring.build_narratives. */
+export function publicAssessmentCopy(raw: string): string {
+  const exact: Record<string, string> = {
+    "SPREAD: n/a": "スプレッド: データなし",
+    "DEPTH: n/a": "板の厚み: データなし",
+    "ACTIVITY: n/a": "取引頻度: データなし",
+    "MARKOUT: n/a": "約定後の価格変動: データなし",
+    "EST. FILL: n/a": "推定約定率: データなし",
+    "persistent/usable spread": "安定して利用しやすいスプレッド",
+    "meaningful median spread": "中央値で十分なスプレッド",
+    "spread >=5bp for substantial fraction of time": "観測時間の多くでスプレッドが5bp以上",
+    "high trade frequency (market-level; not Estimated Maker Fill)": "市場全体の取引頻度が高い（推定メイカー約定率とは別指標）",
+    "meaningful Estimated Maker Fill @30s conservative ($50)": "保守的条件（50ドル・30秒）で推定約定率が十分にある",
+    "sufficient two-sided depth within ±10bp": "仲値±10bp以内に十分な買い・売り板がある",
+    "positive 5s maker markout": "5秒後のメイカー約定後価格変動がプラス",
+    "positive 30s maker markout": "30秒後のメイカー約定後価格変動がプラス",
+    "tight spread — limited edge after fees/latency": "スプレッドが狭く、手数料や遅延を考慮すると優位性が限られる",
+    "low trade activity": "取引頻度が低い",
+    "Estimated Maker Fill ~0 @30s conservative (touch rarely clears)": "保守的条件（50ドル・30秒）で推定約定率がほぼ0%（最良気配で約定しにくい）",
+    "thin two-sided depth": "買い・売り両側の板が薄い",
+    "negative 5s maker markout (adverse selection)": "5秒後のメイカー約定後価格変動がマイナス（逆選択の可能性）",
+    "elevated 5s volatility vs spread": "5秒間の価格変動がスプレッドに対して大きい",
+    "funding relatively high": "ファンディング率が比較的高い",
+    "data coverage below 95%": "データ充足率が95%未満",
+    "strong penalty: extremely low trade count": "大幅減点: 取引件数が極めて少ない",
+    "penalty: two-sided depth very thin": "減点: 買い・売り両側の板が非常に薄い",
+    "penalty: median 5s maker markout < 0": "減点: 5秒後のメイカー約定後価格変動の中央値が0未満",
+    "strong penalty: 30s markout largely negative": "大幅減点: 30秒後のメイカー約定後価格変動が大きくマイナス",
+    "penalty: Estimated Maker Fill ~0 @30s conservative ($50)": "減点: 保守的条件（50ドル・30秒）で推定約定率がほぼ0%",
+  };
+  if (exact[raw]) return exact[raw];
+
+  const dynamic: Array<[RegExp, (match: RegExpMatchArray) => string]> = [
+    [/^SPREAD: median (.+)bp$/, ([, value]) => `スプレッド: 中央値 ${value}bp`],
+    [/^DEPTH: \$(.+) within ±10bp$/, ([, value]) => `板の厚み: 仲値±10bp以内に $${value}`],
+    [/^ACTIVITY: (.+) trades\/min \(market-level\)$/, ([, value]) => `取引頻度: 1分あたり${value}件（市場全体）`],
+    [/^MARKOUT: (.+)bp @5s \/ (.+)bp @30s$/, ([, five, thirty]) => `約定後の価格変動: 5秒 ${five}bp / 30秒 ${thirty}bp`],
+    [/^EST\. FILL: (.+)% @30s cons\. \(\$50\)$/, ([, value]) => `推定約定率: ${value}%（保守的条件・50ドル・30秒）`],
+    [/^PERSISTENCE: spread >=5bp for (.+)% of observed time$/, ([, value]) => `スプレッドが5bp以上だった観測時間: ${value}%`],
+    [/^Estimated Maker Fill sample insufficient \(<(\d+)\)$/, ([, count]) => `推定約定率のサンプル数が不足（${count}件未満）`],
+    [/^strong penalty: observation coverage < (\d+)%$/, ([, pct]) => `大幅減点: 観測データの充足率が${pct}%未満`],
+  ];
+  for (const [pattern, render] of dynamic) {
+    const match = raw.match(pattern);
+    if (match) return render(match);
+  }
+  return sanitizePublicText(raw, "分析情報を表示できません。");
 }
 
 export const TOOLTIPS = {
   makerMarkout:
-    "Price movement after a maker fill. Positive is favorable to the maker.",
+    "メイカー注文成立後の価格変動です。プラスはメイカーに有利です。",
   estimatedFill:
-    "Simulates whether aggressive trade flow could clear a small maker quote at the touch. Not actual fill probability. Ranking uses $50 / 30s / Conservative.",
+    "積極的な売買が最良気配の小口メイカー注文に到達するかを推定した値です。実際の約定確率ではありません。ランキングでは50ドル・30秒・保守的な条件を使用します。",
   estimatedEdge:
-    "Estimated Fill × (Maker Markout − Maker Fee). Explanatory metric, not expected profit.",
-  depth10bp: "Two-sided quote liquidity within 10 basis points of mid.",
-  coverage: "Share of the expected observation window containing usable data.",
+    "推定約定率 ×（メイカー約定後の価格変動 − メイカー手数料）。参考指標であり、期待利益ではありません。",
+  depth10bp: "仲値から上下10ベーシスポイント以内にある、買い・売り両側の注文流動性です。",
+  coverage: "観測予定時間のうち、利用可能なデータがある割合です。",
   sampleQuality:
-    "Reliability of the Estimated Fill / markout sample. Insufficient means too few observations — not a measured 0%.",
-  tradesPerMin: "Market-level trade prints per minute. Not Estimated Maker Fill.",
-  score: "Relative research ranking across markets — not an expected return forecast.",
+    "推定約定率と価格変動のサンプル信頼度です。「データ不足」は観測数が足りない意味で、実測値0%を示すものではありません。",
+  tradesPerMin: "市場ごとの1分あたり約定件数です。推定メイカー約定率とは異なります。",
+  score: "市場間の相対的な調査ランクです。期待リターンの予測ではありません。",
   confidence:
-    "Data Confidence: sample size, coverage, and observation duration based reliability index. Not a statistical confidence interval.",
+    "データ信頼度は、サンプル数・データ充足率・観測時間に基づく信頼性指標です。統計上の信頼区間ではありません。",
   effectiveScore:
-    "Confidence-adjusted score used for market ranking (Raw Score × Data Confidence).",
+    "市場ランキングに使う信頼度調整後スコアです（基礎スコア × データ信頼度）。",
 } as const;

@@ -36,9 +36,9 @@ def effective_collector_status(
 
 def status_health_note(status: str) -> str | None:
     if status == "OFFLINE":
-        return "Market data has not been durably collected for >40m."
+        return "市場データの保存を40分以上確認できていません。"
     if status == "STALE":
-        return "Latest durable market event is older than 20m."
+        return "保存済みの最新市場データは20分以上前のものです。"
     return None
 
 
@@ -76,7 +76,7 @@ def test_durable_event_25_to_40_min_is_stale() -> None:
         "samples_written": 10000,
     }
     assert effective_collector_status(overview, now_ms=now.timestamp() * 1000) == "STALE"
-    assert "older than 20m" in (status_health_note("STALE") or "").lower()
+    assert "20分以上前" in (status_health_note("STALE") or "")
 
 
 def test_durable_event_over_40_min_is_offline() -> None:

@@ -21,9 +21,9 @@ export function EstimatedEdgeValue({
 }: Props) {
   const feeLabel =
     showFeeLabel && feeIncluded === false
-      ? " (fee excl.)"
+      ? " (手数料別)"
       : showFeeLabel && feeIncluded === true
-        ? " (fee incl.)"
+        ? " (手数料込)"
         : "";
   return (
     <span className={className} title={title}>

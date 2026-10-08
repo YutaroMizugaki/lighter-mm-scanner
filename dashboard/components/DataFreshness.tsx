@@ -31,7 +31,7 @@ export default function DataFreshness({ status, lastAnalysisAt, className }: Pro
         <span className="freshness-detail">{copy.detail}</span>
         {jst !== "—" && <span className="freshness-jst muted">{jst}</span>}
       </span>
-      <span className="sr-only">Status level: {copy.level as FreshnessLevel}</span>
+      <span className="sr-only">データ状態: {{ current: "最新", delayed: "遅延", unavailable: "利用不可" }[copy.level as FreshnessLevel]}</span>
     </div>
   );
 }

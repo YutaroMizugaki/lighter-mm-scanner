@@ -14,6 +14,7 @@ import {
 import {
   formatActivity,
   formatDepth,
+  publicAssessmentCopy,
   publicDataUnavailableMessage,
   rankSubtext,
   TOOLTIPS,
@@ -49,9 +50,7 @@ export default async function MarketDetailPage({
     const msg = publicDataUnavailableMessage("market");
     return (
       <section className="panel">
-        <p className="back-link">
-          <Link href="/markets">← All markets</Link>
-        </p>
+        <p className="back-link"><Link href="/markets">← 市場一覧</Link></p>
         <PublicErrorState title={msg.title} body={msg.body} />
       </section>
     );
@@ -61,15 +60,15 @@ export default async function MarketDetailPage({
   const fillQ = m.estimated_maker_fill_sample_quality;
   const feeLabel =
     m.estimated_maker_edge_fee_included === false
-      ? "fee excl."
+      ? "手数料別"
       : m.estimated_maker_edge_fee_included === true
-        ? "fee incl."
+        ? "手数料込"
         : null;
 
   return (
     <section className="panel">
       <p className="back-link">
-        <Link href="/markets">← All markets</Link>
+        <Link href="/markets">← 市場一覧</Link>
       </p>
 
       <header className="detail-header">
@@ -79,36 +78,36 @@ export default async function MarketDetailPage({
             <RankBadge letter={m.letter_rank} showLabel />
           </h1>
           <p className="detail-sub">
-            Rank {m.letter_rank} · Score {fmt(m.score, 1)}
+            評価 {m.letter_rank} · スコア {fmt(m.score, 1)}
             {m.effective_score != null && m.effective_score !== m.score
-              ? ` · Effective ${fmt(m.effective_score, 1)}`
+              ? ` · 総合スコア ${fmt(m.effective_score, 1)}`
               : ""}
           </p>
           <p className="detail-sub">{rankSubtext(m.letter_rank, m.is_candidate)}</p>
           <p className="detail-sub muted" title={TOOLTIPS.confidence}>
-            Letter rank uses raw Score. Ranking uses Effective Score (confidence-adjusted).
+            評価ランクはスコア、総合スコアはデータ信頼度を反映した市場順位に使います。
           </p>
         </div>
       </header>
 
       <div className="metric-grid" style={{ marginBottom: "1rem" }}>
         <MetricCard
-          label="Score"
+          label="スコア"
           value={<ScoreBar score={m.score} />}
           title={TOOLTIPS.score}
         />
         <MetricCard
-          label="Data Confidence"
+          label="データ信頼度"
           value={fmtPctFraction(m.confidence, 0)}
           title={TOOLTIPS.confidence}
         />
         <MetricCard
-          label="Effective Score"
+          label="総合スコア"
           value={fmt(m.effective_score ?? m.score, 1)}
           title={TOOLTIPS.effectiveScore}
         />
         <MetricCard
-          label="Est. Fill 30s"
+          label="約定シミュレーション（30秒）"
           value={
             <EstimatedFillValue
               rate={m.estimated_maker_fill_rate_30s_conservative}
@@ -118,7 +117,7 @@ export default async function MarketDetailPage({
           title={ESTIMATED_FILL_TOOLTIP}
         />
         <MetricCard
-          label="Spread"
+          label="スプレッド"
           value={
             <>
               {fmt(m.median_spread_bps)}
@@ -127,32 +126,32 @@ export default async function MarketDetailPage({
           }
         />
         <MetricCard
-          label="Maker Markout 5s"
+          label="約定後の価格変化（5秒）"
           value={<SignedValue value={m.maker_markout_5s_median_bps} />}
           title={TOOLTIPS.makerMarkout}
         />
         <MetricCard
-          label="Maker Markout 30s"
+          label="約定後の価格変化（30秒）"
           value={<SignedValue value={m.maker_markout_30s_median_bps} />}
           title={TOOLTIPS.makerMarkout}
         />
         <MetricCard
-          label="Depth ±10bp"
+          label="板の厚さ（±10bp）"
           value={formatDepth(m.median_two_sided_depth_10bps_usd)}
           title={TOOLTIPS.depth10bp}
         />
       </div>
 
       <section className="detail-section" aria-labelledby="opportunity-heading">
-        <h2 id="opportunity-heading">Opportunity</h2>
+        <h2 id="opportunity-heading">市場の指標</h2>
         <div className="metric-grid">
-          <MetricCard label="Score" value={fmt(m.score, 1)} title={TOOLTIPS.score} />
+          <MetricCard label="スコア" value={fmt(m.score, 1)} title={TOOLTIPS.score} />
           <MetricCard
-            label="Rank"
+            label="評価"
             value={<RankBadge letter={m.letter_rank} showLabel />}
           />
           <MetricCard
-            label="Spread"
+            label="スプレッド"
             value={
               <>
                 {fmt(m.median_spread_bps)}
@@ -161,7 +160,7 @@ export default async function MarketDetailPage({
             }
           />
           <MetricCard
-            label="Estimated Fill"
+            label="約定シミュレーション"
             value={
               <EstimatedFillValue
                 rate={m.estimated_maker_fill_rate_30s_conservative}
@@ -172,7 +171,7 @@ export default async function MarketDetailPage({
             title={ESTIMATED_FILL_TOOLTIP}
           />
           <MetricCard
-            label="Estimated Edge"
+            label="推定エッジ"
             value={
               <>
                 <SignedValue value={m.estimated_maker_edge_30s_bps} />
@@ -186,22 +185,21 @@ export default async function MarketDetailPage({
 
       {m.confidence_breakdown && (
         <section className="detail-section" aria-labelledby="confidence-heading">
-          <h2 id="confidence-heading">Data Confidence</h2>
+          <h2 id="confidence-heading">データ信頼度</h2>
           <p className="section-lead" title={TOOLTIPS.confidence}>
-            Heuristic reliability index from sample sizes, coverage, and observation duration.
-            Not a statistical confidence interval.
+            サンプル数、データ網羅率、観測時間から算出した目安です。統計的な信頼区間ではありません。
           </p>
           {m.confidence_reasons && m.confidence_reasons.length > 0 && (
             <p className="muted">
-              Reasons: {m.confidence_reasons.join(", ")}
+              算出理由: {m.confidence_reasons.join("、")}
             </p>
           )}
           <div className="table-scroll" style={{ marginTop: "0.75rem" }}>
             <table className="market-table" style={{ minWidth: 360 }}>
               <thead>
                 <tr>
-                  <th>Component</th>
-                  <th>Confidence</th>
+                  <th>項目</th>
+                  <th>信頼度</th>
                 </tr>
               </thead>
               <tbody>
@@ -223,22 +221,20 @@ export default async function MarketDetailPage({
 
       <section className="detail-section" aria-labelledby="execution-heading">
         <h2 id="execution-heading" title={ESTIMATED_FILL_TOOLTIP}>
-          Execution likelihood
+          約定シミュレーション
         </h2>
         <p className="section-lead">
-          Estimated Maker Fill by size. Ranking default is <strong>$50</strong> conservative.
-          Optimistic assumes near front of queue; conservative assumes the full displayed touch
-          size is ahead. Not actual fill probability.
+          注文サイズごとの推定値です。順位には<strong>50ドル</strong>・30秒・保守的条件を使います。楽観値は注文が列の先頭に近い場合、保守値は表示中の最良気配数量がすべて先行する場合を想定します。実際の約定確率ではありません。
         </p>
         <div className="table-scroll" style={{ marginTop: "1rem" }}>
           <table className="market-table" style={{ minWidth: 520 }}>
             <thead>
               <tr>
-                <th className="text-left">Size</th>
-                <th>5s cons.</th>
-                <th>5s opt.</th>
-                <th>30s cons.</th>
-                <th>30s opt.</th>
+                <th className="text-left">注文サイズ</th>
+                <th>5秒・保守</th>
+                <th>5秒・楽観</th>
+                <th>30秒・保守</th>
+                <th>30秒・楽観</th>
               </tr>
             </thead>
             <tbody>
@@ -246,7 +242,7 @@ export default async function MarketDetailPage({
                 <tr key={size}>
                   <td className="text-left tabular">
                     ${size}
-                    {size === "50" ? " (ranking)" : ""}
+                    {size === "50" ? "（順位基準）" : ""}
                   </td>
                   <td className="tabular">
                     {sizeCell(bySize, size, "5s", "conservative", fillQ)}
@@ -267,50 +263,48 @@ export default async function MarketDetailPage({
         </div>
         {!bySize && (
           <p className="muted" style={{ marginTop: "0.75rem" }}>
-            Size ladder unavailable in this analysis snapshot. Top-level $50 fields still show
-            above when present.
+            この分析データにはサイズ別の値がありません。取得できている場合、50ドルの値は上部に表示されます。
           </p>
         )}
       </section>
 
       <section className="detail-section" aria-labelledby="paper-mm-heading">
-        <h2 id="paper-mm-heading">Paper Market Maker</h2>
+        <h2 id="paper-mm-heading">マーケットメイク仮想シミュレーション</h2>
         <p className="section-lead">
-          Historical simulation using sampled public order-book and trade data. No real orders are
-          placed.
+          公開板・取引データを使った過去データ上のシミュレーションです。実際の注文は行いません。
         </p>
         <p className="section-lead muted">
           実注文ではなく、取得済みデータ上でBest Bid / Askに仮想注文を置いた場合のシミュレーションです。
-          5秒間隔の板サンプルを使用するため、実際のqueue positionや約定を完全には再現しません。
+          5秒間隔の板サンプルを使用するため、注文の順番待ちや実際の約定を完全には再現しません。
         </p>
         {m.paper_mm_status && m.paper_mm_status !== "ok" ? (
           <p className="muted">
-            Paper MM: {m.paper_mm_status === "not_simulated" ? "not simulated for this market" : m.paper_mm_status}
+            仮想シミュレーション: {m.paper_mm_status === "not_simulated" ? "この市場は未実施" : m.paper_mm_status}
           </p>
         ) : (
           <div className="metric-grid" style={{ marginTop: "1rem" }}>
             <MetricCard
-              label="Paper PnL"
+              label="仮想損益"
               value={fmtPaperUsd(m.paper_mm_total_pnl_usd, m.paper_mm_status, true)}
             />
             <MetricCard
-              label="PnL / hour"
+              label="仮想損益/時"
               value={fmtPaperUsd(m.paper_mm_pnl_per_hour_usd, m.paper_mm_status, true)}
             />
             <MetricCard
-              label="Round Trips"
+              label="往復約定数"
               value={fmtPaperCount(m.paper_mm_round_trips, m.paper_mm_status)}
             />
             <MetricCard
-              label="Filled Notional"
+              label="約定額"
               value={fmtPaperUsd(m.paper_mm_filled_notional_usd, m.paper_mm_status)}
             />
             <MetricCard
-              label="Max Inventory"
+              label="最大保有額"
               value={fmtPaperUsd(m.paper_mm_max_abs_inventory_usd, m.paper_mm_status)}
             />
             <MetricCard
-              label="Time With Inventory"
+              label="保有時間の割合"
               value={
                 m.paper_mm_status === "ok" && m.paper_mm_time_with_inventory_pct != null
                   ? `${fmt(m.paper_mm_time_with_inventory_pct, 1)}%`
@@ -318,7 +312,7 @@ export default async function MarketDetailPage({
               }
             />
             <MetricCard
-              label="Median Holding"
+              label="保有時間の中央値"
               value={
                 m.paper_mm_status === "ok" && m.paper_mm_median_holding_seconds != null
                   ? `${fmt(m.paper_mm_median_holding_seconds, 0)}s`
@@ -326,7 +320,7 @@ export default async function MarketDetailPage({
               }
             />
             <MetricCard
-              label="30s Paper Markout"
+              label="仮想約定後の価格変化（30秒）"
               value={fmtPaperBp(m.paper_mm_markout_30s_median_bps, m.paper_mm_status)}
             />
           </div>
@@ -334,25 +328,25 @@ export default async function MarketDetailPage({
       </section>
 
       <section className="detail-section" aria-labelledby="liquidity-heading">
-        <h2 id="liquidity-heading">Liquidity &amp; activity</h2>
+          <h2 id="liquidity-heading">流動性・取引状況</h2>
         <div className="metric-grid">
           <MetricCard
-            label="Depth ±10bp"
+            label="板の厚さ（±10bp）"
             value={formatDepth(m.median_two_sided_depth_10bps_usd)}
             title={TOOLTIPS.depth10bp}
           />
           <MetricCard
-            label="Trades/min"
+            label="取引回数/分"
             value={formatActivity(m.trades_per_minute_median)}
             title={TOOLTIPS.tradesPerMin}
           />
           <MetricCard
-            label="Total trades"
+            label="総取引回数"
             value={fmt(m.total_trade_count, 0)}
-            title="Market-level trade prints (not Estimated Maker Fill)"
+            title="市場全体の取引成立数です。約定シミュレーション値とは異なります。"
           />
           <MetricCard
-            label="Spread persistence"
+            label="5bp以上のスプレッド割合"
             value={
               m.pct_time_spread_ge_5bps != null
                 ? `${(m.pct_time_spread_ge_5bps * 100).toFixed(0)}% ≥5bp`
@@ -363,15 +357,15 @@ export default async function MarketDetailPage({
       </section>
 
       <section className="detail-section" aria-labelledby="adverse-heading">
-        <h2 id="adverse-heading">Adverse selection</h2>
+          <h2 id="adverse-heading">約定後の価格変化</h2>
         <div className="metric-grid">
           <MetricCard
-            label="Maker Markout 5s"
+            label="5秒後"
             value={<SignedValue value={m.maker_markout_5s_median_bps} />}
             title={TOOLTIPS.makerMarkout}
           />
           <MetricCard
-            label="Maker Markout 30s"
+            label="30秒後"
             value={<SignedValue value={m.maker_markout_30s_median_bps} />}
             title={TOOLTIPS.makerMarkout}
           />
@@ -379,27 +373,27 @@ export default async function MarketDetailPage({
       </section>
 
       <section className="detail-section" aria-labelledby="quality-heading">
-        <h2 id="quality-heading">Data quality</h2>
+        <h2 id="quality-heading">データ品質</h2>
         <div className="metric-grid">
           <MetricCard
-            label="Coverage"
+            label="データ網羅率"
             value={
               m.data_coverage_pct != null ? `${fmt(m.data_coverage_pct, 1)}%` : "—"
             }
             title={TOOLTIPS.coverage}
           />
           <MetricCard
-            label="Fill sample quality"
+            label="約定推定のサンプル品質"
             value={<QualityChip quality={fillQ} />}
             title={TOOLTIPS.sampleQuality}
           />
           <MetricCard
-            label="Markout sample quality"
+            label="価格変化のサンプル品質"
             value={<QualityChip quality={m.markout_sample_quality} />}
             title={TOOLTIPS.sampleQuality}
           />
           <MetricCard
-            label="Observation window"
+            label="観測時間"
             value={
               m.analysis_window_hours != null
                 ? `${fmt(m.analysis_window_hours, 1)}h`
@@ -410,35 +404,35 @@ export default async function MarketDetailPage({
       </section>
 
       <section className="detail-section" aria-labelledby="assessment-heading">
-        <h2 id="assessment-heading">Assessment</h2>
+        <h2 id="assessment-heading">分析メモ</h2>
         <div className="assessment-grid">
           <div className="assessment-panel assessment-strengths">
-            <h3>Strengths</h3>
+            <h3>強み</h3>
             <ul>
               {(m.pros || []).length ? (
-                (m.pros || []).map((p) => <li key={p}>{p}</li>)
+                (m.pros || []).map((p) => <li key={p}>{publicAssessmentCopy(p)}</li>)
               ) : (
-                <li>none</li>
+                <li>特になし</li>
               )}
             </ul>
           </div>
           <div className="assessment-panel assessment-risks">
-            <h3>Risks</h3>
+            <h3>リスク</h3>
             <ul>
               {(m.cons || []).length ? (
-                (m.cons || []).map((p) => <li key={p}>{p}</li>)
+                (m.cons || []).map((p) => <li key={p}>{publicAssessmentCopy(p)}</li>)
               ) : (
-                <li>none</li>
+                <li>特になし</li>
               )}
             </ul>
           </div>
           <div className="assessment-panel assessment-notes">
-            <h3>Data notes</h3>
+            <h3>データに関する注意</h3>
             <ul>
               {(m.warnings || []).length ? (
-                (m.warnings || []).map((p) => <li key={p}>{p}</li>)
+                (m.warnings || []).map((p) => <li key={p}>{publicAssessmentCopy(p)}</li>)
               ) : (
-                <li>none</li>
+                <li>特になし</li>
               )}
             </ul>
           </div>
