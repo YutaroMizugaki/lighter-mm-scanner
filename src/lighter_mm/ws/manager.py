@@ -63,6 +63,10 @@ class WsRuntimeStats:
     planned_channels: int = 0
     acked_channels: int = 0
     subscribed_channels: int = 0  # compat alias for acked_channels
+    sent_channels: int | None = None
+    required_channels: int | None = None
+    confirmed_required_channels: int | None = None
+    pending_trade_channels: int | None = None
     seen_trade_ids: int = 0
     subscription_errors: int = 0
     trade_parse_errors: int = 0
@@ -76,6 +80,10 @@ class WsRuntimeStats:
             "planned_channels": self.planned_channels,
             "acked_channels": self.acked_channels,
             "subscribed_channels": self.acked_channels,
+            "sent_channels": self.sent_channels,
+            "required_channels": self.required_channels,
+            "confirmed_required_channels": self.confirmed_required_channels,
+            "pending_trade_channels": self.pending_trade_channels,
             "dropped_connections": self.dropped_connections,
             "subscription_errors": self.subscription_errors,
             "trade_parse_errors": self.trade_parse_errors,
@@ -88,9 +96,15 @@ class WsRuntimeStats:
     def ws_healthy(self) -> bool:
         if self.total_shards <= 0:
             return False
+        confirmations_complete = self.acked_channels == self.planned_channels
+        if self.required_channels is not None and self.confirmed_required_channels is not None:
+            confirmations_complete = (
+                self.sent_channels == self.planned_channels
+                and self.confirmed_required_channels == self.required_channels
+            )
         return (
             self.connected_shards == self.total_shards
-            and self.acked_channels == self.planned_channels
+            and confirmations_complete
             and self.planned_channels > 0
         )
 
@@ -115,6 +129,8 @@ class WsManager:
         self._tasks: list[asyncio.Task] = []
         self._shard_conns: dict[int, ClientConnection | None] = {}
         self._shard_acked: dict[int, set[str]] = {}
+        self._shard_planned: dict[int, set[str]] = {}
+        self._shard_sent: dict[int, set[str]] = {}
         for mid, meta in self.markets.items():
             self.books.setdefault(mid, LocalOrderBook(market_id=mid, symbol=meta.symbol))
 
@@ -147,6 +163,9 @@ class WsManager:
         self.runtime.acked_channels = 0
         self.runtime.subscribed_channels = 0
         self._shard_acked = {s.shard_id: set() for s in shards}
+        self._shard_planned = {s.shard_id: set(s.channels()) for s in shards}
+        self._shard_sent = {s.shard_id: set() for s in shards}
+        self._sync_acked_channels()
         for shard in shards:
             n_chans = len(shard.channels())
             if n_chans > self.settings.max_subscriptions_per_connection:
@@ -216,11 +235,35 @@ class WsManager:
     def _sync_acked_channels(self) -> None:
         self.runtime.acked_channels = sum(len(s) for s in self._shard_acked.values())
         self.runtime.subscribed_channels = self.runtime.acked_channels
+        if self._shard_planned:
+            required = confirmed = pending_trades = 0
+            for sid, channels in self._shard_planned.items():
+                acked = self._shard_acked.get(sid, set())
+                required_set = {ch for ch in channels if not ch.startswith("trade/")}
+                required += len(required_set)
+                confirmed += len(required_set & acked)
+                pending_trades += sum(ch.startswith("trade/") and ch not in acked for ch in channels)
+            self.runtime.sent_channels = sum(len(s) for s in self._shard_sent.values())
+            self.runtime.required_channels = required
+            self.runtime.confirmed_required_channels = confirmed
+            self.runtime.pending_trade_channels = pending_trades
+
+    def _record_subscription_sent(self, shard_id: int, channel: str) -> None:
+        self._shard_sent.setdefault(shard_id, set()).add(channel)
+        self._sync_acked_channels()
 
     def _record_subscription_ack(self, shard_id: int, channel: str) -> None:
         if not channel:
             return
-        self._shard_acked.setdefault(shard_id, set()).add(channel)
+        # Requests use order_book/1; replies use order_book:1.
+        channel = channel.replace(":", "/", 1)
+        planned = self._shard_planned.get(shard_id)
+        if planned is not None and channel not in planned:
+            return
+        acked = self._shard_acked.setdefault(shard_id, set())
+        if channel in acked:
+            return
+        acked.add(channel)
         self._sync_acked_channels()
 
     async def _send(self, ws: ClientConnection, payload: dict) -> None:
@@ -250,6 +293,7 @@ class WsManager:
                 ) as ws:
                     self._shard_conns[shard.shard_id] = ws
                     self._shard_acked[shard.shard_id] = set()
+                    self._shard_sent[shard.shard_id] = set()
                     self._sync_acked_channels()
                     self.runtime.connected_shards = sum(
                         1 for c in self._shard_conns.values() if c is not None
@@ -259,7 +303,7 @@ class WsManager:
                     # Sending all subs before reading causes receive-buffer
                     # backlog (huge order_book snapshots) and server disconnects.
                     sub_task = asyncio.create_task(
-                        self._subscribe_shard(ws, shard), name=f"sub-{shard.shard_id}"
+                        self._subscribe_and_recover(ws, shard), name=f"sub-{shard.shard_id}"
                     )
                     resync_task = asyncio.create_task(
                         self._resync_loop(ws, shard), name=f"resync-{shard.shard_id}"
@@ -281,6 +325,7 @@ class WsManager:
                         await asyncio.gather(sub_task, resync_task, return_exceptions=True)
                         self._shard_conns[shard.shard_id] = None
                         self._shard_acked[shard.shard_id] = set()
+                        self._shard_sent[shard.shard_id] = set()
                         self._sync_acked_channels()
                         self.runtime.connected_shards = sum(
                             1 for c in self._shard_conns.values() if c is not None
@@ -306,10 +351,60 @@ class WsManager:
             if self._stop.is_set():
                 return
             await self._send(ws, {"type": "subscribe", "channel": channel})
+            self._record_subscription_sent(shard.shard_id, channel)
             if i % 10 == 0:
                 await asyncio.sleep(0.05)
             else:
                 await asyncio.sleep(0)
+
+    async def _subscribe_and_recover(self, ws: ClientConnection, shard: ShardPlan) -> None:
+        """Retry missing subscriptions while the shard reader continues draining data."""
+        try:
+            await self._subscribe_shard(ws, shard)
+            await self._recover_missing_subscriptions(ws, shard)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — fail this connection, not healthy shards
+            log.warning("WS subscription recovery failed (shard=%s): %s", shard.shard_id, exc)
+            # A failed background subscriber must wake the read loop and enter
+            # the existing reconnect path instead of silently leaving partial data.
+            await ws.close(code=1011, reason="subscription recovery failed")
+
+    async def _recover_missing_subscriptions(
+        self, ws: ClientConnection, shard: ShardPlan, *, initial_delay: float = 30.0
+    ) -> None:
+        delay = initial_delay
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=delay)
+                return
+            except TimeoutError:
+                pass
+            missing = [
+                channel for channel in shard.channels()
+                if not channel.startswith("trade/")
+                and channel not in self._shard_acked.get(shard.shard_id, set())
+            ]
+            if not missing:
+                return
+            log.warning("WS subscription ACK incomplete (shard=%s): retrying %s channels", shard.shard_id, len(missing))
+            for channel in missing:
+                if self._stop.is_set():
+                    return
+                # An ACK may arrive while another channel waits on the shared
+                # message limiter. Preserve subscriptions that have recovered.
+                if channel in self._shard_acked.get(shard.shard_id, set()):
+                    continue
+                if channel.startswith("order_book/"):
+                    book = self.books.get(int(channel.split("/")[1]))
+                    if book is not None:
+                        book.mark_resync()
+                        self.runtime.book_resyncs += 1
+                await self._send(ws, {"type": "unsubscribe", "channel": channel})
+                await self._send(ws, {"type": "subscribe", "channel": channel})
+                self._record_subscription_sent(shard.shard_id, channel)
+            # Bound sustained retries and share the existing global send limit.
+            delay = min(max(delay * 2, 1.0), 300.0)
 
     async def _resync_loop(self, ws: ClientConnection, shard: ShardPlan) -> None:
         q = self._resync_queues.setdefault(shard.shard_id, asyncio.Queue())
@@ -346,9 +441,14 @@ class WsManager:
         if mtype == "connected":
             return
 
-        if isinstance(mtype, str) and mtype.startswith("subscribed/"):
+        if isinstance(mtype, str) and mtype.startswith(("subscribed/", "update/")):
             channel = str(msg.get("channel") or "")
-            self._record_subscription_ack(shard.shard_id, channel)
+            # A valid update proves delivery even if the initial ACK was lost.
+            planned = self._shard_planned.get(shard.shard_id)
+            if planned is None:
+                planned = set(shard.channels())
+            if channel.replace(":", "/", 1) in planned:
+                self._record_subscription_ack(shard.shard_id, channel)
 
         # Explicit Lighter error / failed replies only — unknown types are ignored
         # (schema evolves; do not treat every unfamiliar message as an error).

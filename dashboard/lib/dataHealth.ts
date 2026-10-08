@@ -64,13 +64,18 @@ export function collectionHealth(
   if (reportFresh && ws && ws.total_shards != null && ws.total_shards > 0 && ws.connected_shards != null) {
     const planned = ws.planned_channels ?? ws.subscribed_channels;
     const acked = ws.acked_channels ?? ws.subscribed_channels;
-    const incomplete = planned != null && acked != null && acked < planned;
+    const hasBreakdown = ws.required_channels != null && ws.confirmed_required_channels != null && ws.sent_channels != null;
+    const incomplete = hasBreakdown
+      ? (planned != null && ws.sent_channels! < planned) || ws.confirmed_required_channels! < ws.required_channels!
+      : planned != null && acked != null && acked < planned;
     connection.level = ws.connected_shards === 0 ? "error" : ws.connected_shards < ws.total_shards || incomplete || planned === 0 ? "warning" : planned == null || acked == null ? "unknown" : "ok";
-    connection.detail = `${ws.connected_shards}/${ws.total_shards}接続${planned != null && acked != null ? ` · ${acked}/${planned}チャンネル購読済み` : " · 購読状況は不明"}`;
+    connection.detail = `${ws.connected_shards}/${ws.total_shards}接続${hasBreakdown
+      ? ` · 板・統計 ${ws.confirmed_required_channels}/${ws.required_channels}確認済み${ws.pending_trade_channels ? ` · 約定 ${ws.pending_trade_channels}チャンネルは受信待ち` : ""}`
+      : planned != null && acked != null ? ` · ${acked}/${planned}チャンネル受信確認済み` : " · 購読状況は不明"}`;
     connection.timestamp = reportedAt;
   }
   if (connection.level === "error" || connection.level === "warning") {
-    issues.push("接続または購読が不足しています。自動再接続で回復しない場合は、配信元と購読設定を管理者が確認してください。");
+    issues.push("接続または購読の確認が不足しています。自動再接続で回復しない場合は、配信元と購読設定を管理者が確認してください。");
   }
   const warnings = collector.health_warnings ?? [];
   if (warnings.some((w) => /usable book samples stale|book rows are stale|no usable book samples/i.test(w))) {

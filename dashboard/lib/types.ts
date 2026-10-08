@@ -97,6 +97,10 @@ export type Overview = {
     planned_channels?: number;
     acked_channels?: number;
     subscribed_channels?: number;
+    sent_channels?: number | null;
+    required_channels?: number | null;
+    confirmed_required_channels?: number | null;
+    pending_trade_channels?: number | null;
     dropped_connections?: number;
     subscription_errors?: number;
     trade_parse_errors?: number;

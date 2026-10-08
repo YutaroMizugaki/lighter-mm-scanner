@@ -71,3 +71,12 @@ test("freshness thresholds retain their boundary behavior", () => {
     assert.equal(collectionHealth({ ...fresh(), last_durable_event_at: ago(minutes) }, now).checks[1].level, level);
   }
 });
+test("quiet trades are waiting for data, not failed book subscriptions", () => {
+  const ws = { ...fresh().ws, acked_channels: 417, planned_channels: 429, sent_channels: 429, required_channels: 217, confirmed_required_channels: 217, pending_trade_channels: 12 };
+  const h = collectionHealth({ ...fresh(), ws }, now);
+  assert.equal(h.checks[2].level, "ok");
+  assert.ok(h.checks[2].detail.includes("受信待ち"));
+  assert.deepEqual(h.issues, []);
+  assert.equal(collectionHealth({ ...fresh(), ws: { ...ws, confirmed_required_channels: 216 } }, now).checks[2].level, "warning");
+  assert.equal(collectionHealth({ ...fresh(), ws: { ...ws, sent_channels: 428 } }, now).checks[2].level, "warning");
+});

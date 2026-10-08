@@ -180,12 +180,22 @@ def _ws_degraded(ws_runtime: dict[str, object] | None) -> list[str]:
     total = int(ws_runtime.get("total_shards") or 0)
     planned = int(ws_runtime.get("planned_channels") or ws_runtime.get("subscribed_channels") or 0)
     acked = int(ws_runtime.get("acked_channels") or ws_runtime.get("subscribed_channels") or 0)
+    # Trade streams deliver updates on activity and need not send an initial ACK.
+    # Require confirmation for book/stats channels and successful sends for all.
+    required = ws_runtime.get("required_channels")
+    confirmed = ws_runtime.get("confirmed_required_channels")
+    sent = ws_runtime.get("sent_channels")
     if total == 0:
         warnings.append("No WebSocket shards planned.")
     elif connected < total:
         warnings.append(f"WebSocket degraded: {connected}/{total} shards connected.")
     if planned == 0:
         warnings.append("No WebSocket subscriptions planned.")
+    elif required is not None and confirmed is not None and sent is not None:
+        if int(sent) < planned:
+            warnings.append(f"Subscription send incomplete: {sent}/{planned} channels sent.")
+        if int(confirmed) < int(required):
+            warnings.append(f"Subscription ACK incomplete: {confirmed}/{required} book/stats channels confirmed.")
     elif acked < planned:
         warnings.append(f"Subscription ACK incomplete: {acked}/{planned} channels acked.")
     return warnings
