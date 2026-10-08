@@ -36,7 +36,7 @@ export default async function CandidatesPage() {
           </p>
         </>
       ) : (
-        <div className="table-scroll">
+        <div className="table-scroll" tabIndex={0} aria-label="候補市場一覧。横にスクロールできます">
           <table className="market-table candidate-table">
             <thead>
               <tr>

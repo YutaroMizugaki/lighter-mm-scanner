@@ -333,6 +333,35 @@ export function publicAssessmentCopy(raw: string): string {
   return sanitizePublicText(raw, "分析情報を表示できません。");
 }
 
+export function publicConfidenceBreakdownLabel(key: string): string {
+  const labels: Record<string, string> = {
+    markout: "約定後の価格変動（総合）",
+    markout_5s: "約定後の価格変動（5秒）",
+    markout_30s: "約定後の価格変動（30秒）",
+    estimated_fill: "推定約定率",
+    trades: "取引観測",
+    coverage: "データ充足率",
+    duration: "観測時間",
+  };
+  return labels[key] ?? sanitizePublicText(key, "その他の項目");
+}
+
+export function publicConfidenceReason(reason: string): string {
+  const reasons: Record<string, string> = {
+    low_markout_samples: "約定後の価格変動データが少ない",
+    low_fill_samples: "推定約定率のサンプルが少ない",
+    low_trade_observations: "取引観測が少ない",
+    low_coverage: "データ充足率が低い",
+    short_observation_duration: "観測期間が短い",
+    missing_markout_samples: "約定後の価格変動データがありません",
+    missing_fill_samples: "推定約定率のデータがありません",
+    missing_trade_observations: "取引観測データがありません",
+    missing_coverage: "データ充足率を算出できません",
+    missing_observation_duration: "観測時間を確認できません",
+  };
+  return reasons[reason] ?? sanitizePublicText(reason, "信頼度の算出理由を表示できません。");
+}
+
 export const TOOLTIPS = {
   makerMarkout:
     "メイカー注文成立後の価格変動です。プラスはメイカーに有利です。",

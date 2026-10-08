@@ -26,7 +26,7 @@ export default function TopOpportunities({ candidates, fetchFailed = false }: Pr
         <p className="muted">現在、条件を満たす候補はありません。<Link href="/markets">市場一覧を見る →</Link></p>
       ) : (
         <>
-          <div className="table-scroll">
+          <div className="table-scroll" tabIndex={0} role="region" aria-label="注目候補の比較表（横にスクロールできます）">
             <table className="market-table top-opps-table">
               <thead>
                 <tr>

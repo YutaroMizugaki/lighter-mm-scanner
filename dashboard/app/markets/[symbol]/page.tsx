@@ -3,7 +3,6 @@ import MetricCard from "@/components/MetricCard";
 import PublicErrorState from "@/components/PublicErrorState";
 import QualityChip from "@/components/QualityChip";
 import RankBadge from "@/components/RankBadge";
-import ScoreBar from "@/components/ScoreBar";
 import SignedValue from "@/components/SignedValue";
 import { getMarket } from "@/lib/api";
 import { fmt, fmtEstimatedFill, fmtPaperBp, fmtPaperCount, fmtPaperUsd, fmtPctFraction } from "@/lib/format";
@@ -15,6 +14,8 @@ import {
   formatActivity,
   formatDepth,
   publicAssessmentCopy,
+  publicConfidenceBreakdownLabel,
+  publicConfidenceReason,
   publicDataUnavailableMessage,
   rankSubtext,
   TOOLTIPS,
@@ -90,17 +91,7 @@ export default async function MarketDetailPage({
         </div>
       </header>
 
-      <div className="metric-grid" style={{ marginBottom: "1rem" }}>
-        <MetricCard
-          label="スコア"
-          value={<ScoreBar score={m.score} />}
-          title={TOOLTIPS.score}
-        />
-        <MetricCard
-          label="データ信頼度"
-          value={fmtPctFraction(m.confidence, 0)}
-          title={TOOLTIPS.confidence}
-        />
+      <div className="metric-grid detail-primary-metrics" style={{ marginBottom: "1rem" }}>
         <MetricCard
           label="総合スコア"
           value={fmt(m.effective_score ?? m.score, 1)}
@@ -126,12 +117,7 @@ export default async function MarketDetailPage({
           }
         />
         <MetricCard
-          label="約定後の価格変化（5秒）"
-          value={<SignedValue value={m.maker_markout_5s_median_bps} />}
-          title={TOOLTIPS.makerMarkout}
-        />
-        <MetricCard
-          label="約定後の価格変化（30秒）"
+          label="30秒後の価格変化"
           value={<SignedValue value={m.maker_markout_30s_median_bps} />}
           title={TOOLTIPS.makerMarkout}
         />
@@ -140,58 +126,28 @@ export default async function MarketDetailPage({
           value={formatDepth(m.median_two_sided_depth_10bps_usd)}
           title={TOOLTIPS.depth10bp}
         />
+        <MetricCard
+          label="推定エッジ"
+          value={
+            <>
+              <SignedValue value={m.estimated_maker_edge_30s_bps} />
+              {feeLabel && <span className="edge-meta">{feeLabel}</span>}
+            </>
+          }
+          title={ESTIMATED_EDGE_TOOLTIP}
+        />
       </div>
 
-      <section className="detail-section" aria-labelledby="opportunity-heading">
-        <h2 id="opportunity-heading">市場の指標</h2>
-        <div className="metric-grid">
-          <MetricCard label="スコア" value={fmt(m.score, 1)} title={TOOLTIPS.score} />
-          <MetricCard
-            label="評価"
-            value={<RankBadge letter={m.letter_rank} showLabel />}
-          />
-          <MetricCard
-            label="スプレッド"
-            value={
-              <>
-                {fmt(m.median_spread_bps)}
-                <span className="unit"> bp</span>
-              </>
-            }
-          />
-          <MetricCard
-            label="約定シミュレーション"
-            value={
-              <EstimatedFillValue
-                rate={m.estimated_maker_fill_rate_30s_conservative}
-                quality={fillQ}
-                compact
-              />
-            }
-            title={ESTIMATED_FILL_TOOLTIP}
-          />
-          <MetricCard
-            label="推定エッジ"
-            value={
-              <>
-                <SignedValue value={m.estimated_maker_edge_30s_bps} />
-                {feeLabel && <span className="edge-meta">{feeLabel}</span>}
-              </>
-            }
-            title={ESTIMATED_EDGE_TOOLTIP}
-          />
-        </div>
-      </section>
-
       {m.confidence_breakdown && (
-        <section className="detail-section" aria-labelledby="confidence-heading">
-          <h2 id="confidence-heading">データ信頼度</h2>
+        <details className="detail-section detail-disclosure">
+          <summary><h2 id="confidence-heading">データ信頼度</h2></summary>
+          <div className="detail-disclosure-body">
           <p className="section-lead" title={TOOLTIPS.confidence}>
             サンプル数、データ網羅率、観測時間から算出した目安です。統計的な信頼区間ではありません。
           </p>
           {m.confidence_reasons && m.confidence_reasons.length > 0 && (
             <p className="muted">
-              算出理由: {m.confidence_reasons.join("、")}
+              算出理由: {m.confidence_reasons.map(publicConfidenceReason).join("、")}
             </p>
           )}
           <div className="table-scroll" style={{ marginTop: "0.75rem" }}>
@@ -205,7 +161,7 @@ export default async function MarketDetailPage({
               <tbody>
                 {Object.entries(m.confidence_breakdown).map(([key, val]) => (
                   <tr key={key}>
-                    <td>{key}</td>
+                    <td>{publicConfidenceBreakdownLabel(key)}</td>
                     <td className="tabular">
                       {val === null || val === undefined
                         ? "—"
@@ -216,13 +172,15 @@ export default async function MarketDetailPage({
               </tbody>
             </table>
           </div>
-        </section>
+          </div>
+        </details>
       )}
 
-      <section className="detail-section" aria-labelledby="execution-heading">
-        <h2 id="execution-heading" title={ESTIMATED_FILL_TOOLTIP}>
+      <details className="detail-section detail-disclosure">
+        <summary><h2 id="execution-heading" title={ESTIMATED_FILL_TOOLTIP}>
           約定シミュレーション
-        </h2>
+        </h2></summary>
+        <div className="detail-disclosure-body">
         <p className="section-lead">
           注文サイズごとの推定値です。順位には<strong>50ドル</strong>・30秒・保守的条件を使います。楽観値は注文が列の先頭に近い場合、保守値は表示中の最良気配数量がすべて先行する場合を想定します。実際の約定確率ではありません。
         </p>
@@ -266,10 +224,12 @@ export default async function MarketDetailPage({
             この分析データにはサイズ別の値がありません。取得できている場合、50ドルの値は上部に表示されます。
           </p>
         )}
-      </section>
+        </div>
+      </details>
 
-      <section className="detail-section" aria-labelledby="paper-mm-heading">
-        <h2 id="paper-mm-heading">マーケットメイク仮想シミュレーション</h2>
+      <details className="detail-section detail-disclosure">
+        <summary><h2 id="paper-mm-heading">マーケットメイク仮想シミュレーション</h2></summary>
+        <div className="detail-disclosure-body">
         <p className="section-lead">
           公開板・取引データを使った過去データ上のシミュレーションです。実際の注文は行いません。
         </p>
@@ -325,10 +285,12 @@ export default async function MarketDetailPage({
             />
           </div>
         )}
-      </section>
+        </div>
+      </details>
 
-      <section className="detail-section" aria-labelledby="liquidity-heading">
-          <h2 id="liquidity-heading">流動性・取引状況</h2>
+      <details className="detail-section detail-disclosure">
+        <summary><h2 id="liquidity-heading">流動性・取引状況</h2></summary>
+        <div className="detail-disclosure-body">
         <div className="metric-grid">
           <MetricCard
             label="板の厚さ（±10bp）"
@@ -354,10 +316,12 @@ export default async function MarketDetailPage({
             }
           />
         </div>
-      </section>
+        </div>
+      </details>
 
-      <section className="detail-section" aria-labelledby="adverse-heading">
-          <h2 id="adverse-heading">約定後の価格変化</h2>
+      <details className="detail-section detail-disclosure">
+        <summary><h2 id="adverse-heading">約定後の価格変化</h2></summary>
+        <div className="detail-disclosure-body">
         <div className="metric-grid">
           <MetricCard
             label="5秒後"
@@ -370,10 +334,12 @@ export default async function MarketDetailPage({
             title={TOOLTIPS.makerMarkout}
           />
         </div>
-      </section>
+        </div>
+      </details>
 
-      <section className="detail-section" aria-labelledby="quality-heading">
-        <h2 id="quality-heading">データ品質</h2>
+      <details className="detail-section detail-disclosure">
+        <summary><h2 id="quality-heading">データ品質</h2></summary>
+        <div className="detail-disclosure-body">
         <div className="metric-grid">
           <MetricCard
             label="データ網羅率"
@@ -401,7 +367,8 @@ export default async function MarketDetailPage({
             }
           />
         </div>
-      </section>
+        </div>
+      </details>
 
       <section className="detail-section" aria-labelledby="assessment-heading">
         <h2 id="assessment-heading">分析メモ</h2>

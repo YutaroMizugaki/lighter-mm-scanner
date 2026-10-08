@@ -113,7 +113,7 @@ export default function MarketsClient({ markets }: { markets: MarketRow[] }) {
       <p className="muted" style={{ marginTop: 0, maxWidth: 920 }} title={ESTIMATED_FILL_TOOLTIP}>
         約定シミュレーションは「指値50ドル・30秒・保守的条件」の推定値です。板の厚さや取引回数は市場の流動性・活発さを示し、約定確率ではありません。
       </p>
-      <div className="table-scroll" style={{ maxHeight: 640 }}>
+      <div className="table-scroll" style={{ maxHeight: 640 }} tabIndex={0} aria-label="市場一覧。横にスクロールできます">
         <table className={`market-table ${view === "basic" ? "basic-view" : "detail-view"}`}>
           <thead>
             <tr>
