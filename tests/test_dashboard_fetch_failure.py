@@ -39,10 +39,11 @@ def test_markets_page_surfaces_fetch_failure() -> None:
     assert "getMarkets()" not in src
 
 
-def test_home_page_detects_candidates_fetch_failure() -> None:
+def test_home_page_detects_markets_fetch_failure() -> None:
     src = HOME_PAGE.read_text(encoding="utf-8")
-    assert "getCandidatesResult" in src
-    assert "getMarketsResult" not in src
+    assert "getMarketsResult" in src
+    assert "getCandidatesResult" not in src
+    assert "const marketDataFetchFailed = !marketsResult.ok" in src
     assert "市場データを読み込めませんでした。" in src
 
 
@@ -51,7 +52,7 @@ def test_home_page_parallel_fetch() -> None:
     assert "Promise.all" in src
     assert "resolveDashboardBundle()" in src
     assert "getOverviewResult(bundle)" in src
-    assert "getCandidatesResult(bundle)" in src
+    assert "getMarketsResult(bundle)" in src
 
 
 def test_candidates_page_uses_candidates_json() -> None:

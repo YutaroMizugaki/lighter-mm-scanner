@@ -1,7 +1,7 @@
 .section { margin-bottom: 32px; }
 .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .controls > input, .controls select { min-height: 44px; padding: 10px 14px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface); color: var(--text); font: inherit; }
-.controls > input { flex: 1; min-width: 180px; }
+.controls > input { flex: 1; min-width: 180px; max-width: none; }
 .filter { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .filter input { width: 18px; height: 18px; accent-color: var(--accent); }
 .toggle button { min-height: 44px; }
