@@ -27,7 +27,7 @@ export default function DataFreshness({ status, lastAnalysisAt, className }: Pro
         ●
       </span>
       <span className="freshness-copy">
-        <strong className="freshness-label">{copy.label}</strong>
+        <strong className="freshness-label">{copy.level === "current" ? "集計を更新済み" : copy.label}</strong>
         <span className="freshness-detail">{copy.detail}</span>
         {jst !== "—" && <span className="freshness-jst muted">{jst}</span>}
       </span>

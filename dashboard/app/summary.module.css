@@ -1,8 +1,27 @@
-.heading { margin-bottom: 24px; }
-.titleRow { display: flex; align-items: baseline; flex-wrap: wrap; gap: 12px 20px; }
-.titleRow h1 { margin: 0; font-size: 26px; letter-spacing: -0.03em; }
-.counts { color: var(--text-muted); font-size: 14px; }
-.heading :global(.data-freshness) { margin: 8px 0 0; padding: 0; border: 0; background: transparent; }
-@media (max-width: 600px) {
-  .titleRow h1 { font-size: 24px; }
+.heading { display: flex; align-items: center; justify-content: space-between; gap: 32px; padding: 12px 0 30px; }
+.intro { min-width: 0; }
+.eyebrow { margin: 0 0 8px; font-size: 12px; font-weight: 600; color: var(--accent); letter-spacing: .08em; }
+.intro h1 { margin: 0; font-size: clamp(28px, 3vw, 36px); line-height: 1.35; letter-spacing: -.045em; font-weight: 650; }
+.description { margin: 10px 0 0; color: var(--text-muted); font-size: 13px; }
+.overview { flex-shrink: 0; }
+.counts { display: flex; gap: 28px; margin: 0; }
+.counts > div + div { border-left: 1px solid var(--border); padding-left: 28px; }
+.counts dt { font-size: 11px; color: var(--text-muted); }
+.counts dd { margin: 4px 0 0; font-size: 27px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.04em; line-height: 1.2; }
+.counts dd span { margin-left: 6px; font-size: 11px; color: var(--text-muted); font-weight: 400; letter-spacing: 0; }
+.overview :global(.data-freshness) { justify-content: flex-end; margin: 14px 0 0; padding: 0; border: 0; background: transparent; font-size: 11px; gap: 6px; }
+.overview :global(.freshness-copy) { flex: none; }
+.overview :global(.freshness-jst) { display: none; }
+@media (max-width: 800px) {
+  .heading { align-items: flex-start; flex-direction: column; gap: 24px; padding: 8px 0 24px; }
+  .overview { width: 100%; display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; }
+  .counts { gap: 20px; }
+  .counts > div + div { padding-left: 20px; }
+  .counts dd { font-size: 23px; }
+}
+@media (max-width: 520px) {
+  .overview { display: block; }
+  .counts { justify-content: space-between; gap: 12px; }
+  .counts > div + div { padding-left: 20px; }
+  .overview :global(.data-freshness) { justify-content: flex-start; margin-top: 16px; }
 }

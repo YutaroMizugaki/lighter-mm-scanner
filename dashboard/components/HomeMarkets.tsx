@@ -1,18 +1,32 @@
 "use client";
 
 import Link from "next/link";
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useMemo, useState, useSyncExternalStore } from "react";
 import type { MarketRow } from "@/lib/types";
 import { fmt, fmtEstimatedFill, fmtSampleQuality } from "@/lib/format";
 import { formatDepth, TOOLTIPS } from "@/lib/public";
 import { ESTIMATED_FILL_TOOLTIP, ESTIMATED_EDGE_TOOLTIP } from "@/lib/marketMetrics";
 import SignedValue from "./SignedValue";
+import Icon from "./Icon";
 import { coversRoundTripCost, DEFAULT_ROUND_TRIP_COST_BPS, homeOpportunityPriority, HOME_RANKING_TOOLTIP, ROUND_TRIP_COST_TOOLTIP } from "@/lib/homeRanking";
 import styles from "./HomeMarkets.module.css";
 
 const PAGE_SIZE = 20;
 const SORTS = { opportunity: "鞘・流動性のバランス順", score: "総合スコア順", spread: "スプレッド順", depth: "板の厚さ順", activity: "取引回数順", fill: "推定約定率順", markout: "約定30秒後の価格変化順" } as const;
 type Sort = keyof typeof SORTS;
+const defaultCost = String(DEFAULT_ROUND_TRIP_COST_BPS);
+function subscribeToCost(onChange: () => void) {
+  window.addEventListener("storage", onChange);
+  return () => window.removeEventListener("storage", onChange);
+}
+function readStoredCost(): string {
+  try {
+    const saved = localStorage.getItem("home-round-trip-cost-bps");
+    if (saved != null && saved.trim() !== "" && Number.isFinite(Number(saved)) && Number(saved) >= 0) return saved;
+  } catch { /* Storage is optional. */ }
+  return defaultCost;
+}
+function readServerCost() { return defaultCost; }
 function sortValue(m: MarketRow, sort: Sort): number {
   const values = { opportunity: homeOpportunityPriority(m), score: m.effective_score ?? m.score, spread: m.median_spread_bps, depth: m.median_two_sided_depth_10bps_usd, activity: m.trades_per_minute_median, fill: m.estimated_maker_fill_sample_quality === "insufficient" ? null : m.estimated_maker_fill_rate_30s_conservative, markout: m.maker_markout_30s_median_bps };
   return values[sort] ?? -Infinity;
@@ -32,7 +46,7 @@ function MarketDetails({ market: m }: { market: MarketRow }) {
     { label: "データ品質", value: fmtSampleQuality(m.estimated_maker_fill_sample_quality ?? m.markout_sample_quality), title: TOOLTIPS.sampleQuality },
   ];
   return <div className={styles.details}>
-    <div className={styles.detailsHeading}><strong>{m.symbol}</strong><span className="muted">{m.analysis_stage === "selected_incomplete" ? "分析未完了" : m.analysis_stage === "screened" ? "簡易分析" : "詳細分析"}</span>{!isScreened(m) && <Link href={`/markets/${encodeURIComponent(m.symbol)}`}>詳細ページ →</Link>}</div>
+    <div className={styles.detailsHeading}><strong>{m.symbol}</strong><span className="muted">{m.analysis_stage === "selected_incomplete" ? "分析未完了" : m.analysis_stage === "screened" ? "簡易分析" : "詳細分析"}</span>{!isScreened(m) && <Link href={`/markets/${encodeURIComponent(m.symbol)}`}>詳細ページ<Icon name="arrow" /></Link>}</div>
     <dl className={styles.metrics}>{metrics.map((metric) => <div key={metric.label} title={metric.title}><dt>{metric.label}</dt><dd className="tabular">{metric.value}</dd></div>)}</dl>
   </div>;
 }
@@ -44,14 +58,10 @@ export default function HomeMarkets({ markets }: { markets: MarketRow[] }) {
   const [liquidity, setLiquidity] = useState(true);
   const [limit, setLimit] = useState(PAGE_SIZE);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [costInput, setCostInput] = useState(String(DEFAULT_ROUND_TRIP_COST_BPS));
+  const savedCost = useSyncExternalStore(subscribeToCost, readStoredCost, readServerCost);
+  const [editedCost, setCostInput] = useState<string | null>(null);
+  const costInput = editedCost ?? savedCost;
   const [costOnly, setCostOnly] = useState(true);
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem("home-round-trip-cost-bps");
-      if (saved != null && saved.trim() !== "" && Number.isFinite(Number(saved)) && Number(saved) >= 0) setCostInput(saved);
-    } catch { /* Storage is optional. */ }
-  }, []);
   const costBps = costInput.trim() === "" ? null : Number(costInput);
   const rows = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -62,8 +72,9 @@ export default function HomeMarkets({ markets }: { markets: MarketRow[] }) {
   }, [markets, query, sort, candidatesOnly, costOnly, costBps]);
   const visible = rows.slice(0, limit);
   return <section className={styles.section} aria-label="銘柄の比較">
+    <div className={styles.toolbar}>
     <div className={styles.controls}>
-      <input type="search" placeholder="銘柄を検索" aria-label="銘柄を検索" value={query} onChange={(e) => { setQuery(e.target.value); setLimit(PAGE_SIZE); setExpanded(null); }} />
+      <label className={styles.search}><Icon name="search" /><input type="search" placeholder="銘柄を検索" aria-label="銘柄を検索" value={query} onChange={(e) => { setQuery(e.target.value); setLimit(PAGE_SIZE); setExpanded(null); }} /></label>
       <select aria-label="並べ替え" title={sort === "opportunity" ? HOME_RANKING_TOOLTIP : undefined} value={sort} onChange={(e) => { const next = e.target.value as Sort; setSort(next); setLimit(PAGE_SIZE); setExpanded(null); if (next !== "score") setLiquidity(next !== "fill" && next !== "markout"); }}>{Object.entries(SORTS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
       <label className={styles.filter}><input type="checkbox" checked={candidatesOnly} onChange={(e) => { setCandidatesOnly(e.target.checked); setLimit(PAGE_SIZE); setExpanded(null); }} />候補のみ</label>
       <div className={styles.toggle} role="group" aria-label="比較する指標"><button type="button" aria-pressed={liquidity} onClick={() => { setLiquidity(true); setSort("opportunity"); }}>流動性</button><button type="button" aria-pressed={!liquidity} onClick={() => { setLiquidity(false); if (sort === "spread" || sort === "depth" || sort === "activity") setSort("opportunity"); }}>約定・価格変化</button></div>
@@ -73,7 +84,8 @@ export default function HomeMarkets({ markets }: { markets: MarketRow[] }) {
       <label className={styles.filter}><input type="checkbox" checked={costOnly} onChange={(e) => { setCostOnly(e.target.checked); setLimit(PAGE_SIZE); setExpanded(null); }} />コスト超のみ</label>
       <a href="https://apidocs.lighter.xyz/docs/account-types" target="_blank" rel="noreferrer" title={ROUND_TRIP_COST_TOOLTIP}>手数料 ↗</a>
     </div>
-    <div className={styles.resultCount}><span role="status">{visible.length} / {rows.length} 銘柄</span><span>＋で詳細</span></div>
+    </div>
+    <div className={styles.resultCount}><span role="status"><strong>{rows.length}</strong> 銘柄<span className={styles.showing}> · {visible.length}件を表示</span></span><span>行の矢印で詳細を表示</span></div>
     {rows.length === 0 ? <p className={styles.empty}>{markets.length === 0 ? "最新の分析に表示できる銘柄はありません。" : costOnly && (costBps == null || !Number.isFinite(costBps) || costBps < 0) ? "有効な往復コストを入力してください。" : "条件に一致する銘柄はありません。"}</p> : <table className={styles.table}>
       <caption className="sr-only">{liquidity ? "銘柄の流動性比較" : "銘柄の約定・価格変化の比較"}</caption>
       <thead><tr><th scope="col">銘柄</th>
@@ -83,7 +95,7 @@ export default function HomeMarkets({ markets }: { markets: MarketRow[] }) {
         const open = expanded === m.symbol, detailId = `market-detail-${m.market_id}`;
         return <Fragment key={m.symbol}>
           <tr className={`${styles.dataRow} ${index % 2 === 1 ? styles.alternate : ""} ${open ? styles.selected : ""}`}>
-            <th scope="row"><div className={styles.identity}><button className={styles.expand} type="button" aria-label={`${m.symbol}の詳細${open ? "を閉じる" : "を表示"}`} aria-expanded={open} aria-controls={open ? detailId : undefined} onClick={() => setExpanded(open ? null : m.symbol)}>{open ? "−" : "+"}</button><div className={styles.symbol}>{isScreened(m) ? <span title={m.symbol}>{m.symbol}</span> : <Link title={m.symbol} href={`/markets/${encodeURIComponent(m.symbol)}`}>{m.symbol}</Link>}{(m.is_candidate || isScreened(m)) && <small>{isScreened(m) ? (m.analysis_stage === "selected_incomplete" ? "分析未完了" : "簡易分析") : "候補"}</small>}</div></div></th>
+            <th scope="row"><div className={styles.identity}><button className={styles.expand} type="button" aria-label={`${m.symbol}の詳細${open ? "を閉じる" : "を表示"}`} aria-expanded={open} aria-controls={open ? detailId : undefined} onClick={() => setExpanded(open ? null : m.symbol)}><Icon name="chevron" /></button><div className={styles.symbol}>{isScreened(m) ? <span title={m.symbol}>{m.symbol}</span> : <Link title={m.symbol} href={`/markets/${encodeURIComponent(m.symbol)}`}>{m.symbol}</Link>}{(m.is_candidate || isScreened(m)) && <small>{isScreened(m) ? (m.analysis_stage === "selected_incomplete" ? "分析未完了" : "簡易分析") : "候補"}</small>}</div></div></th>
             {liquidity ? <><td className={styles.primaryMetric}>{fmt(m.trades_per_minute_median, 1)}</td><td className={styles.primaryMetric}>{formatDepth(m.median_two_sided_depth_10bps_usd)}</td><td>{fmt(m.median_spread_bps)}</td><td className={styles.desktopOnly}>{fillValue(m)}</td><td className={`${styles.desktopOnly} ${styles.secondaryMetric}`}>{fmt(m.effective_score ?? m.score, 1)}</td></> : <><td className={styles.score}>{fmt(m.effective_score ?? m.score, 1)}</td><td>{fillValue(m)}</td><td><SignedValue value={m.maker_markout_30s_median_bps} /></td><td className={styles.desktopOnly}><SignedValue value={m.maker_markout_5s_median_bps} /></td><td className={styles.desktopOnly}><SignedValue value={m.estimated_maker_edge_30s_bps} />{m.estimated_maker_edge_fee_included === false && <small className={styles.feeNote}>手数料別</small>}</td></>}
           </tr>
           {open && <tr className={styles.detailRow}><td colSpan={6} id={detailId}><MarketDetails market={m} /></td></tr>}
