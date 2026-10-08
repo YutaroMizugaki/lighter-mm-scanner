@@ -35,8 +35,8 @@
 @media (max-width: 600px) {
   .grid { grid-template-columns: minmax(0, 1fr); gap: 12px; }
   .controls { gap: 10px; }
-  .controls > input { flex-basis: 100%; }
-  .controls select { flex: 1; min-width: 0; }
+  .controls > input { flex: 0 0 100%; min-width: 0; }
+  .controls select { flex: 1 1 180px; min-width: 180px; }
   .toggle { margin-left: auto; }
   .card { padding: 20px; }
   .card h2 { font-size: 24px; }
