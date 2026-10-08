@@ -13,6 +13,9 @@ function wsIsDegraded(ws: CollectorStatus["ws"]): boolean {
   const planned = ws.planned_channels ?? ws.subscribed_channels ?? 0;
   const acked = ws.acked_channels ?? ws.subscribed_channels ?? 0;
   if (total > 0 && connected < total) return true;
+  if (ws.required_channels != null && ws.confirmed_required_channels != null && ws.sent_channels != null) {
+    return ws.sent_channels < planned || ws.confirmed_required_channels < ws.required_channels;
+  }
   if (planned > 0 && acked < planned) return true;
   return false;
 }

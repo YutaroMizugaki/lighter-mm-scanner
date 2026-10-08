@@ -23,12 +23,13 @@ export default function Diagnostics({
   collectorData,
   marketDataFetchFailed = false,
 }: Props) {
-  const ws = overview.ws ?? collectorData?.ws ?? null;
+  // The overview belongs to a past analysis generation; prefer live collector facts.
+  const ws = collectorData?.ws ?? null;
   const corruptSkipped = analysisData?.corrupt_parquet_files ?? 0;
   const channelCount = ws?.subscribed_channels ?? ws?.acked_channels ?? null;
-  const subErrors = ws?.subscription_errors ?? 0;
-  const tradeParseErrors = ws?.trade_parse_errors ?? 0;
-  const syncFailures = collectorData?.consecutive_sync_failures ?? 0;
+  const subErrors = ws?.subscription_errors ?? "不明";
+  const tradeParseErrors = ws?.trade_parse_errors ?? "不明";
+  const syncFailures = collectorData?.consecutive_sync_failures ?? "不明";
 
   return (
     <section className="diagnostics panel">
@@ -55,8 +56,20 @@ export default function Diagnostics({
               <dd>{fmtJst(collectorSyncAt)}</dd>
             </div>
             <div>
+              <dt>保存済み市場データの最終時刻</dt>
+              <dd>{fmtJst(collectorData?.last_durable_event_at)}</dd>
+            </div>
+            <div>
+              <dt>収集状況の報告時刻</dt>
+              <dd>{fmtJst(collectorData?.generated_at)}</dd>
+            </div>
+            <div>
               <dt>最終分析</dt>
               <dd>{fmtJst(lastAnalysisAt)}</dd>
+            </div>
+            <div>
+              <dt>収集側 Git SHA</dt>
+              <dd className="tabular">{collectorData?.git_sha || "不明"}</dd>
             </div>
             <div>
               <dt>Git SHA</dt>
@@ -83,8 +96,8 @@ export default function Diagnostics({
             <div>
               <dt>エラー</dt>
               <dd className="tabular">
-                購読 {subErrors}件 · 約定データ解析 {tradeParseErrors}件 · 同期失敗{" "}
-                {syncFailures}件
+                購読 {ws ? subErrors : "不明"}件 · 約定データ解析 {ws ? tradeParseErrors : "不明"}件 · 同期失敗{" "}
+                {collectorData ? syncFailures : "不明"}件
                 {marketDataFetchFailed ? " · 市場集計データの取得に失敗" : ""}
               </dd>
             </div>
