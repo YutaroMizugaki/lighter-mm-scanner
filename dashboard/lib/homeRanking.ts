@@ -5,11 +5,11 @@ import type { MarketRow } from "./types";
 const ACTIVE_TRADES_PER_MINUTE = 5;
 const SUFFICIENT_DEPTH_USD = 1_000;
 
-// Premium, no staking discount: 0.4bp maker entry + 0.4bp maker exit.
-// This is an editable scenario, not the user's account-specific fee.
-export const DEFAULT_ROUND_TRIP_COST_BPS = 0.8;
+// Editable cost scenario aligned with the candidate minimum spread (1.0bp).
+// This is not the user's account-specific fee.
+export const DEFAULT_ROUND_TRIP_COST_BPS = 1.0;
 export const ROUND_TRIP_COST_TOOLTIP =
-  "往復手数料と想定スリッページなどの合計を入力します。初期値はPremium・割引なしの往復Maker手数料（0.4 + 0.4 = 0.8bp）。Maker→Takerは3.2bp、Standardの通常注文は手数料0bpです。口座・退出方法に合わせて調整してください。1bp = 0.01%。";
+  "往復手数料と想定スリッページなどの合計を入力します。初期値は1.0bpです。手数料の参考値：Premium・割引なしのMaker→Makerは0.8bp、Maker→Takerは3.2bp、Standardの通常注文は0bpです。口座・退出方法に合わせて調整してください。1bp = 0.01%。";
 
 export function coversRoundTripCost(m: MarketRow, costBps: number | null): boolean {
   const spread = m.median_spread_bps;
