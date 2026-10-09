@@ -16,7 +16,7 @@ from lighter_mm.cloud.health import (
     latest_data_timestamp_iso,
 )
 from lighter_mm.config import Settings
-from lighter_mm.scoring import ScoredMarket
+from lighter_mm.scoring import ScoredMarket, _coverage_value
 from lighter_mm.storage.state import RunState
 
 # Backward-compatible re-exports.
@@ -59,6 +59,7 @@ def build_dashboard_payload(
     result = analysis_result
     scored: list[ScoredMarket] = result.get("scored") or []
     screened_rows: list[dict[str, Any]] = result.get("screened") or []
+    incomplete_rows: list[dict[str, Any]] = result.get("incomplete") or []
     candidates = [s for s in scored if s.candidate]
     avoid = result.get("avoid") or []
     analysis_error = result.get("error")
@@ -84,9 +85,7 @@ def build_dashboard_payload(
         )
 
     coverage_vals = [
-        s.row.get("observation_coverage_pct") or s.row.get("data_coverage_pct")
-        for s in scored
-        if (s.row.get("observation_coverage_pct") or s.row.get("data_coverage_pct")) is not None
+        v for v in (_coverage_value(s.row) for s in scored) if v is not None
     ]
     coverage = sum(coverage_vals) / len(coverage_vals) if coverage_vals else None
 
@@ -188,7 +187,7 @@ def build_dashboard_payload(
         "analysis_scope": "rolling",
         "analysis_window_hours": ranked_window_hours,
         "observation_target_hours": state.observation_target_hours if state else window_hours,
-        "markets": len(scored) + len(screened_rows),
+        "markets": len(scored) + len(screened_rows) + len(incomplete_rows),
         "markets_analyzed": len(scored),
         "markets_discovered": markets_discovered,
         "candidates": len(candidates),
@@ -238,6 +237,8 @@ def build_dashboard_payload(
     for s in scored:
         markets.append(_market_row(s))
     for row in screened_rows:
+        markets.append(row)
+    for row in incomplete_rows:
         markets.append(row)
 
     market_details = {str(s.row.get("symbol")): _market_detail(s) for s in scored}

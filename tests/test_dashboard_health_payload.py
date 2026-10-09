@@ -232,3 +232,21 @@ def test_payload_includes_flush_and_ws(tmp_path) -> None:
     assert latest["last_update"] != state.last_successful_flush
     assert latest["last_successful_sync"] == state.last_successful_flush
     assert latest["ws"] == ws
+
+
+def test_overview_coverage_keeps_zero_observation(tmp_path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", reports_dir=tmp_path / "reports")
+    zero = _minimal_scored_market("ZERO", 1, 50.0, 40.0)
+    zero.row["observation_coverage_pct"] = 0.0
+    zero.row["data_coverage_pct"] = 99.0
+    high = _minimal_scored_market("HIGH", 2, 80.0, 75.0)
+    high.row["observation_coverage_pct"] = 100.0
+    high.row["data_coverage_pct"] = 100.0
+    payload = build_dashboard_payload(
+        settings,
+        hours=1,
+        analysis_result={"scored": [zero, high], "avoid": [], "parquet_health": {"status": "ok"}},
+    )
+    assert payload["latest"]["coverage_pct"] == 50.0
+    warnings = payload["latest"]["health_warnings"]
+    assert any("Low data coverage" in w for w in warnings)

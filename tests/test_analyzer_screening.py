@@ -17,6 +17,7 @@ from lighter_mm.analytics.screening import (
     run_stage1,
     select_stage2_markets,
 )
+from lighter_mm.cloud.dashboard_data import build_dashboard_payload
 from lighter_mm.config import Settings
 
 
@@ -570,3 +571,36 @@ def test_selected_but_unscored_is_not_labeled_screened() -> None:
     assert by_id[2]["analysis_stage"] == "screened"
     assert by_id[2]["maker_markout_5s_median_bps"] is None
     assert result["two_stage"]["markets_selected_incomplete"] == 1
+    assert len(result["incomplete"]) == 1
+    assert result["incomplete"][0]["analysis_stage"] == "selected_incomplete"
+    assert result["incomplete"][0]["maker_markout_5s_median_bps"] == 1.25
+
+
+def test_dashboard_payload_includes_selected_incomplete(tmp_path: Path) -> None:
+    settings = Settings(data_dir=tmp_path / "data", reports_dir=tmp_path / "reports")
+    stage1 = [
+        Stage1Market(
+            market_id=1,
+            symbol="KEEP",
+            maker_markout_5s_median_bps=1.25,
+            eligible=True,
+        ),
+        Stage1Market(market_id=2, symbol="SKIP", eligible=False),
+    ]
+    result = merge_screening_and_full_results(
+        stage1,
+        {"scored": []},
+        hours=24,
+        start_ms=0,
+        end_ms=1,
+        stage1_elapsed=0.1,
+        stage2_elapsed=0.1,
+        selected_market_ids=[1],
+    )
+    payload = build_dashboard_payload(settings, hours=24, analysis_result=result)
+    by_id = {int(row["market_id"]): row for row in payload["markets"]}
+    assert by_id[1]["analysis_stage"] == "selected_incomplete"
+    assert by_id[1]["maker_markout_5s_median_bps"] == 1.25
+    assert by_id[2]["analysis_stage"] == "screened"
+    assert payload["latest"]["markets"] == 2
+    assert payload["latest"]["markets_analyzed"] == 0

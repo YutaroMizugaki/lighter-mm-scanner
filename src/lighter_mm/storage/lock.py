@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -61,6 +62,9 @@ class LeaderLock:
         self.holder_id = holder_id or uuid.uuid4().hex
         self.lease_seconds = lease_seconds
         self.cas_conflicts = 0
+        # Same-process renew (event-loop heartbeat vs to_thread sync) must not
+        # CAS-conflict with itself; GCS treats that as lost leadership.
+        self._op_lock = threading.Lock()
 
     def _lock_payload(self, run_id: str, git_sha: str | None) -> dict:
         info = LockInfo(
@@ -84,64 +88,69 @@ class LeaderLock:
         return holder != self.holder_id and exp > datetime.now(UTC)
 
     def acquire(self, run_id: str, git_sha: str | None = None) -> bool:
-        current = self.backend.download_json_with_generation(self.lock_key)
-        if self._is_held_by_other(current):
-            log.warning(
-                "leader lock held by %s until %s",
-                current.payload.get("holder_id") if current.payload else "?",
-                current.payload.get("expires_at") if current.payload else "?",
-                extra={"event": "leader_lock_busy"},
+        with self._op_lock:
+            current = self.backend.download_json_with_generation(self.lock_key)
+            if self._is_held_by_other(current):
+                log.warning(
+                    "leader lock held by %s until %s",
+                    current.payload.get("holder_id") if current.payload else "?",
+                    current.payload.get("expires_at") if current.payload else "?",
+                    extra={"event": "leader_lock_busy"},
+                )
+                return False
+            gen_match = 0 if current.payload is None else int(current.generation or 0)
+            payload = self._lock_payload(run_id, git_sha)
+            ok = self.backend.compare_and_swap_json(
+                self.lock_key, payload, if_generation_match=gen_match
             )
-            return False
-        gen_match = 0 if current.payload is None else int(current.generation or 0)
-        payload = self._lock_payload(run_id, git_sha)
-        ok = self.backend.compare_and_swap_json(
-            self.lock_key, payload, if_generation_match=gen_match
-        )
-        if not ok:
-            self.cas_conflicts += 1
-            log.debug(
-                "leader lock CAS conflict on acquire",
-                extra={"event": "leader_lock_cas_conflict", "run_id": run_id},
-            )
-        if ok:
-            log.info(
-                "leader lock acquired",
-                extra={"event": "leader_lock_acquired", "run_id": run_id},
-            )
-        return ok
+            if not ok:
+                self.cas_conflicts += 1
+                log.debug(
+                    "leader lock CAS conflict on acquire",
+                    extra={"event": "leader_lock_cas_conflict", "run_id": run_id},
+                )
+            if ok:
+                log.info(
+                    "leader lock acquired",
+                    extra={"event": "leader_lock_acquired", "run_id": run_id},
+                )
+            return ok
 
     def renew(self, run_id: str, git_sha: str | None = None) -> bool:
-        current = self.backend.download_json_with_generation(self.lock_key)
-        if not current.payload or current.payload.get("holder_id") != self.holder_id:
-            return False
-        if current.generation is None:
-            return False
-        payload = self._lock_payload(run_id, git_sha)
-        ok = self.backend.compare_and_swap_json(
-            self.lock_key, payload, if_generation_match=int(current.generation)
-        )
-        if not ok:
-            self.cas_conflicts += 1
-            log.debug(
-                "leader lock CAS conflict on renew",
-                extra={"event": "leader_lock_cas_conflict", "run_id": run_id},
+        with self._op_lock:
+            current = self.backend.download_json_with_generation(self.lock_key)
+            if not current.payload or current.payload.get("holder_id") != self.holder_id:
+                return False
+            if current.payload.get("released"):
+                return False
+            if current.generation is None:
+                return False
+            payload = self._lock_payload(run_id, git_sha)
+            ok = self.backend.compare_and_swap_json(
+                self.lock_key, payload, if_generation_match=int(current.generation)
             )
-        return ok
+            if not ok:
+                self.cas_conflicts += 1
+                log.debug(
+                    "leader lock CAS conflict on renew",
+                    extra={"event": "leader_lock_cas_conflict", "run_id": run_id},
+                )
+            return ok
 
     def release(self) -> None:
-        current = self.backend.download_json_with_generation(self.lock_key)
-        if not current.payload or current.payload.get("holder_id") != self.holder_id:
-            return
-        if current.generation is None:
-            return
-        existing = dict(current.payload)
-        existing["expires_at"] = datetime.now(UTC).isoformat()
-        existing["released"] = True
-        if self.backend.compare_and_swap_json(
-            self.lock_key, existing, if_generation_match=int(current.generation)
-        ):
-            log.info("leader lock released", extra={"event": "leader_lock_released"})
+        with self._op_lock:
+            current = self.backend.download_json_with_generation(self.lock_key)
+            if not current.payload or current.payload.get("holder_id") != self.holder_id:
+                return
+            if current.generation is None:
+                return
+            existing = dict(current.payload)
+            existing["expires_at"] = datetime.now(UTC).isoformat()
+            existing["released"] = True
+            if self.backend.compare_and_swap_json(
+                self.lock_key, existing, if_generation_match=int(current.generation)
+            ):
+                log.info("leader lock released", extra={"event": "leader_lock_released"})
 
 
 class LocalFileLock(LeaderLock):
